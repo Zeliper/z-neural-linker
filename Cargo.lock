@@ -5232,6 +5232,7 @@ dependencies = [
  "log",
  "nl-core",
  "parking_lot",
+ "pollster",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rayon",
@@ -5239,6 +5240,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "wgpu 29.0.4",
 ]
 
 [[package]]

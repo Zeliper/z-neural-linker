@@ -9,6 +9,8 @@ description = "burn 기반 런타임 정의 그래프 인터프리터 · 장치 
 nl-core = { path = "../nl-core" }
 burn = { workspace = true, features = ["std", "ndarray", "wgpu", "autodiff", "vulkan"] }
 safetensors.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
