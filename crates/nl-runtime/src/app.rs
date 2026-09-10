@@ -103,12 +103,9 @@ pub fn spawn_runner(
     base_dir: &Path,
     device: DevicePref,
 ) -> anyhow::Result<RunnerHandle> {
-    let runner = Runner {
-        project: project.clone(),
-        pipeline: pipeline.clone(),
-        base_dir: base_dir.to_path_buf(),
-        device,
-    };
+    // 배포 런타임은 사용자가 만든 앱이므로 마우스/키보드 싱크를 실제로 동작시킨다(빌더의 시험 실행은 기본 비무장).
+    let mut runner = Runner::new(project.clone(), pipeline.clone(), base_dir.to_path_buf(), device);
+    runner.arm_input = true;
     runner.start()
 }
 
