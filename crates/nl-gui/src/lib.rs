@@ -5,5 +5,5 @@ pub mod render;
 pub mod theme;
 
 pub use fonts::font_definitions;
-pub use render::{render_layout, GuiEvent, GuiState, RenderMode};
+pub use render::{format_value, render_layout, GuiEvent, GuiState, RenderMode};
 pub use theme::dark_visuals;

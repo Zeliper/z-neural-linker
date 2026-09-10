@@ -1,0 +1,609 @@
+//! nl-engine 통합 테스트. 공개 API 만 쓴다.
+//!
+//! GPU 경로는 `NL_TEST_GPU=1` 일 때만 돈다: `NL_TEST_GPU=1 cargo test -p nl-engine gpu`.
+
+use nl_core::dataset::{DataSource, SyntheticKind};
+use nl_core::model::{Act, Graph, LayerKind, ModelDef, Node, Port};
+use nl_core::shape;
+use nl_core::{DatasetSpec, DevicePref, Loss, Metric, Optimizer, RunId, RunRecord, RunStatus};
+use nl_engine::{HostTensor, Session, TrainEvent, TrainRequest};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+
+// ───────────────────────────── 도우미 ─────────────────────────────
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let p = std::env::temp_dir().join(format!("nl-engine-{}-{}-{}", tag, std::process::id(), n));
+    std::fs::create_dir_all(&p).expect("임시 폴더 생성");
+    p
+}
+
+fn add(g: &mut Graph, k: LayerKind) -> nl_core::NodeId {
+    g.add_node(Node::new(k, [0.0, 0.0]))
+}
+
+fn link(g: &mut Graph, a: nl_core::NodeId, b: nl_core::NodeId) {
+    g.add_edge(a, Port::new(b, 0)).expect("엣지 추가");
+}
+
+/// 일자형 그래프. 마지막 종류가 Output 이 아니면 Output 을 붙인다.
+fn chain(kinds: Vec<LayerKind>) -> ModelDef {
+    let mut def = ModelDef::new("t");
+    let g = &mut def.graph;
+    let mut prev = None;
+    for k in kinds {
+        let id = add(g, k);
+        if let Some(p) = prev {
+            link(g, p, id);
+        }
+        prev = Some(id);
+    }
+    let out = add(g, LayerKind::Output);
+    link(g, prev.expect("빈 그래프"), out);
+    def
+}
+
+fn mlp(input: usize, hidden: usize, output: usize) -> ModelDef {
+    chain(vec![
+        LayerKind::Input { shape: vec![input] },
+        LayerKind::Linear { out_features: hidden, bias: true },
+        LayerKind::Activation { act: Act::Relu },
+        LayerKind::Linear { out_features: output, bias: true },
+    ])
+}
+
+fn synthetic(kind: SyntheticKind, samples: usize) -> DatasetSpec {
+    DatasetSpec::new("syn", DataSource::Synthetic { kind, samples })
+}
+
+fn train_to_end(def: ModelDef, ds: DatasetSpec, dir: &Path) -> RunRecord {
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: ds,
+        base_dir: dir.to_path_buf(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let handle = nl_engine::start(req).expect("학습 스레드 시작");
+    while let Ok(ev) = handle.events.recv() {
+        match ev {
+            TrainEvent::Finished { run } => return run,
+            TrainEvent::Failed { error, .. } => panic!("학습 실패: {error}"),
+            _ => {}
+        }
+    }
+    panic!("Finished/Failed 이벤트 없이 이벤트 채널이 끊겼습니다 (학습 스레드 비정상 종료)");
+}
+
+/// 출력 노드의 샘플 형상(배치 제외)을 `shape::infer` 로 구한다.
+fn inferred_output_shape(def: &ModelDef) -> Vec<usize> {
+    let rep = shape::infer(&def.graph);
+    assert!(rep.errors.is_empty(), "형상 추론 오류: {:?}", rep.errors);
+    let out = def.graph.output_nodes()[0];
+    rep.shape(out).expect("출력 형상").sample()
+}
+
+fn run_once(def: &ModelDef, input: HostTensor) -> Vec<HostTensor> {
+    let mut s = Session::load(def, None, DevicePref::Cpu).expect("세션 생성");
+    s.run(&[input]).expect("추론")
+}
+
+// ───────────────────────────── (a) 형상 일치 ─────────────────────────────
+
+#[test]
+fn mlp_output_shape_matches_shape_infer() {
+    let def = mlp(4, 8, 3);
+    let want = inferred_output_shape(&def);
+    assert_eq!(want, vec![3]);
+    let out = run_once(&def, HostTensor::new(vec![5, 4], vec![0.1; 20]));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].shape, vec![5, 3]);
+}
+
+#[test]
+fn cnn_output_shape_matches_shape_infer() {
+    let def = chain(vec![
+        LayerKind::Input { shape: vec![1, 8, 8] },
+        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
+        LayerKind::BatchNorm { eps: 1e-5, momentum: 0.1 },
+        LayerKind::Activation { act: Act::Relu },
+        LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::AvgPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 3, bias: true },
+    ]);
+    let want = inferred_output_shape(&def);
+    assert_eq!(want, vec![3]);
+    let out = run_once(&def, HostTensor::new(vec![2, 1, 8, 8], vec![0.3; 128]));
+    assert_eq!(out[0].shape, vec![2, 3]);
+}
+
+#[test]
+fn residual_add_and_concat_output_shape_matches_shape_infer() {
+    let mut def = ModelDef::new("res");
+    let g = &mut def.graph;
+    let i = add(g, LayerKind::Input { shape: vec![8] });
+    let l = add(g, LayerKind::Linear { out_features: 8, bias: true });
+    let s = add(g, LayerKind::Add);
+    let c = add(g, LayerKind::Concat { dim: 0 });
+    let n = add(g, LayerKind::LayerNorm { eps: 1e-5 });
+    let o = add(g, LayerKind::Output);
+    link(g, i, l);
+    g.add_edge(l, Port::new(s, 0)).unwrap();
+    g.add_edge(i, Port::new(s, 1)).unwrap();
+    g.add_edge(s, Port::new(c, 0)).unwrap();
+    g.add_edge(i, Port::new(c, 1)).unwrap();
+    link(g, c, n);
+    link(g, n, o);
+
+    let want = inferred_output_shape(&def);
+    assert_eq!(want, vec![16]);
+    let out = run_once(&def, HostTensor::new(vec![3, 8], vec![0.5; 24]));
+    assert_eq!(out[0].shape, vec![3, 16]);
+}
+
+#[test]
+fn embedding_output_shape_matches_shape_infer() {
+    let def = chain(vec![
+        LayerKind::Input { shape: vec![4] },
+        LayerKind::Embedding { vocab: 10, dim: 6 },
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 3, bias: true },
+    ]);
+    let want = inferred_output_shape(&def);
+    assert_eq!(want, vec![3]);
+    let idx = HostTensor::new(vec![2, 4], vec![0.0, 1.0, 2.0, 3.0, 9.0, 8.0, 7.0, 6.0]);
+    let out = run_once(&def, idx);
+    assert_eq!(out[0].shape, vec![2, 3]);
+}
+
+#[test]
+fn mul_dropout_and_reshape_run_and_match_shapes() {
+    let mut def = ModelDef::new("mix");
+    let g = &mut def.graph;
+    let i = add(g, LayerKind::Input { shape: vec![4] });
+    let d = add(g, LayerKind::Dropout { p: 0.5 });
+    let m = add(g, LayerKind::Mul);
+    let r = add(g, LayerKind::Reshape { shape: vec![1, 2, 2] });
+    let gap = add(g, LayerKind::GlobalAvgPool);
+    let o = add(g, LayerKind::Output);
+    link(g, i, d);
+    g.add_edge(d, Port::new(m, 0)).unwrap();
+    g.add_edge(i, Port::new(m, 1)).unwrap();
+    link(g, m, r);
+    link(g, r, gap);
+    link(g, gap, o);
+
+    assert_eq!(inferred_output_shape(&def), vec![1]);
+    let out = run_once(&def, HostTensor::new(vec![2, 4], vec![1.0; 8]));
+    assert_eq!(out[0].shape, vec![2, 1]);
+    // 추론 모드에서는 Dropout 이 항등이라 결과는 1.0 이어야 한다.
+    for v in &out[0].data {
+        assert!((v - 1.0).abs() < 1e-5, "Dropout 이 추론에서 항등이 아님: {v}");
+    }
+}
+
+// ───────────────────────────── (b, d, e) XOR 학습 ─────────────────────────────
+
+struct XorRun {
+    dir: PathBuf,
+    def: ModelDef,
+    run: RunRecord,
+}
+
+fn xor_run() -> &'static XorRun {
+    static ONCE: OnceLock<XorRun> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let dir = temp_dir("xor");
+        let mut def = mlp(2, 16, 2);
+        def.train.loss = Loss::CrossEntropy;
+        def.train.metric = Metric::Accuracy;
+        def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+        def.train.epochs = 40;
+        def.train.batch_size = 64;
+        def.train.device = DevicePref::Cpu;
+        def.train.seed = 7;
+        let run = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
+        XorRun { dir, def, run }
+    })
+}
+
+#[test]
+fn xor_mlp_reaches_high_accuracy_on_cpu() {
+    let r = xor_run();
+    assert_eq!(r.run.status, RunStatus::Finished);
+    let last = r.run.last().expect("에포크 기록");
+    let acc = last.val_metric.expect("정확도");
+    assert!(acc >= 0.95, "XOR 정확도가 낮습니다: {acc} (train_loss {})", last.train_loss);
+    // 총 스텝 수가 수백 단위인지 (기대치 확인용).
+    assert!(r.run.epochs.len() == 40);
+}
+
+#[test]
+fn checkpoint_round_trip_gives_identical_outputs() {
+    let r = xor_run();
+    let ckpt = r.dir.join(r.run.checkpoint.as_ref().expect("체크포인트 경로"));
+    assert!(ckpt.exists(), "체크포인트 파일이 없습니다: {}", ckpt.display());
+
+    // 시드를 다르게 해도 같은 가중치를 얹으면 결과가 같아야 한다.
+    let mut a = r.def.clone();
+    a.train.seed = 1;
+    let mut b = r.def.clone();
+    b.train.seed = 999;
+
+    let x = HostTensor::new(vec![4, 2], vec![0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, -0.5]);
+    let mut sa = Session::load(&a, Some(&ckpt), DevicePref::Cpu).unwrap();
+    let mut sb = Session::load(&b, Some(&ckpt), DevicePref::Cpu).unwrap();
+    let inputs = [x];
+    let oa = sa.run(&inputs).unwrap();
+    let ob = sb.run(&inputs).unwrap();
+    assert_eq!(oa, ob);
+
+    // 이름·형상 요약도 읽혀야 한다.
+    let sum = nl_engine::checkpoint_summary(&ckpt).unwrap();
+    assert!(sum.iter().any(|(n, s)| n.ends_with(".weight") && s.len() == 2), "요약: {sum:?}");
+}
+
+#[test]
+fn session_infers_with_trained_checkpoint() {
+    let r = xor_run();
+    let ckpt = r.dir.join(r.run.checkpoint.as_ref().unwrap());
+    let mut s = Session::load(&r.def, Some(&ckpt), DevicePref::Cpu).unwrap();
+    assert!(!s.device_name().is_empty());
+    assert_eq!(s.input_sample_shapes(), &[vec![2]]);
+    assert_eq!(s.output_sample_shapes(), &[vec![2]]);
+
+    // XOR 의 네 모서리: (+,+)=0, (−,+)=1, (+,−)=1, (−,−)=0.
+    let x = HostTensor::new(vec![4, 2], vec![0.8, 0.8, -0.8, 0.8, 0.8, -0.8, -0.8, -0.8]);
+    let out = s.run(&[x]).unwrap();
+    assert_eq!(out[0].shape, vec![4, 2]);
+    assert_eq!(out[0].argmax_last(), vec![0, 1, 1, 0]);
+}
+
+// ───────────────────────────── (c) 회귀 수렴 ─────────────────────────────
+
+#[test]
+fn linear_regression_converges_below_mse_005() {
+    let dir = temp_dir("linreg");
+    let mut def = mlp(2, 32, 1);
+    def.train.loss = Loss::Mse;
+    def.train.metric = Metric::Mae;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 80;
+    def.train.batch_size = 64;
+    def.train.device = DevicePref::Cpu;
+    let run = train_to_end(def, synthetic(SyntheticKind::LinearRegression, 2048), &dir);
+    let last = run.last().unwrap();
+    let val = last.val_loss.expect("검증 손실");
+    assert!(val < 0.05, "MSE 가 수렴하지 않았습니다: val {val}, train {}", last.train_loss);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ───────────────────────────── (g) 옵티마이저 ─────────────────────────────
+
+#[test]
+fn every_optimizer_reduces_the_loss() {
+    let opts = [
+        Optimizer::Sgd { lr: 5e-2, momentum: 0.9 },
+        Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 },
+        Optimizer::AdamW { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 1e-2 },
+    ];
+    for opt in opts {
+        let dir = temp_dir("opt");
+        let mut def = mlp(2, 16, 2);
+        def.train.loss = Loss::CrossEntropy;
+        def.train.metric = Metric::Accuracy;
+        def.train.optimizer = opt;
+        def.train.epochs = 8;
+        def.train.batch_size = 64;
+        def.train.device = DevicePref::Cpu;
+        def.train.grad_clip = 1.0;
+        let run = train_to_end(def, synthetic(SyntheticKind::Xor, 1024), &dir);
+        let first = run.epochs.first().unwrap().train_loss;
+        let last = run.epochs.last().unwrap().train_loss;
+        assert!(last < first, "{} 이 손실을 줄이지 못했습니다: {first} → {last}", opt.label());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// ───────────────────────────── (h) 일시정지·중지 ─────────────────────────────
+
+#[test]
+fn pause_and_stop_control_the_run() {
+    let dir = temp_dir("stop");
+    let mut def = mlp(2, 16, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.epochs = 500; // 중지가 없으면 한참 돈다
+    def.train.batch_size = 32;
+    def.train.device = DevicePref::Cpu;
+
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: synthetic(SyntheticKind::Xor, 2048),
+        base_dir: dir.clone(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let h = nl_engine::start(req).unwrap();
+
+    // Started 와 Step 몇 개를 받을 때까지 기다린다.
+    let mut steps = 0;
+    while steps < 5 {
+        match h.events.recv_timeout(std::time::Duration::from_secs(30)).expect("이벤트") {
+            TrainEvent::Step { .. } => steps += 1,
+            TrainEvent::Failed { error, .. } => panic!("학습 실패: {error}"),
+            _ => {}
+        }
+    }
+
+    // 일시정지: 진행 중인 배치 하나만 더 오고 멈춰야 한다.
+    h.pause();
+    assert!(h.is_paused());
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    while h.events.try_recv().is_ok() {} // 밀린 이벤트를 비운다
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let leaked = std::iter::from_fn(|| h.events.try_recv().ok()).count();
+    assert!(leaked <= 1, "일시정지 뒤에도 이벤트가 {leaked} 개 왔습니다");
+
+    h.resume();
+    h.stop();
+
+    let mut run = None;
+    while let Ok(ev) = h.events.recv_timeout(std::time::Duration::from_secs(60)) {
+        match ev {
+            TrainEvent::Finished { run: r } => {
+                run = Some(r);
+                break;
+            }
+            TrainEvent::Failed { error, .. } => panic!("학습 실패: {error}"),
+            _ => {}
+        }
+    }
+    let run = run.expect("Finished 이벤트");
+    assert_eq!(run.status, RunStatus::Stopped, "중지했는데 상태가 {:?}", run.status);
+    assert!(run.checkpoint.is_some(), "중지해도 마지막 가중치는 저장되어야 합니다");
+    assert!(run.epochs.len() < 500);
+    assert!(h.is_done());
+    assert!(dir.join("run/run.json").exists(), "run.json 이 없습니다");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ───────────────────────────── 분할 · 이어서 학습 ─────────────────────────────
+
+#[test]
+fn separate_validation_source_is_used() {
+    let dir = temp_dir("split");
+    let mut def = mlp(2, 16, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.epochs = 5;
+    def.train.batch_size = 64;
+    def.train.device = DevicePref::Cpu;
+    def.train.val_split = 0.0; // 비율 분할은 끄고 별도 소스만 쓴다
+
+    let mut ds = synthetic(SyntheticKind::Xor, 512);
+    ds.split = nl_core::Split::Separate {
+        validation: Box::new(DataSource::Synthetic { kind: SyntheticKind::Xor, samples: 128 }),
+    };
+    let run = train_to_end(def, ds, &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    let last = run.last().unwrap();
+    assert!(last.val_loss.is_some(), "별도 검증 소스가 쓰이지 않았습니다");
+    assert!(last.val_metric.is_some());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn resume_from_checkpoint_starts_from_a_lower_loss() {
+    let dir = temp_dir("resume");
+    let mut def = mlp(2, 16, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 15;
+    def.train.batch_size = 64;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 3;
+
+    let first = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
+    let ckpt = dir.join(first.checkpoint.as_ref().unwrap());
+    assert!(ckpt.exists());
+
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: synthetic(SyntheticKind::Xor, 1024),
+        base_dir: dir.clone(),
+        run_dir: dir.join("run2"),
+        resume_from: Some(ckpt),
+    };
+    let h = nl_engine::start(req).unwrap();
+    let mut second = None;
+    while let Ok(ev) = h.events.recv() {
+        match ev {
+            TrainEvent::Finished { run } => {
+                second = Some(run);
+                break;
+            }
+            TrainEvent::Failed { error, .. } => panic!("이어서 학습 실패: {error}"),
+            _ => {}
+        }
+    }
+    let second = second.unwrap();
+    let a = first.epochs.first().unwrap().train_loss;
+    let b = second.epochs.first().unwrap().train_loss;
+    assert!(b < a, "이어서 학습한 첫 에포크 손실이 더 낮아야 합니다: 처음 {a}, 이어서 {b}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ───────────────────────────── 데이터 · 장치 ─────────────────────────────
+
+#[test]
+fn scan_reports_synthetic_shapes() {
+    let info = nl_engine::scan(&synthetic(SyntheticKind::Quadrants, 64), Path::new(".")).unwrap();
+    assert_eq!(info.samples, 64);
+    assert_eq!(info.input_shape, vec![1, 8, 8]);
+    assert_eq!(info.classes.len(), 4);
+
+    let p = nl_engine::preview(&synthetic(SyntheticKind::Spirals, 64), Path::new("."), 3).unwrap();
+    assert_eq!(p.len(), 3);
+    assert_eq!(p[0].input.shape, vec![2]);
+}
+
+#[test]
+fn device_list_starts_with_cpu() {
+    let list = nl_engine::enumerate();
+    assert_eq!(list[0].kind, nl_engine::DeviceKind::Cpu);
+    // Auto 는 GPU 를 실제로 돌려 보므로(= 느리다) 여기서 부르지 않는다 — gpu_auto_* 테스트가 맡는다.
+    let r = nl_engine::resolve(DevicePref::Cpu);
+    assert_eq!(r.pref, DevicePref::Cpu);
+    assert!(!r.info.name.is_empty());
+    println!("장치 목록: {list:#?}");
+}
+
+// ───────────────────────────── GPU (NL_TEST_GPU=1) ─────────────────────────────
+
+/// `Auto` 는 실제로 동작하는 장치를 골라야 한다. 드라이버가 깨진 GPU 는 건너뛴다.
+#[test]
+fn gpu_auto_picks_a_device_that_actually_works() {
+    if std::env::var("NL_TEST_GPU").as_deref() != Ok("1") {
+        eprintln!("NL_TEST_GPU=1 이 아니어서 건너뜁니다");
+        return;
+    }
+    let list = nl_engine::enumerate();
+    let chosen = nl_engine::resolve(DevicePref::Auto);
+    println!("Auto 가 고른 장치: {} ({:?})", chosen.info.name, chosen.pref);
+    for d in &list {
+        println!("  {}", nl_engine::describe(d.pref));
+    }
+
+    // 고른 장치는 검사를 통과했거나(=GPU) CPU 폴백이어야 한다.
+    match chosen.pref {
+        DevicePref::Cpu => {
+            // GPU 가 하나도 쓸 만하지 않았다는 뜻 — 전부 실패로 기록되어 있어야 한다.
+            for d in list.iter().skip(1) {
+                if matches!(d.kind, nl_engine::DeviceKind::DiscreteGpu | nl_engine::DeviceKind::IntegratedGpu) {
+                    assert!(
+                        matches!(nl_engine::probe_cached(d.pref), Some(Err(_))),
+                        "CPU 로 떨어졌는데 {} 가 실패로 기록되지 않았습니다",
+                        d.name
+                    );
+                }
+            }
+        }
+        p => {
+            assert!(nl_engine::probe(p).is_ok(), "Auto 가 검사에 실패한 장치를 골랐습니다");
+            let info = list.iter().find(|d| d.pref == p).unwrap();
+            assert_ne!(info.kind, nl_engine::DeviceKind::OtherGpu, "소프트웨어 래스터라이저는 후보가 아닙니다");
+        }
+    }
+
+    // 검사에 실패한 GPU 는 절대 고르지 않는다.
+    for d in list.iter().skip(1) {
+        if matches!(nl_engine::probe_cached(d.pref), Some(Err(_))) {
+            assert_ne!(chosen.pref, d.pref, "실패한 장치를 골랐습니다: {}", d.name);
+        }
+    }
+
+    // 고른 장치로 실제 학습이 되어야 한다.
+    let dir = temp_dir("gpu-auto");
+    let mut def = mlp(2, 16, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 10;
+    def.train.batch_size = 64;
+    def.train.device = DevicePref::Auto;
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 512), &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    println!("Auto 학습 장치 = {}", run.device_name);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// wgpu 어댑터를 이산 GPU 부터 차례로 시도한다. 하나라도 학습에 성공하면 통과이고,
+/// 실패한 어댑터는 이유와 함께 출력한다 (드라이버 문제를 숨기지 않으려고).
+#[test]
+fn gpu_xor_trains_on_wgpu() {
+    if std::env::var("NL_TEST_GPU").as_deref() != Ok("1") {
+        eprintln!("NL_TEST_GPU=1 이 아니어서 건너뜁니다");
+        return;
+    }
+    let mut gpus: Vec<_> = nl_engine::enumerate().into_iter().skip(1).collect();
+    assert!(!gpus.is_empty(), "NL_TEST_GPU=1 인데 wgpu 어댑터가 없습니다");
+    gpus.sort_by_key(|d| match d.kind {
+        nl_engine::DeviceKind::DiscreteGpu => 0,
+        nl_engine::DeviceKind::IntegratedGpu => 1,
+        _ => 2,
+    });
+    println!("wgpu 어댑터 목록: {gpus:#?}");
+
+    let mut failures = Vec::new();
+    for target in &gpus {
+        println!("→ 시도: {} ({:?}, {})", target.name, target.pref, target.backend);
+        let dir = temp_dir("gpu-xor");
+        let mut def = mlp(2, 16, 2);
+        def.train.loss = Loss::CrossEntropy;
+        def.train.metric = Metric::Accuracy;
+        def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+        def.train.epochs = 40;
+        def.train.batch_size = 64;
+        def.train.device = target.pref;
+        def.train.seed = 7;
+
+        match try_train(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir) {
+            Err(e) => {
+                println!("  실패: {e}");
+                failures.push(format!("{}: {e}", target.name));
+                std::fs::remove_dir_all(&dir).ok();
+            }
+            Ok(run) => {
+                assert_eq!(run.status, RunStatus::Finished);
+                assert!(!run.device_name.is_empty());
+                let acc = run.last().unwrap().val_metric.expect("정확도");
+                println!("  GPU 장치 = {}, 정확도 = {acc}", run.device_name);
+                assert!(acc >= 0.95, "GPU XOR 정확도가 낮습니다: {acc}");
+
+                // GPU 로 학습한 가중치를 GPU 세션에서 다시 쓴다.
+                let ckpt = dir.join(run.checkpoint.as_ref().unwrap());
+                let mut s = Session::load(&def, Some(&ckpt), target.pref).unwrap();
+                let x = HostTensor::new(vec![4, 2], vec![0.8, 0.8, -0.8, 0.8, 0.8, -0.8, -0.8, -0.8]);
+                let out = s.run(&[x]).unwrap();
+                assert_eq!(out[0].argmax_last(), vec![0, 1, 1, 0]);
+                std::fs::remove_dir_all(&dir).ok();
+                if !failures.is_empty() {
+                    println!("참고 — 실패한 어댑터: {failures:#?}");
+                }
+                return;
+            }
+        }
+    }
+    panic!("모든 wgpu 어댑터에서 학습에 실패했습니다: {failures:#?}");
+}
+
+/// 학습을 끝까지 돌리되 실패를 패닉이 아니라 `Err` 로 돌려준다 (GPU 어댑터 시도용).
+fn try_train(def: ModelDef, ds: DatasetSpec, dir: &Path) -> Result<RunRecord, String> {
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: ds,
+        base_dir: dir.to_path_buf(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let handle = nl_engine::start(req).map_err(|e| e.to_string())?;
+    while let Ok(ev) = handle.events.recv() {
+        match ev {
+            TrainEvent::Finished { run } => return Ok(run),
+            TrainEvent::Failed { error, .. } => return Err(error),
+            _ => {}
+        }
+    }
+    Err("Finished/Failed 없이 이벤트 채널이 끊겼습니다 (백엔드가 학습 스레드 밖에서 패닉)".into())
+}

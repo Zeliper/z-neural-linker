@@ -16,6 +16,7 @@ nl-io = { path = "../nl-io" }
 nl-gui = { path = "../nl-gui" }
 nl-bundle = { path = "../nl-bundle" }
 serde.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 log.workspace = true
@@ -25,5 +26,13 @@ zip.workspace = true
 image.workspace = true
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "glow", "links", "persistence", "wayland", "x11"] }
 egui_extras = { workspace = true, features = ["image"] }
+egui.workspace = true
 egui_plot.workspace = true
 winit.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+tempfile.workspace = true

@@ -12,3 +12,11 @@ pub use input::{perform, InputSim};
 pub use resources::{snapshot, ResourceSnapshot};
 pub use runner::{Runner, RunnerEvent, RunnerHandle};
 pub use screen::{capture, monitors, Frame, MonitorInfo};
+
+// 아래는 구현하면서 추가한 것. 기존 re-export 는 그대로 둔다.
+/// 키 이름 문자열 → `enigo::Key`. 파이프라인 편집기의 키 입력 검증에 쓴다.
+pub use input::parse_key;
+/// GUI 위젯 이벤트·수동 입력을 실행 중인 파이프라인에 넣는 통로.
+pub use runner::RunnerInput;
+/// 연결을 유지하는 화면 캡처기(반복 캡처용)와 실제로 쓰인 백엔드 이름.
+pub use screen::{Backend, Capturer};

@@ -5,9 +5,11 @@
 pub mod codec;
 pub mod data;
 pub mod device;
+pub mod exec;
 pub mod infer;
 pub mod tensor;
 pub mod train;
+pub mod weights;
 
 pub use codec::{decode, encode, Value};
 pub use data::{preview, scan, Sample};
@@ -15,3 +17,10 @@ pub use device::{enumerate, resolve, DeviceInfo, DeviceKind, Resolved};
 pub use infer::Session;
 pub use tensor::HostTensor;
 pub use train::{start, TrainEvent, TrainHandle, TrainRequest};
+
+// ── 아래는 스텁 계약에 더해진 항목 ──
+pub use data::{load_all, load_source};
+pub use device::{describe, probe, probe_cached, CpuB, GpuB};
+pub use exec::{param_name, DynTensor, Model};
+pub use train::checkpoint_summary;
+pub use weights::WEIGHTS_FORMAT;
