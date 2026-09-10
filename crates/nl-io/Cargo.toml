@@ -7,6 +7,7 @@ description = "화면 캡처 · 입력 시뮬레이션 · HTTP/WS/stdio · 자�
 
 [dependencies]
 nl-core = { path = "../nl-core" }
+nl-engine = { path = "../nl-engine" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

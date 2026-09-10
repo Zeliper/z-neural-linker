@@ -13,6 +13,8 @@ path = "src/main.rs"
 nl-core = { path = "../nl-core" }
 nl-engine = { path = "../nl-engine" }
 nl-io = { path = "../nl-io" }
+nl-gui = { path = "../nl-gui" }
+nl-bundle = { path = "../nl-bundle" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

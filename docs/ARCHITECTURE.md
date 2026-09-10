@@ -38,9 +38,11 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 |---|---|---|
 | `nl-core` | 프로젝트 문서 모델, 레이어 그래프, 형상 추론, 페이로드/데이터셋/파이프라인/GUI 레이아웃 스펙, op·undo·diff, 번들 포맷 | serde 만 |
 | `nl-engine` | burn 기반 **런타임 정의 그래프** 인터프리터, 장치 선택(CPU ndarray / GPU wgpu), 학습 루프(스레드 + 이벤트 채널), 체크포인트(safetensors), 추론 세션 | nl-core, burn |
-| `nl-io` | 화면 캡처(xcap), 입력 시뮬레이션(enigo), HTTP 호출(ureq), WebSocket/stdio 파이프라인 연결, 시스템/GPU 자원 조회 | nl-core |
+| `nl-io` | 화면 캡처(Linux: x11rb·wlr-screencopy, Windows: xcap), 입력 시뮬레이션(enigo), HTTP 호출(ureq), 자원 조회(sysinfo), **파이프라인 실행기 `Runner`** | nl-core, nl-engine |
+| `nl-gui` | 빌더 미리보기와 런타임이 공유하는 egui 요소: `GuiLayout` 렌더러, 한글 폰트, 테마 | nl-core, nl-engine, egui |
+| `nl-bundle` | `.nlapp` zip 읽기/쓰기, 런타임 바이너리 첨부, 배포 아카이브(tar.gz/zip) | nl-core, zip |
 | `nl-app` | 빌더 GUI | 위 전부 + eframe |
-| `nl-runtime` | 배포판 실행기(단일 바이너리 + 번들) | nl-core, nl-engine, nl-io, eframe |
+| `nl-runtime` | 배포판 실행기(단일 바이너리 + 번들) | nl-core, nl-engine, nl-io, nl-gui, nl-bundle, eframe |
 | `tools/uitest` | 헤드리스 sway GUI 테스트 하네스 (trust-pms 이식) | — |
 
 ## nl-core
@@ -94,14 +96,15 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   - `Sink::{MouseKeyboard{actions}, HttpCall{method, url, body_template, headers}, WebSocketSend{url}, StdoutJson,
     GuiWidget{widget}, File{path}, Log}`
   - `Logic::{Threshold, Debounce{ms}, Select{index}, Map{table}, Script(예약)}`
-- 실행기는 `nl-engine::pipeline::Runner` (틱 루프 + 스레드). 빌더의 "시험 실행"과 런타임이 같은 Runner 를 쓴다.
+- 실행기는 `nl-io::runner::Runner` (틱 루프 + 스레드; IO 어댑터와 `nl-engine::Session` 을 둘 다 보는 크레이트라 여기 둔다).
+  빌더의 "시험 실행"과 런타임이 같은 Runner 를 쓴다.
 
 ### GUI 레이아웃 (`gui.rs`)
 - `GuiLayout { window: WindowSpec, widgets: BTreeMap<WidgetId, Widget> }`,
   `Widget { kind: WidgetKind, rect, binding: Option<Binding>, style }`.
 - `WidgetKind::{Label, Button, Toggle, Slider{min,max}, TextInput, Image, Plot, Table, Group}`.
 - `Binding::{PipelineInput(PNodeId), PipelineOutput(PNodeId), ModelOutputField{model, field}, Action(ActionId)}`.
-- 렌더러 `nl-app::gui_render` 하나를 빌더 미리보기와 런타임이 공유한다(런타임은 편집 핸들만 끈다).
+- 렌더러 `nl_gui::render_layout(ui, layout, state, RenderMode::{Run, Design})` 하나를 빌더 디자이너와 런타임이 공유한다.
 
 ### 번들 (`bundle.rs`)
 - `.nlapp` = zip: `manifest.json`(이름·버전·대상 모델·진입 파이프라인·GUI), `project.json`, `weights/<model>.safetensors`, `assets/`.
@@ -136,12 +139,16 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   이미지/CSV/JSON ↔ 텐서를 오간다.
 
 ## nl-io
-- `screen::capture(region) -> RgbaImage` (xcap: X11/Wayland(포털)/Windows). Wayland 는 첫 호출 때 포털 권한 대화상자가 뜬다.
+- `screen::capture(region) -> Frame`. Linux 는 시스템 개발 라이브러리 없이 빌드되도록 순수 Rust 경로만 쓴다: X11(x11rb `GetImage`) →
+  wlroots(wlr-screencopy, `libwayshot` 기본 feature 끔). GNOME/KDE Wayland 는 M1 에서 xdg-desktop-portal(ashpd). Windows/macOS 는 xcap.
+  (xcap 의 Linux 백엔드는 libpipewire/EGL 개발 패키지를 요구해 제외했다.)
 - `input::{move_to, click, key, type_text}` (enigo). Wayland 에서는 `libei`/`xdo` 폴백. **안전장치**: 시뮬레이션은 사용자가
   파이프라인 실행을 켠 동안만, 그리고 `Esc` 를 길게 누르면 즉시 중단(킬 스위치).
 - `http::{call(method, url, headers, body) -> Response}` (ureq, 타임아웃 필수 — trust-pms 교훈).
 - `stream::{ws_connect, stdin_lines, stdout_json}`.
-- `resources::snapshot() -> { cpu: {cores, usage}, mem, gpus: [{name, backend, vram}] }` — 앱 상태바·자원 패널.
+- `resources::snapshot()` — CPU/메모리(sysinfo) + GPU 목록(`nl_engine::enumerate()` 가 진실). 앱 상태바·자원 패널.
+- `runner::Runner` — 파이프라인 틱 루프. `RunnerHandle { events, inputs, stop }`. GUI 위젯 이벤트는 `RunnerInput` 으로 들어가고
+  `Sink::GuiWidget` 값은 `RunnerEvent::Widget` 으로 나온다.
 
 ## nl-app
 
@@ -165,7 +172,7 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   명시) → 승인 시 백그라운드 다운로드(sha256 검증) → 진행률 → 재검사. 거부하면 그 도구가 필요 없는 산출물(zip/tar)로 대체.
 
 ### 빌드 (`build.rs`)
-- `BuildSpec { app_name, version, targets, entry_pipeline, gui, models, output_dir }` → 번들 생성 → 대상별 런타임에 첨부 →
+- `BuildSpec { app_name, version, targets, entry_pipeline, gui, models, output_dir }` → `nl_bundle::Bundle::to_zip` → 대상별 런타임에 `nl_bundle::attach` →
   Linux: `<name>-<ver>-linux-x86_64.tar.gz`(+ install.sh, .desktop, 아이콘), Windows: `<name>-<ver>-windows-x86_64.zip`
   (+ Inno Setup 이 있으면 `setup.exe`). 산출물 sha256 매니페스트(`latest.json`, trust-pms 형식) 함께 생성.
 

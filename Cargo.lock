@@ -5177,8 +5177,10 @@ dependencies = [
  "flate2",
  "image",
  "log",
+ "nl-bundle",
  "nl-core",
  "nl-engine",
+ "nl-gui",
  "nl-io",
  "rfd",
  "semver",
@@ -5189,6 +5191,19 @@ dependencies = [
  "ureq 3.4.1",
  "uuid",
  "winit",
+ "zip 6.0.0",
+]
+
+[[package]]
+name = "nl-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "nl-core",
+ "serde_json",
+ "sha2",
+ "tar",
  "zip 6.0.0",
 ]
 
@@ -5227,6 +5242,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nl-gui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "egui_plot",
+ "image",
+ "log",
+ "nl-core",
+ "nl-engine",
+]
+
+[[package]]
 name = "nl-io"
 version = "0.1.0"
 dependencies = [
@@ -5237,6 +5265,7 @@ dependencies = [
  "libwayshot",
  "log",
  "nl-core",
+ "nl-engine",
  "parking_lot",
  "serde",
  "serde_json",
@@ -5260,8 +5289,10 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "nl-bundle",
  "nl-core",
  "nl-engine",
+ "nl-gui",
  "nl-io",
  "serde",
  "serde_json",

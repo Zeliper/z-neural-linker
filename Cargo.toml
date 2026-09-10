@@ -4,6 +4,8 @@ members = [
     "crates/nl-core",
     "crates/nl-engine",
     "crates/nl-io",
+    "crates/nl-gui",
+    "crates/nl-bundle",
     "crates/nl-app",
     "crates/nl-runtime",
     "tools/uitest/vseat",

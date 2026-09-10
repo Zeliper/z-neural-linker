@@ -1,0 +1,15 @@
+[package]
+name = "nl-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "빌더 미리보기와 배포 런타임이 공유하는 egui 요소: GUI 레이아웃 렌더러 · 폰트 · 테마"
+
+[dependencies]
+nl-core = { path = "../nl-core" }
+nl-engine = { path = "../nl-engine" }
+egui.workspace = true
+egui_extras = { workspace = true, features = ["image"] }
+egui_plot.workspace = true
+image.workspace = true
+log.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "nl-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = ".nlapp 번들 읽기/쓰기 · 런타임 바이너리 첨부 · 배포 아카이브"
+
+[dependencies]
+nl-core = { path = "../nl-core" }
+serde_json.workspace = true
+anyhow.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+sha2.workspace = true
