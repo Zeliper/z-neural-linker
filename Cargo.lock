@@ -5168,6 +5168,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "crossbeam-channel",
+ "csv",
  "directories",
  "eframe",
  "egui_extras",
