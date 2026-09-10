@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-neural-linker">
+    <comment>Neural Linker project</comment>
+    <comment xml:lang="ko">Neural Linker 프로젝트</comment>
+    <glob pattern="*.nlproj"/>
+    <sub-class-of type="application/json"/>
+    <icon name="neural-linker"/>
+  </mime-type>
+</mime-info>

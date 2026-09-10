@@ -1,0 +1,28 @@
+[package]
+name = "nl-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "burn 기반 런타임 정의 그래프 인터프리터 · 장치 · 학습 · 체크포인트 · 추론"
+
+[dependencies]
+nl-core = { path = "../nl-core" }
+burn = { workspace = true, features = ["std", "ndarray", "wgpu", "autodiff", "vulkan"] }
+safetensors.workspace = true
+half.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+chrono.workspace = true
+csv.workspace = true
+image.workspace = true
+rand = "0.9"
+rand_chacha = "0.9"
+
+[features]
+default = []

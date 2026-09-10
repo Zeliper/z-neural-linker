@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Neural Linker
+GenericName=Project Scheduler
+Comment=노드 그래프 기반 프로젝트 일정 관리
+Exec=nl-app %f
+Icon=neural-linker
+Terminal=false
+Categories=Office;ProjectManagement;
+MimeType=application/x-neural-linker;
+StartupWMClass=neural-linker

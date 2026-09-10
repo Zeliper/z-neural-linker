@@ -1,0 +1,40 @@
+[package]
+name = "nl-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neural Linker 빌더 GUI (eframe/egui, glow)"
+
+[[bin]]
+name = "nl-app"
+path = "src/main.rs"
+
+[dependencies]
+nl-core = { path = "../nl-core" }
+nl-engine = { path = "../nl-engine" }
+nl-io = { path = "../nl-io" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+crossbeam-channel.workspace = true
+directories.workspace = true
+sha2.workspace = true
+semver.workspace = true
+ureq.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+image.workspace = true
+# glow = OpenGL 백엔드 (trust-pms 와 동일한 이유: wgpu 백엔드의 Vulkan ICD 폴백 중 repaint 유실).
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "glow", "links", "persistence", "wayland", "x11"] }
+egui_extras = { workspace = true, features = ["image"] }
+egui_plot.workspace = true
+winit.workspace = true
+rfd.workspace = true
+
+[dev-dependencies]
+egui_kittest = { workspace = true, features = ["eframe"] }

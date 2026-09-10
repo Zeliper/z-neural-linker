@@ -1,0 +1,6 @@
+/target
+/dist
+*.nlproj
+*.nlapp
+# OMC 세션 상태·계획 기록 (운영 산출물)
+/.omc/

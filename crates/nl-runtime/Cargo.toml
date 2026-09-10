@@ -1,0 +1,27 @@
+[package]
+name = "nl-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neural Linker 배포판 실행기 (번들 로드 · GUI · 파이프라인 · 추론)"
+
+[[bin]]
+name = "nl-runtime"
+path = "src/main.rs"
+
+[dependencies]
+nl-core = { path = "../nl-core" }
+nl-engine = { path = "../nl-engine" }
+nl-io = { path = "../nl-io" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+crossbeam-channel.workspace = true
+zip.workspace = true
+image.workspace = true
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "glow", "links", "persistence", "wayland", "x11"] }
+egui_extras = { workspace = true, features = ["image"] }
+egui_plot.workspace = true
+winit.workspace = true

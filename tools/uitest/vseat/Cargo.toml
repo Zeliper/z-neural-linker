@@ -1,0 +1,11 @@
+[package]
+name = "vseat"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "헤드리스 sway 시트에 가상 포인터·키보드를 상시 붙여 두는 테스트 도구"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }

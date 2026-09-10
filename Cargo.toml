@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nl-core",
+    "crates/nl-engine",
+    "crates/nl-io",
+    "crates/nl-app",
+    "crates/nl-runtime",
+    "tools/uitest/vseat",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+rayon = "1"
+# ML 엔진: burn 0.21 안정판. CPU = ndarray, GPU = wgpu(Vulkan/DX12/Metal — 드라이버 SDK 불필요)
+burn = { version = "0.21", default-features = false }
+safetensors = "0.8"
+half = "2"
+# GUI (trust-pms 와 동일 세대)
+eframe = { version = "0.36.1", default-features = false }
+egui = "0.36"
+egui_extras = "0.36"
+egui_plot = "0.37"
+egui_kittest = "0.36"
+winit = { version = "0.30", default-features = true }
+rfd = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# IO 어댑터
+# 화면 캡처: Windows 는 xcap, Linux 는 순수 Rust(x11rb + wlr-screencopy) — 시스템 개발 라이브러리 불필요
+xcap = "0.9"
+x11rb = { version = "0.14", features = ["randr"] }
+libwayshot = { version = "0.9", default-features = false, features = ["png"] }
+enigo = { version = "0.6", default-features = false }
+ureq = { version = "3", features = ["json"] }
+tungstenite = "0.30"
+tiny_http = "0.12"
+sysinfo = "0.39"
+csv = "1"
+directories = "6"
+sha2 = "0.10"
+semver = "1"
+zip = { version = "6", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# 디버그 빌드에서도 텐서 연산은 최적화 (학습 루프가 못 참을 만큼 느려지지 않게)
+[profile.dev.package."*"]
+opt-level = 2
