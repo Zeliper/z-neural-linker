@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name={{APP_NAME}}
+Comment=Neural Linker 로 만든 앱 ({{APP_VERSION}})
+Exec={{APP_SLUG}}
+Icon={{APP_SLUG}}
+Terminal=false
+Categories=Science;Utility;
+StartupWMClass=nl-runtime
