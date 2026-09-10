@@ -20,6 +20,10 @@ ureq.workspace = true
 tungstenite.workspace = true
 sysinfo.workspace = true
 
+[dev-dependencies]
+# 로컬 HTTP 왕복 시험용 서버
+tiny_http.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb.workspace = true
 libwayshot.workspace = true

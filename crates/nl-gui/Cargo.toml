@@ -13,3 +13,6 @@ egui_extras = { workspace = true, features = ["image"] }
 egui_plot.workspace = true
 image.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
