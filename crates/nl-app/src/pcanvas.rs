@@ -21,6 +21,10 @@ const NODE_GAP: f32 = 250.0;
 const ZOOM_MIN: f32 = 0.2;
 const ZOOM_MAX: f32 = 2.5;
 const FIT_MARGIN: f32 = 70.0;
+/// 새 `Source::HttpServer` 의 기본 주소·경로. 바깥에서 함부로 닿지 못하게 루프백에 연다.
+pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8787";
+/// 기본 요청 경로.
+pub const DEFAULT_HTTP_PATH: &str = "/infer";
 
 const COL_BG: Color32 = Color32::from_rgb(0x16, 0x18, 0x1c);
 const COL_GRID: Color32 = Color32::from_rgb(0x21, 0x24, 0x2a);
@@ -62,6 +66,7 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
             Source::Timer { interval_ms } => format!("{interval_ms}ms 마다"),
             Source::GuiEvent { widget } => format!("위젯 {}", widget.short()),
             Source::Manual => "인스펙터에서 값 보내기".into(),
+            Source::HttpServer { bind, path } => format!("{bind}{path}"),
         },
         PNodeKind::Model { model, payload } => {
             let name = project.models.get(model).map(|m| m.name.clone()).unwrap_or_else(|| "(없는 모델)".into());
@@ -87,6 +92,7 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
                 format!("{}{}", crate::views::short_path(path), if *append { " (덧붙임)" } else { "" })
             }
             Sink::Log => "로그".into(),
+            Sink::HttpReply { server } => format!("← 서버 {}", server.short()),
         },
     }
 }
@@ -671,6 +677,7 @@ pub fn source_palette() -> Vec<Source> {
         Source::StdinJson,
         Source::File { path: "input.json".into(), interval_ms: 1000 },
         Source::GuiEvent { widget: WidgetId::from_u128(0) },
+        Source::HttpServer { bind: DEFAULT_HTTP_BIND.into(), path: DEFAULT_HTTP_PATH.into() },
     ]
 }
 
@@ -698,6 +705,7 @@ pub fn sink_palette() -> Vec<Sink> {
         },
         Sink::WebSocketSend { url: "wss://example.com/ws".into() },
         Sink::MouseKeyboard { actions: vec![nl_core::InputAction::None], cooldown_ms: 200 },
+        Sink::HttpReply { server: PNodeId::from_u128(0) },
     ]
 }
 
@@ -974,9 +982,9 @@ mod tests {
 
     #[test]
     fn palettes_cover_every_variant() {
-        assert_eq!(source_palette().len(), 8, "Source 변형 8종");
+        assert_eq!(source_palette().len(), 9, "Source 변형 9종");
         assert_eq!(logic_palette().len(), 5, "Logic 변형 5종");
-        assert_eq!(sink_palette().len(), 7, "Sink 변형 7종");
+        assert_eq!(sink_palette().len(), 8, "Sink 변형 8종");
         // 라벨이 겹치면 팔레트에서 구분되지 않는다.
         let mut labels: Vec<&str> = source_palette()
             .into_iter()

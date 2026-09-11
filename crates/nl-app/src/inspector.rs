@@ -3,7 +3,7 @@
 //! 타이핑·드래그는 `&mut` 로 문서를 직접 고치고 `DocState::note_edited` 로 burst 에 모은다
 //! (1초 무입력 → undo 한 항목). 구조가 바뀌는 편집만 op 로 보낸다.
 
-use crate::app::NlApp;
+use crate::app::{view_ctx, NlApp};
 use crate::canvas::Selection;
 use crate::pcanvas::LiveView;
 use crate::views::{self, parse_shape_text, shape_text, ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_WARN, COL_WEAK};
@@ -68,20 +68,6 @@ impl NlApp {
             .inner
     }
 
-    /// 새 뷰들이 쓰는 읽기 전용 컨텍스트. 필드 단위로 빌려서 `&mut self.views` 와 겹치지 않는다.
-    fn inspector_ctx(&self, live_now: f64) -> ViewCtx<'_> {
-        ViewCtx {
-            project: &self.doc.project,
-            selection: self.sel.primary,
-            devices: &self.devices,
-            base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
-            training: self.training.as_ref(),
-            monitors: &self.monitors,
-            monitors_error: self.monitors_error.as_deref(),
-            now: live_now,
-        }
-    }
-
     fn inspect_pnode(
         &mut self,
         ui: &mut egui::Ui,
@@ -94,16 +80,7 @@ impl NlApp {
             Some(r) => &r.live,
             None => &empty,
         };
-        let ctx = ViewCtx {
-            project: &self.doc.project,
-            selection: self.sel.primary,
-            devices: &self.devices,
-            base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
-            training: self.training.as_ref(),
-            monitors: &self.monitors,
-            monitors_error: self.monitors_error.as_deref(),
-            now,
-        };
+        let ctx = view_ctx!(self, now);
         views::pipeline::inspect_node(ui, &ctx, &mut self.views.pipeline, pid, nid, live)
     }
 
@@ -114,21 +91,12 @@ impl NlApp {
         lid: nl_core::LinkId,
         now: f64,
     ) -> Vec<ViewAction> {
-        let ctx = self.inspector_ctx(now);
+        let ctx = view_ctx!(self, now);
         views::pipeline::inspect_link(ui, &ctx, pid, lid)
     }
 
     fn inspect_gui_widget(&mut self, ui: &mut egui::Ui, id: nl_core::WidgetId, now: f64) -> Vec<ViewAction> {
-        let ctx = ViewCtx {
-            project: &self.doc.project,
-            selection: self.sel.primary,
-            devices: &self.devices,
-            base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
-            training: self.training.as_ref(),
-            monitors: &self.monitors,
-            monitors_error: self.monitors_error.as_deref(),
-            now,
-        };
+        let ctx = view_ctx!(self, now);
         views::gui::inspect_widget(ui, &ctx, id, &self.gui_state)
     }
 
