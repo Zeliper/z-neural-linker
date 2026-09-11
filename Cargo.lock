@@ -8307,8 +8307,11 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.2",
+ "rustls",
+ "rustls-pki-types",
  "sha1 0.11.0",
  "thiserror 2.0.20",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

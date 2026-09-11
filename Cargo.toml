@@ -54,7 +54,9 @@ enigo = { version = "0.6", default-features = false }
 # default = ["async-io", "blocking-api"] 그대로 쓴다(블로킹 API, tokio 없음).
 zbus = "5"
 ureq = { version = "3", features = ["json"] }
-tungstenite = "0.30"
+# WebSocket 소스/싱크. rustls TLS 로 wss:// 지원 — 시스템 개발 라이브러리 불필요
+# (webpki-roots 내장 인증서를 쓰므로 OS 인증서 저장소도 필요 없다).
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tiny_http = "0.12"
 sysinfo = "0.39"
 csv = "1"
