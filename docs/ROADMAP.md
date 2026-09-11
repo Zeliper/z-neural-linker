@@ -2,18 +2,27 @@
 
 2026-09-10 시작. 설계는 `docs/ARCHITECTURE.md`. 각 마일스톤은 "빌더에서 만들고 배포판에서 도는" 수직 조각을 하나씩 늘린다.
 
-## M0 — 뼈대와 첫 수직 조각 (진행 중)
+## M0 — 뼈대와 첫 수직 조각 (2026-09-10~11, 진행 중)
 - [x] 워크스페이스·문서·`nl-core` 데이터 모델 계약
-- [ ] `nl-core`: 그래프 op/undo/diff, 형상 추론, 검증, 직렬화 왕복 테스트
-- [ ] `nl-engine`: burn 인터프리터(Input/Linear/Conv2d/Pool/Flatten/Activation/Dropout/BatchNorm/Add/Concat/Output),
-      CPU(ndarray)/GPU(wgpu) 장치 선택, 학습 루프(SGD/Adam/AdamW, MSE/CrossEntropy/BCE), safetensors 체크포인트, 추론 세션
-- [ ] `nl-io`: 자원 조회, 화면 캡처, 입력 시뮬레이션, HTTP 호출 — 최소 API
-- [ ] `nl-app`: 프로젝트 관리(새로/열기/저장/최근), 모델 캔버스, 인스펙터, 학습 뷰(손실 플롯), 자원 패널, 빌드 뷰(Linux tar.gz)
-- [ ] `nl-runtime`: 번들 로드 + GUI 레이아웃 렌더 + 추론
-- [ ] `tools/uitest` 이식(app_id `neural-linker`), egui_kittest 헤드리스 렌더 테스트
-- [ ] 패키징(`packaging/linux`, `packaging/windows`) 이식
+- [x] `nl-core`: 그래프 op/undo/diff, 형상 추론, 검증, 직렬화 왕복 테스트 (22)
+- [x] `nl-engine`: burn 0.21 인터프리터(LayerKind 17종), CPU(ndarray)/GPU(wgpu) + `probe` 기반 Auto, 학습 루프(SGD/Adam/AdamW ×
+      MSE/CrossEntropy/BCE/MAE), safetensors 체크포인트, 추론 세션, 데이터 로더(합성/CSV/이미지 폴더/녹화), codec (34)
+- [x] `nl-io`: 자원 조회, 화면 캡처(X11·wlroots), 입력 시뮬레이션, HTTP, 파이프라인 Runner (44)
+- [x] `nl-gui` 렌더러 · `nl-bundle` 번들/첨부/아카이브 · `nl-runtime` 실행기(`--headless --run-for`) (37)
+- [x] `nl-app` 1차: 프로젝트 관리, 모델 캔버스, 인스펙터, 데이터/학습/자원 뷰, 샘플 (65)
+- [ ] `nl-app` 2차: 파이프라인 뷰(시험 실행·입력 무장·킬 스위치), GUI 디자이너(바인딩·미리보기), 빌드 뷰(도구 상태·동의 모달·tar.gz/zip·latest.json)
+- [x] `tools/uitest` 이식(app_id `neural-linker`), egui_kittest 헤드리스 렌더 테스트
+- [x] 패키징(`packaging/linux`, `packaging/windows`) 이식
+
+### 환경에서 확인된 사실 (2026-09-10)
+- 이 개발 PC 의 RTX 2060 은 오픈소스 NVK 드라이버라 wgpu 컴퓨트가 죽는다(`Parent device is lost`). Auto 는 probe 로 걸러 Intel UHD 630 을
+  고른다. NVIDIA 공식 드라이버를 깔면 RTX 로 잡힌다.
+- 이 PC 의 실제 세션은 KDE Plasma 6 Wayland → wlr-screencopy·X11 GetImage 둘 다 불가. **xdg-desktop-portal 경로가 M1 최우선**(아래).
 
 ## M1 — 데이터·페이로드·파이프라인
+- **화면 캡처 (KDE/GNOME Wayland)**: ① `org.freedesktop.portal.Screenshot`(zbus, 순수 Rust, 낮은 fps) — 진행 중,
+  ② `ScreenCast` + pipewire(고 fps; 빌드 머신에 `pipewire-devel` 필요 → optional feature `pipewire`)
+- WebSocket 소스/싱크, 녹화 기능(화면 + 입력 이벤트 라벨 → `Recorded` 데이터셋)
 - 데이터셋: CSV, 이미지 폴더, 녹화(화면 + 입력 라벨) 가져오기와 미리보기
 - 페이로드 편집기(필드·Transform 체인), 인코더/디코더 실행(`codec`)
 - 파이프라인 캔버스: 화면 캡처 → 모델 → 마우스/키보드, HTTP 폴링 → 모델 → HTTP 호출, stdio JSON 연결
