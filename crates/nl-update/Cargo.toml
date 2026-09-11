@@ -1,0 +1,21 @@
+[package]
+name = "nl-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "자동 업데이트 코어: 매니페스트 확인 · 서명 검증 · 스트리밍 다운로드 · 적용 (GUI 무의존)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+semver.workspace = true
+sha2.workspace = true
+ureq.workspace = true
+minisign-verify.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tiny_http.workspace = true
