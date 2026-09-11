@@ -17,28 +17,62 @@ packaging/linux/install.sh --uninstall
 Inno Setup 6 로 `packaging/windows/neural-linker.iss` 를 컴파일한다 (`iscc /DAppVersion=0.2.0 neural-linker.iss`).
 사용자 단위(`%LOCALAPPDATA%\Programs\Neural Linker`, UAC 없음)로 설치하며 `.nlproj` 연결(`NeuralLinker.Project`)을 HKCU 에 등록하고, 설치·업데이트 뒤 앱을 다시 띄운다.
 
-## Windows 런타임을 Linux 에서 만들기
+### 콘솔 출력
+두 실행 파일 모두 릴리스 빌드에서 `windows_subsystem = "windows"` 다 — 창만 뜨고 검은 콘솔이 같이 뜨지 않는다.
+그 대가로 GUI 서브시스템 프로세스는 표준 출력이 갈 곳이 없어, 명령 프롬프트에서 `nl-runtime.exe --version` 을
+쳐도 아무것도 보이지 않는다.
 
-배포 앱의 Windows 산출물은 `nl-runtime.exe` 에 번들을 붙여 만든다. 그 `nl-runtime.exe` 자체는
-**Linux 에서 관리자 권한 없이** 크로스 빌드할 수 있다 (2026-09-11 이 저장소에서 실측).
+`nl-runtime` 은 `--version`·`--help`·`--headless`·인자 오류·파일을 인자로 준 실행처럼 **터미널에서 부른 것이
+분명한 경로에서만** `AttachConsole(ATTACH_PARENT_PROCESS)` 로 부모 콘솔에 붙는다(`crates/nl-runtime/src/console.rs`).
+- 이미 있는 콘솔에 붙기만 하고 **새로 만들지 않는다** — 탐색기에서 더블클릭하면 조용히 지나간다.
+- 붙은 뒤 표준 핸들이 비어 있으면 `CONOUT$`/`CONIN$` 를 열어 꽂는다. 이미 리다이렉트돼 있으면(`> out.txt`)
+  건드리지 않아 파이프와 리다이렉트가 그대로 동작한다.
+- 창을 띄우는 경로에서는 부르지 않는다.
+
+`nl-app` 은 아직 이 처리를 하지 않는다.
+
+## Windows 산출물을 Linux 에서 만들기
+
+배포 앱의 Windows 산출물은 `nl-runtime.exe` 에 번들을 붙여 만든다. **빌더(`nl-app.exe`)와 런타임 둘 다**
+Linux 에서 관리자 권한 없이 크로스 빌드할 수 있다 (2026-09-11 이 저장소에서 실측).
 
 ```sh
 cargo install cargo-xwin --locked
 rustup target add x86_64-pc-windows-msvc
 cargo xwin build --release -p nl-runtime --target x86_64-pc-windows-msvc
-# → target/x86_64-pc-windows-msvc/release/nl-runtime.exe
+cargo xwin build --release -p nl-app     --target x86_64-pc-windows-msvc
+# → target/x86_64-pc-windows-msvc/release/{nl-runtime.exe, nl-app.exe}
 mkdir -p runtimes/x86_64-pc-windows-msvc
 cp target/x86_64-pc-windows-msvc/release/nl-runtime.exe runtimes/x86_64-pc-windows-msvc/
 ```
 
 `cargo-xwin` 이 Microsoft 의 Windows SDK·CRT 를 `~/.cache/cargo-xwin` 에 내려받는다. Visual Studio 는 필요 없다.
 
-| 실측값 | |
-| --- | --- |
-| 산출물 | 53.7 MB, `PE32+ executable for MS Windows 6.00 (GUI), x86-64` |
-| 처음 빌드 | 15분 남짓 (SDK 내려받기 1.2 GB 포함) |
-| 디스크 | 약 3 GB (SDK 캐시 1.2 GB + `target/x86_64-pc-windows-msvc` 1.9 GB) |
-| 확인 | wine 에서 `--version`, 번들 첨부본의 `--headless --run-for 1` 까지 동작 |
+| 실측값 | `nl-runtime.exe` | `nl-app.exe` |
+| --- | --- | --- |
+| 크기 | 53.7 MB | 61.3 MB |
+| 형식 | `PE32+ ... (GUI), x86-64` | 같음 |
+| 빌드 | 처음 15분 (SDK 1.2 GB 포함) | 의존 캐시가 있으면 3분 30초 |
+| wine `--version` | `nl-runtime 0.1.0` | `neural-linker 0.1.0` |
+| wine 창 | 해당 없음(헤드리스) | **안 뜸** — 아래 참고 |
+
+디스크는 둘 합쳐 약 3 GB (SDK 캐시 1.2 GB + `target/x86_64-pc-windows-msvc` 1.9 GB).
+`rfd`·`winit`·`glow`·`directories`·`open` 을 포함해 컴파일에 손댈 곳은 없었다.
+
+번들 첨부까지 종단 확인했다: 크로스 빌드한 exe 에 번들을 붙이고 다시 읽은 뒤
+wine 에서 `--headless --run-for 1` 로 파이프라인이 돌고 멈추는 것까지 봤다.
+
+### wine 에서 창이 뜨지 않는 것
+`nl-app.exe` 는 wine 에서 실행되고 winit 초기화까지 가지만 OpenGL 컨텍스트를 만들지 못하고 끝난다.
+
+```
+Found no glutin configs matching the template: ... os error 14007
+```
+
+wine 의 WGL 이 호스트 GL 을 찾지 못해서다. 헤드리스 sway 안(Xwayland 꺼짐)이라 `winewayland.drv` 만 쓸 수
+있고, `LIBGL_ALWAYS_SOFTWARE=1`·`GALLIUM_DRIVER=llvmpipe` 로도 달라지지 않았다. **바이너리 문제가 아니다** —
+같은 하네스에서 Linux 네이티브 `nl-app` 은 정상으로 그려진다. 실제 Windows 나 Xwayland 가 있는 wine 에서
+다시 확인해야 한다.
 
 ### 준비물
 
@@ -73,6 +107,18 @@ chmod +x ~/.local/bin/lld-link
 
 Windows 빌드 기계가 따로 있거나 이 경로가 막히면 GitHub Actions 의 `windows-latest` 러너에서 빌드해
 `runtimes/` 에 내려받는 방법도 있다 — 다만 지금은 크로스 빌드가 되므로 필요하지 않다.
+
+### Inno Setup 설치 프로그램 만들기 (미확인)
+`nl_bundle::windows_installer()` 가 만드는 `.iss` 를 실제로 컴파일하려면 Inno Setup 6 이 필요하다.
+`install_inno_setup_plan()` 이 가리키는 `jrsoftware.org` 가 **이 개발 환경에서는 막혀 있어**(crates.io·
+Microsoft 는 열려 있는데 이 호스트만 시간 초과) 내려받기·설치·실컴파일을 아직 확인하지 못했다.
+네트워크가 되는 곳에서 다음을 확인해야 한다.
+
+1. `install_inno_setup_plan()` → `run_tool_plan` 으로 `~/.cache/neural-linker/tools` 에 설치
+   (Linux 는 `wine innosetup-6.exe /VERYSILENT`).
+2. `find_inno_setup()` 이 wine 접두사 안의 `ISCC.exe` 를 찾는지.
+3. `windows_installer()` 가 실제 `setup.exe` 를 만들고, 그것을 `/VERYSILENT /NORESTART` 로 돌리면
+   `%LOCALAPPDATA%\Programs\<이름>\` 에 exe 가 놓이는지.
 
 ## 업데이트
 
