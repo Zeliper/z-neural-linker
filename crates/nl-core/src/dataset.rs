@@ -3,10 +3,20 @@
 use crate::ids::{DatasetId, PayloadId};
 use serde::{Deserialize, Serialize};
 
+/// 데이터 소스.
+///
+/// # 모델 Input 이 여럿일 때
+///
+/// 샘플의 입력은 하나의 평탄한 텐서다. 모델 Input 이 여럿이면 엔진이 이를 `Graph::input_nodes()`
+/// 순서(이름 → id)대로 각 Input 의 원소 수만큼 앞에서부터 잘라 넣는다.
+/// `Csv` 라면 `input_cols` 가 그 순서를 정한다 — 예를 들어 Input 이 `[2]`, `[3]` 이면
+/// `input_cols` 는 5 개여야 하고 앞 2 개가 첫 Input, 뒤 3 개가 두 번째 Input 으로 간다.
+/// Input 이 하나면 데이터 형상이 그 Input 형상과 **정확히** 같아야 한다.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DataSource {
     /// CSV. 열 이름(헤더) 또는 0 기반 번호 문자열.
+    /// 다입력 모델에서는 `input_cols` 순서가 Input 노드 순서로 매핑된다(위 설명 참고).
     Csv { path: String, input_cols: Vec<String>, target_cols: Vec<String>, #[serde(default = "yes")] header: bool },
     /// `path/<class>/*.png|jpg`. 클래스 = 하위 폴더 이름(정렬 순).
     ImageFolder { path: String },

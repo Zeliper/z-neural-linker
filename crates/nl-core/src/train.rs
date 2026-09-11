@@ -107,6 +107,50 @@ impl Metric {
     }
 }
 
+/// 학습률 스케줄. 적용은 `nl-engine::train`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum LrSchedule {
+    /// 고정 학습률.
+    #[default]
+    None,
+    /// `every` 에포크마다 `gamma` 를 곱한다.
+    Step { every: usize, gamma: f64 },
+    /// 전체 에포크에 걸쳐 기본 학습률 → `min_lr` 로 코사인 감쇠.
+    Cosine { min_lr: f64 },
+    /// 검증 손실이 `patience` 에포크 동안 나아지지 않으면 `factor` 를 곱한다.
+    Plateau { patience: usize, factor: f64 },
+}
+
+impl LrSchedule {
+    /// 팔레트에 보이는 기본 인스턴스 (종류당 하나).
+    pub const ALL: [LrSchedule; 4] = [
+        LrSchedule::None,
+        LrSchedule::Step { every: 10, gamma: 0.5 },
+        LrSchedule::Cosine { min_lr: 1e-5 },
+        LrSchedule::Plateau { patience: 5, factor: 0.5 },
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            LrSchedule::None => "없음",
+            LrSchedule::Step { .. } => "단계 감쇠",
+            LrSchedule::Cosine { .. } => "코사인",
+            LrSchedule::Plateau { .. } => "정체 시 감쇠",
+        }
+    }
+
+    /// 인스펙터용 짧은 요약.
+    pub fn summary(&self) -> String {
+        match self {
+            LrSchedule::None => String::new(),
+            LrSchedule::Step { every, gamma } => format!("{every} 에포크마다 ×{gamma}"),
+            LrSchedule::Cosine { min_lr } => format!("→ {min_lr}"),
+            LrSchedule::Plateau { patience, factor } => format!("{patience} 에포크 정체 시 ×{factor}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrainConfig {
     #[serde(default)]
@@ -134,6 +178,16 @@ pub struct TrainConfig {
     /// 그래디언트 클리핑 노름 (0 = 없음).
     #[serde(default)]
     pub grad_clip: f64,
+    /// 학습률 스케줄.
+    #[serde(default)]
+    pub schedule: LrSchedule,
+    /// 검증 손실이 이 에포크 수 동안 나아지지 않으면 학습을 멈춘다 (0 = 끄기).
+    /// 검증 집합이 없으면 무시된다.
+    #[serde(default)]
+    pub early_stop_patience: usize,
+    /// 처음 N 스텝 동안 학습률을 0 → 기본값으로 선형 증가 (0 = 끄기).
+    #[serde(default)]
+    pub warmup_steps: usize,
 }
 
 fn d_epochs() -> usize {
@@ -163,6 +217,9 @@ impl Default for TrainConfig {
             val_split: d_val(),
             checkpoint_every: 0,
             grad_clip: 0.0,
+            schedule: LrSchedule::None,
+            early_stop_patience: 0,
+            warmup_steps: 0,
         }
     }
 }
@@ -186,6 +243,9 @@ pub struct EpochMetrics {
     /// 에포크 소요 초.
     #[serde(default)]
     pub seconds: f64,
+    /// 이 에포크의 마지막 스텝에 쓴 학습률 (스케줄·워밍업 반영).
+    #[serde(default)]
+    pub lr: Option<f64>,
 }
 
 /// 학습 실행 한 번의 기록. 프로젝트에 남아 모델 관리(비교·되돌리기)의 단위가 된다.
