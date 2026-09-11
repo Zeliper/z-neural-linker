@@ -34,6 +34,16 @@ pub struct BundleManifest {
     /// 파이프라인을 자동으로 시작할지 (false 면 GUI 의 시작 버튼/액션으로).
     #[serde(default)]
     pub autostart: bool,
+    /// 배포 앱의 업데이트 매니페스트(`latest.json`) 주소. 없으면 자동 업데이트를 끈다.
+    /// 실행할 때 `NL_UPDATE_URL` 환경 변수가 우선한다.
+    #[serde(default)]
+    pub update_url: Option<String>,
+    /// 매니페스트 서명 검증에 쓸 minisign 공개키. 없으면 검증을 건너뛴다(경고 로그).
+    #[serde(default)]
+    pub update_public_key: Option<String>,
+    /// 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,6 +64,119 @@ impl BundleManifest {
             models: vec![],
             default_device: DevicePref::Auto,
             autostart: true,
+            update_url: None,
+            update_public_key: None,
+            auto_update: false,
+        }
+    }
+}
+
+// ───────────────────────────── 빌드 설정 ─────────────────────────────
+
+/// 배포 산출물을 만들 대상 플랫폼. `nl_bundle::Target` 과 1:1 이지만, nl-core 는 nl-bundle 에
+/// 의존하지 않으므로 여기에 직렬화 가능한 형태로 따로 둔다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum BuildTarget {
+    LinuxX64,
+    WindowsX64,
+}
+
+impl BuildTarget {
+    pub const ALL: [BuildTarget; 2] = [BuildTarget::LinuxX64, BuildTarget::WindowsX64];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BuildTarget::LinuxX64 => "Linux x86_64",
+            BuildTarget::WindowsX64 => "Windows x86_64",
+        }
+    }
+
+    pub fn triple(&self) -> &'static str {
+        match self {
+            BuildTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
+            BuildTarget::WindowsX64 => "x86_64-pc-windows-msvc",
+        }
+    }
+}
+
+/// 빌드 설정. 프로젝트 문서에 남아 다시 열어도 같은 산출물을 만든다.
+/// 편집은 `Op::SetSettings` 로 들어가므로 되돌리기도 다른 편집과 똑같이 동작한다.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BuildSpec {
+    /// 배포 앱 이름. 파일 이름에는 슬러그로 접혀 들어간다.
+    pub app_name: String,
+    pub app_version: String,
+    #[serde(default)]
+    pub targets: Vec<BuildTarget>,
+    /// 시작 시 자동 실행할 파이프라인.
+    #[serde(default)]
+    pub entry_pipeline: Option<PipelineId>,
+    #[serde(default = "yes")]
+    pub autostart: bool,
+    #[serde(default)]
+    pub default_device: DevicePref,
+    /// 번들에 넣을 모델. 가중치가 있는 모델만 뜻이 있다.
+    #[serde(default)]
+    pub models: Vec<ModelId>,
+    /// 산출물 폴더 (프로젝트 폴더 기준 상대 경로 또는 절대 경로). 없으면 `dist`.
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    /// 앱 아이콘 PNG (프로젝트 폴더 기준 상대 경로 또는 절대 경로).
+    /// Linux 아카이브에는 정사각 PNG 로, Windows 설치 프로그램에는 `.ico` 로 들어간다.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// 산출물을 올릴 기본 주소. `latest.json` 의 자산 URL 은 여기에 파일 이름을 붙여 만든다.
+    #[serde(default)]
+    pub update_base_url: Option<String>,
+    /// 배포 앱이 읽을 업데이트 매니페스트 주소. 없으면 배포 앱의 자동 업데이트가 꺼진다.
+    /// 보통 `update_base_url` + `/latest.json` 이지만 따로 둘 수 있다.
+    #[serde(default)]
+    pub update_url: Option<String>,
+    /// 매니페스트 서명을 검증할 minisign 공개키. 없으면 배포 앱이 검증을 건너뛴다.
+    #[serde(default)]
+    pub update_public_key: Option<String>,
+    /// 배포 앱이 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
+    #[serde(default)]
+    pub auto_update: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// 산출물 폴더 기본 이름.
+pub const DEFAULT_OUTPUT_DIR: &str = "dist";
+
+impl Default for BuildSpec {
+    fn default() -> Self {
+        Self {
+            app_name: "Neural Linker App".into(),
+            app_version: "0.1.0".into(),
+            targets: vec![],
+            entry_pipeline: None,
+            autostart: true,
+            default_device: DevicePref::Auto,
+            models: vec![],
+            output_dir: None,
+            icon: None,
+            update_base_url: None,
+            update_url: None,
+            update_public_key: None,
+            auto_update: false,
+        }
+    }
+}
+
+impl BuildSpec {
+    /// 프로젝트에서 기본값을 뽑는다: 앱 이름 = 프로젝트 이름, 진입 파이프라인·모델 = 첫 번째.
+    pub fn from_project(p: &crate::model::Project) -> Self {
+        Self {
+            app_name: p.name.clone(),
+            entry_pipeline: p.pipelines.keys().next().copied(),
+            default_device: p.settings.default_device,
+            models: p.models.values().filter(|m| m.weights.is_some()).map(|m| m.id).collect(),
+            targets: vec![],
+            ..Self::default()
         }
     }
 }
@@ -83,6 +206,34 @@ pub fn find_attached(exe: &[u8]) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_fields_round_trip() {
+        let mut m = BundleManifest::new("내 앱", "1.2.3");
+        assert_eq!(m.update_url, None, "기본은 자동 업데이트 없음");
+        assert_eq!(m.update_public_key, None);
+        assert!(!m.auto_update, "자동 다운로드는 명시해야 켜진다");
+
+        m.update_url = Some("https://updates.example/app/latest.json".into());
+        m.update_public_key = Some("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3".into());
+        m.auto_update = true;
+
+        let json = serde_json::to_string(&m).unwrap();
+        let back: BundleManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    /// 업데이트 필드가 없던 옛 번들도 그대로 열려야 한다.
+    #[test]
+    fn older_manifests_without_update_fields_still_load() {
+        let json = r#"{"format":1,"app_name":"옛 앱","app_version":"0.1.0"}"#;
+        let m: BundleManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.app_name, "옛 앱");
+        assert_eq!(m.update_url, None);
+        assert_eq!(m.update_public_key, None);
+        assert!(!m.auto_update);
+        assert!(!m.autostart, "serde(default) 라 false 다");
+    }
 
     #[test]
     fn trailer_round_trips() {

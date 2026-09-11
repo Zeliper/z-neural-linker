@@ -17,8 +17,9 @@
 //! [`PORTAL_TIMEOUT`] 뒤에 명확한 오류로 끝난다. GUI 는 [`Capturer::backend`] 와 [`Backend::hint`] 로
 //! 지금 어떤 경로인지, 얼마나 나올지 사용자에게 알려 줘야 한다.
 //!
-//! 고 fps 가 필요한 GNOME/KDE 지원은 `org.freedesktop.portal.ScreenCast` + pipewire 경로이며,
-//! pipewire 개발 패키지를 요구하므로 **M1 후반에 선택 feature 로** 붙인다. 이번 단계에서는 하지 않았다.
+//! 고 fps 가 필요한 GNOME/KDE 지원은 `org.freedesktop.portal.ScreenCast` + pipewire 경로다.
+//! 그쪽은 pipewire 개발 패키지를 요구해 "시스템 개발 라이브러리 없이" 라는 이 크레이트의 전제를 깬다.
+//! 그래서 붙인다면 **기본이 꺼진 선택 feature** 여야 하고, 아직 붙이지 않았다.
 //!
 //! ## 배포판 요구 사항 (Linux)
 //! 화면 캡처 자체는 시스템 라이브러리를 쓰지 않는다(X11·Wayland 프로토콜을 소켓으로 직접 말한다).

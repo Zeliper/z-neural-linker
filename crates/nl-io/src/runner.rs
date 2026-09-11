@@ -4,18 +4,23 @@
 //! ## 한 틱의 흐름
 //! 1. `RunnerInput` 채널을 비워 `Source::Manual` / `Source::GuiEvent` 입력을 모은다(같은 노드에 여러 개가
 //!    쌓였으면 마지막 것만 쓴다 — 틱 하나에 값 하나).
-//! 2. 노드를 위상 순서로 훑는다. 소스는 자기 주기가 됐을 때만 값을 내고, 그 뒤 노드는 상류에 값이 있을 때만 돈다.
-//! 3. 값을 낸 노드(소스·모델·로직)는 [`RunnerEvent::Value`] 로도 알린다. 싱크는 값을 소비만 하므로 제외한다.
-//! 4. `tick_hz` 로 정해진 주기가 될 때까지 잔다. 잠은 10ms 씩 끊어 자므로 [`RunnerHandle::stop`] 은 곧바로 먹는다.
+//! 2. WebSocket 연결 스레드가 남긴 상태(연결됨·끊김)를 이벤트로 옮긴다.
+//! 3. 노드를 위상 순서로 훑는다. 소스는 자기 주기가 됐을 때만 값을 내고, 그 뒤 노드는 상류에 값이 있을 때만 돈다.
+//! 4. 값을 낸 노드(소스·모델·로직)는 [`RunnerEvent::Value`] 로도 알린다. 싱크는 값을 소비만 하므로 제외한다.
+//! 5. `tick_hz` 로 정해진 주기가 될 때까지 잔다. 잠은 10ms 씩 끊어 자므로 [`RunnerHandle::stop`] 은 곧바로 먹는다.
 //!
 //! ## 드롭 정책
 //! 이벤트 채널은 unbounded 라서 소비자가 느려도 막히지 않지만, 그만큼 이미지가 쌓이면 메모리를 먹는다.
 //! 그래서 [`Value::Image`] 는 [`RunnerEvent::Value`] 로 아예 보내지 않고 `Sink::GuiWidget` 이 있을 때만
 //! [`RunnerEvent::Widget`] 으로 나간다. 그마저도 채널이 밀려 있으면(`IMAGE_BACKLOG_LIMIT` 이상) 새 프레임을 버린다.
 //! GUI 는 최신 프레임만 그리면 되므로 버려도 되고, 버려야 지연이 쌓이지 않는다.
+//! 캔버스·인스펙터가 쓸 작은 축소판은 [`RunnerEvent::ValuePreview`] 로 **노드당 초당 4회까지만** 나간다
+//! (최장변 [`PREVIEW_MAX_SIDE`] px). 원본이 아니라 축소판이라 쌓여도 메모리를 크게 먹지 않는다.
 //!
 //! ## 안전장치
 //! `Sink::MouseKeyboard` 는 [`Runner::arm_input`] 이 켜져 있을 때만 실제 입력을 보낸다. 기본값은 꺼짐(로그만).
+//! 무장은 실행 중에도 [`RunnerHandle::set_armed`] 로 켜고 끌 수 있다 — 플래그는 `Arc<AtomicBool>` 로 공유하고
+//! 틱 루프가 **액션을 보내기 직전에** 읽어 `InputSim` 에 반영한다. 그래서 "지금 당장 멈춰" 가 다음 액션부터 먹는다.
 
 use crate::http::{self, HttpResponse};
 use crate::input::{self, InputSim};
@@ -25,7 +30,7 @@ use nl_core::payload::PayloadSpec;
 use nl_core::{DevicePref, InputAction, Logic, PNodeId, PNodeKind, Pipeline, Project, Sink, Source, WidgetId};
 use nl_engine::{HostTensor, Session, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -45,6 +50,12 @@ const IMAGE_BACKLOG_LIMIT: usize = 4;
 const ERROR_THROTTLE: Duration = Duration::from_secs(1);
 /// 주기 하한. 0ms 간격이 무한 루프가 되지 않게 한다.
 const MIN_INTERVAL: Duration = Duration::from_millis(1);
+/// 미리보기 썸네일의 최장변 상한 (px).
+pub const PREVIEW_MAX_SIDE: u32 = 160;
+/// 노드당 미리보기 발행 간격. 초당 4회.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
+/// 통계 이벤트 간격. 초당 1회.
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub enum RunnerEvent {
@@ -53,6 +64,18 @@ pub enum RunnerEvent {
     Value { node: PNodeId, value: Value },
     /// `Sink::GuiWidget` 로 위젯에 표시할 값.
     Widget { widget: WidgetId, value: Value },
+    /// 노드가 낸 `Value::Image` 의 축소판. 캔버스·인스펙터 미리보기용으로 노드당 초당 4회까지만 나간다.
+    /// 원본 이미지는 [`RunnerEvent::Value`] 로 나가지 않으므로(드롭 정책) 이것이 유일한 이미지 통로다.
+    ValuePreview { node: PNodeId, width: u32, height: u32, rgba: Vec<u8> },
+    /// 틱 루프 상태. 초당 1회. 상태바에 실제 속도를 보여 주는 용도다.
+    Stats {
+        /// 시작 이후 누적 틱 수.
+        tick: u64,
+        /// 지난 구간의 틱 하나당 평균 작업 시간(ms). 잠든 시간은 빼고 잰다.
+        tick_ms: f32,
+        /// 지난 구간의 실제 틱 속도(Hz).
+        hz: f32,
+    },
     Log(String),
     Error { node: Option<PNodeId>, message: String },
     Stopped,
@@ -71,8 +94,12 @@ pub struct Runner {
     /// 가중치 상대 경로 기준.
     pub base_dir: PathBuf,
     pub device: DevicePref,
-    /// `Sink::MouseKeyboard` 무장 스위치. 꺼져 있으면(기본) 액션을 로그로만 남기고 실제 입력은 보내지 않는다.
+    /// `Sink::MouseKeyboard` 무장 스위치의 **초기값**. 꺼져 있으면(기본) 액션을 로그로만 남기고 실제 입력은 보내지 않는다.
+    /// 시작한 뒤에는 [`RunnerHandle::set_armed`] 로 바꾼다.
     pub arm_input: bool,
+    /// `Source::HttpServer` 가 받은 요청을 포기하는 시간. 기본 [`HTTP_REPLY_TIMEOUT`].
+    /// 모델 추론이 오래 걸리는 파이프라인은 늘리고, 빠른 실패를 원하면 줄인다.
+    pub http_reply_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -81,6 +108,8 @@ pub struct RunnerHandle {
     pub inputs: Sender<RunnerInput>,
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    /// 틱 루프와 공유하는 마우스·키보드 무장 플래그.
+    armed: Arc<AtomicBool>,
 }
 
 impl RunnerHandle {
@@ -90,6 +119,15 @@ impl RunnerHandle {
     pub fn is_done(&self) -> bool {
         self.done.load(Ordering::SeqCst)
     }
+    /// 마우스·키보드 싱크 무장을 실행 중에 켜고 끈다. 다음 액션부터 곧바로 먹는다.
+    pub fn set_armed(&self, armed: bool) {
+        self.armed.store(armed, Ordering::SeqCst);
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
+    }
+
     /// 멈출 때까지 기다린다. `timeout` 안에 안 끝나면 `false`.
     pub fn wait_done(&self, timeout: Duration) -> bool {
         let start = Instant::now();
@@ -106,7 +144,7 @@ impl RunnerHandle {
 impl Runner {
     /// `arm_input` 은 꺼진 채로 시작한다. 실제 마우스·키보드를 움직이려면 켜고 나서 [`Runner::start`] 를 부른다.
     pub fn new(project: Project, pipeline: Pipeline, base_dir: PathBuf, device: DevicePref) -> Self {
-        Self { project, pipeline, base_dir, device, arm_input: false }
+        Self { project, pipeline, base_dir, device, arm_input: false, http_reply_timeout: HTTP_REPLY_TIMEOUT }
     }
 
     /// 즉시 돌아온다. 준비 실패(모델 로드 등)도 `RunnerEvent::Error` + `Stopped` 로 온다.
@@ -115,11 +153,12 @@ impl Runner {
         let (itx, irx) = crossbeam_channel::unbounded::<RunnerInput>();
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        let (s2, d2) = (stop.clone(), done.clone());
+        let armed = Arc::new(AtomicBool::new(self.arm_input));
+        let (s2, d2, a2) = (stop.clone(), done.clone(), armed.clone());
         std::thread::Builder::new().name("nl-runner".into()).spawn(move || {
-            // 어떤 노드가 패닉을 내도 이벤트 채널에는 Error + Stopped 가 반드시 나가야 한다.
+            // 어떤 노드가 패닉을 내도 이벤트 채널에는 Error + Stopped 가 나가야 한다.
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_loop(self, &etx, &irx, &s2);
+                run_loop(self, &etx, &irx, &s2, &a2);
             }));
             if let Err(p) = res {
                 let message = format!("실행기가 패닉으로 멈췄다: {}", panic_message(&*p));
@@ -128,7 +167,7 @@ impl Runner {
             let _ = etx.send(RunnerEvent::Stopped);
             d2.store(true, Ordering::SeqCst);
         })?;
-        Ok(RunnerHandle { events: erx, inputs: itx, stop, done })
+        Ok(RunnerHandle { events: erx, inputs: itx, stop, done, armed })
     }
 }
 
@@ -139,6 +178,392 @@ fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
         s.clone()
     } else {
         "알 수 없는 패닉".to_owned()
+    }
+}
+
+// ───────────────────────────── 인바운드 HTTP 서버 ─────────────────────────────
+
+/// 인바운드 요청 본문 상한. 이보다 크면 읽지 않고 413 으로 끊는다.
+pub const MAX_HTTP_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
+/// 응답이 나오지 않은 요청을 포기하는 시간. 넘기면 504 를 돌려준다.
+pub const HTTP_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// 수신 스레드가 `stop` 을 확인하는 주기. `stop()` 응답 지연의 상한이다.
+const HTTP_SERVER_POLL: Duration = Duration::from_millis(50);
+
+/// 수신 스레드 → 틱 루프. 값과 아직 응답하지 않은 요청을 함께 넘긴다.
+struct HttpIncoming {
+    value: Value,
+    request: tiny_http::Request,
+}
+
+/// `Source::HttpServer` 노드 하나의 상태.
+///
+/// 응답 싱크가 이 큐를 봐야 해서 노드별 [`NodeState`] 가 아니라 따로 둔다.
+///
+/// ## 요청 하나씩 규칙
+/// 응답할 요청을 고를 때 값에 딸린 식별자를 하류로 들고 다니지 않는다. 대신 **미응답 요청이 없을 때만**
+/// 다음 요청을 꺼내 값으로 흘린다. 그래서 파이프라인 안을 도는 값은 언제나 하나뿐이고,
+/// [`Sink::HttpReply`] 는 큐 맨 앞의 요청에 답하면 그게 반드시 그 값의 주인이다.
+/// 중간 노드가 값을 버려도(디바운스·치환) 짝이 어긋나지 않는다 — 그 요청은 제자리에서 시간 초과로 끝난다.
+/// 동시 요청은 도착 순서대로 한 틱에 하나씩 처리된다(`tick_hz` 가 초당 처리량의 상한).
+struct HttpServerState {
+    /// 수신 스레드가 넣는 요청.
+    rx: Receiver<HttpIncoming>,
+    /// 아직 응답하지 않은 요청 (FIFO). 위 규칙상 0개나 1개다.
+    pending: VecDeque<(Instant, tiny_http::Request)>,
+    /// 수신 스레드를 깨우기 위해 공유한다.
+    server: Arc<tiny_http::Server>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HttpServerState {
+    /// 대기 중인 요청에 모두 같은 상태로 답하고 수신 스레드를 접는다.
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.server.unblock();
+        while let Some((_, req)) = self.pending.pop_front() {
+            let _ = respond_json(req, 503, "파이프라인이 멈춰 요청을 처리하지 못했다");
+        }
+        // 아직 채널에 있던 요청도 같이 정리한다.
+        while let Ok(inc) = self.rx.try_recv() {
+            let _ = respond_json(inc.request, 503, "파이프라인이 멈춰 요청을 처리하지 못했다");
+        }
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// JSON 본문으로 답한다. 2xx 는 값 그대로, 그 밖에는 `{"error": ...}` 로 감싼다.
+fn respond_json(request: tiny_http::Request, status: u16, body: &str) -> Result<(), String> {
+    let payload = if (200..300).contains(&status) {
+        body.to_owned()
+    } else {
+        serde_json::json!({ "error": body, "status": status }).to_string()
+    };
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..])
+        .map_err(|_| "Content-Type 헤더를 만들지 못했다".to_string())?;
+    let response = tiny_http::Response::from_string(payload)
+        .with_status_code(status)
+        .with_header(header);
+    request.respond(response).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
+}
+
+/// 서버 소켓을 열고 수신 스레드를 띄운다.
+fn start_http_server(bind: &str, path: &str) -> Result<HttpServerState, String> {
+    let server = tiny_http::Server::http(bind)
+        .map(Arc::new)
+        .map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, srv2, want) = (stop.clone(), server.clone(), normalize_path(path));
+    let handle = std::thread::Builder::new()
+        .name("nl-http-server".into())
+        .spawn(move || http_server_loop(&srv2, &want, &tx, &s2))
+        .map_err(|e| format!("HTTP 수신 스레드 생성 실패: {e}"))?;
+    Ok(HttpServerState { rx, pending: VecDeque::new(), server, stop, handle: Some(handle) })
+}
+
+/// 경로 비교를 위해 앞에 `/` 를 붙이고 뒤쪽 `/` 는 뗀다. 빈 값은 `/`.
+fn normalize_path(p: &str) -> String {
+    let t = p.trim();
+    if t.is_empty() || t == "/" {
+        return "/".into();
+    }
+    let with_slash = if t.starts_with('/') { t.to_owned() } else { format!("/{t}") };
+    with_slash.trim_end_matches('/').to_owned()
+}
+
+fn http_server_loop(
+    server: &tiny_http::Server,
+    want_path: &str,
+    tx: &Sender<HttpIncoming>,
+    stop: &AtomicBool,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        let mut request = match server.recv_timeout(HTTP_SERVER_POLL) {
+            Ok(Some(r)) => r,
+            // 시간이 지났을 뿐이다. stop 을 다시 본다.
+            Ok(None) => continue,
+            Err(_) => break,
+        };
+
+        let url = request.url().to_owned();
+        let (got_path, query) = match url.split_once('?') {
+            Some((p, q)) => (normalize_path(p), q.to_owned()),
+            None => (normalize_path(&url), String::new()),
+        };
+        if got_path != want_path {
+            let _ = respond_json(request, 404, &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {want_path})"));
+            continue;
+        }
+
+        let method = request.method().as_str().to_ascii_uppercase();
+        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH") {
+            let _ = respond_json(request, 405, &format!("{method} 은 지원하지 않는다 (GET, POST, PUT, PATCH 만)"));
+            continue;
+        }
+
+        // Content-Length 가 있으면 먼저 걸러 큰 본문을 아예 읽지 않는다.
+        if request.body_length().map(|n| n as u64 > MAX_HTTP_REQUEST_BYTES).unwrap_or(false) {
+            let _ = respond_json(request, 413, &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"));
+            continue;
+        }
+        // 길이를 모르는(청크) 본문도 상한에서 끊는다.
+        let mut buf = Vec::new();
+        // `as_reader()` 는 `&mut dyn Read` 다. 점 호출은 trait object 로 역참조되어 `take` 를 못 쓰므로 UFCS 로 부른다.
+        let reader: &mut dyn Read = request.as_reader();
+        let read = std::io::Read::take(reader, MAX_HTTP_REQUEST_BYTES + 1).read_to_end(&mut buf);
+        if let Err(e) = read {
+            let _ = respond_json(request, 400, &format!("본문을 읽지 못했다: {e}"));
+            continue;
+        }
+        if buf.len() as u64 > MAX_HTTP_REQUEST_BYTES {
+            let _ = respond_json(request, 413, &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"));
+            continue;
+        }
+        let body = match String::from_utf8(buf) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = respond_json(request, 400, "본문이 UTF-8 이 아니다 (이 파이프라인은 텍스트·JSON 만 받는다)");
+                continue;
+            }
+        };
+
+        // 본문이 있으면 그것을, 없으면 쿼리스트링을 값으로 삼는다.
+        let value = if body.trim().is_empty() { query_to_value(&query) } else { text_to_value(&body) };
+        if tx.send(HttpIncoming { value, request }).is_err() {
+            // 틱 루프가 사라졌다. 더 받아도 답할 사람이 없다.
+            break;
+        }
+    }
+}
+
+/// `a=1&b=hi` → `{"a":"1","b":"hi"}`. 값은 전부 문자열이다(타입을 알 방법이 없다).
+fn query_to_value(query: &str) -> Value {
+    let mut map = serde_json::Map::new();
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        map.insert(form_decode(k), serde_json::Value::String(form_decode(v)));
+    }
+    Value::Json(serde_json::Value::Object(map))
+}
+
+/// `application/x-www-form-urlencoded` 해독: `+` 는 공백, `%XX` 는 바이트.
+fn form_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < b.len() => match (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                }
+                _ => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            },
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+// ───────────────────────────── WebSocket 연결 풀 ─────────────────────────────
+
+/// WebSocket 연결 하나가 바깥으로 알리는 상태.
+#[derive(Clone, Debug)]
+enum WsStatus {
+    /// 연결됐다(재접속 포함).
+    Connected,
+    /// 연결 실패·끊김. 곧 재시도한다.
+    Error(String),
+    /// 알려 줄 만한 일(바이너리 프레임 무시 등).
+    Log(String),
+}
+
+/// `url` 하나에 대한 연결. 같은 url 을 쓰는 소스·싱크 노드가 이 연결을 나눠 쓴다.
+struct WsConn {
+    /// 연결 상태. 틱마다 비워 이벤트로 바꾼다.
+    /// (보내는 쪽 `Sender<String>` 은 싱크 노드들의 [`NodeState::ws_out`] 이 들고 있다.)
+    status: Receiver<WsStatus>,
+    /// 이 url 을 쓰는 노드들 (오류를 누구에게 붙일지).
+    nodes: Vec<PNodeId>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// 파이프라인 하나가 쓰는 WebSocket 연결들. url 이 키다.
+#[derive(Default)]
+struct WsPool {
+    conns: BTreeMap<String, WsConn>,
+    stop: Arc<AtomicBool>,
+}
+
+impl WsPool {
+    /// 모든 연결 스레드에 종료를 알리고 기다린다.
+    /// 종료 플래그를 **먼저 전부** 세운 뒤 join 하므로 대기 시간은 연결 수에 비례하지 않는다.
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for c in self.conns.values_mut() {
+            if let Some(h) = c.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+}
+
+/// 읽기 타임아웃. `stop()` 응답 지연의 상한을 정한다 (읽기 한 번이 이만큼 걸릴 수 있다).
+const WS_READ_TIMEOUT: Duration = Duration::from_millis(50);
+/// 재접속 첫 대기.
+const WS_BACKOFF_MIN: Duration = Duration::from_secs(1);
+/// 재접속 대기 상한.
+const WS_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// 연결 스레드를 띄운다. 끊기면 지수 백오프로 다시 붙는다.
+///
+/// - 수신 텍스트 프레임은 `subscribers` 전부에게 복사해 보낸다(같은 url 소스 노드가 여럿일 수 있다).
+/// - 바이너리 프레임은 버리고 **연결당 한 번만** 알린다. 매 프레임 알리면 로그가 넘친다.
+/// - `out_rx` 로 들어온 문자열은 텍스트 프레임으로 보낸다.
+fn spawn_ws(
+    url: String,
+    subscribers: Vec<Sender<Value>>,
+    out_rx: Receiver<String>,
+    status_tx: Sender<WsStatus>,
+    stop: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    std::thread::Builder::new()
+        .name("nl-websocket".into())
+        .spawn(move || ws_loop(&url, &subscribers, &out_rx, &status_tx, &stop))
+        .map_err(|e| format!("WebSocket 스레드 생성 실패: {e}"))
+}
+
+fn ws_loop(
+    url: &str,
+    subscribers: &[Sender<Value>],
+    out_rx: &Receiver<String>,
+    status_tx: &Sender<WsStatus>,
+    stop: &AtomicBool,
+) {
+    let mut backoff = WS_BACKOFF_MIN;
+    while !stop.load(Ordering::SeqCst) {
+        let mut sock = match tungstenite::connect(url) {
+            Ok((s, _resp)) => s,
+            Err(e) => {
+                let _ = status_tx.send(WsStatus::Error(format!("{url} 에 붙지 못했다: {e}")));
+                sleep_interruptible(backoff, stop);
+                backoff = (backoff * 2).min(WS_BACKOFF_MAX);
+                continue;
+            }
+        };
+        // 읽기를 타임아웃으로 끊어야 stop 을 제때 볼 수 있다. 설정에 실패해도 진행은 한다
+        // (그 경우 읽기가 블로킹이라 종료가 늦어질 수 있다 — 상태로 알린다).
+        if let Err(e) = set_read_timeout(&mut sock, WS_READ_TIMEOUT) {
+            let _ = status_tx.send(WsStatus::Log(format!("{url} 읽기 타임아웃을 걸지 못했다: {e}")));
+        }
+        let _ = status_tx.send(WsStatus::Connected);
+        backoff = WS_BACKOFF_MIN;
+        let mut warned_binary = false;
+
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                let _ = sock.close(None);
+                return;
+            }
+            // 보낼 것부터 비운다. 보내기는 블로킹이지만 소켓이 살아 있으면 금방 끝난다.
+            let mut send_failed = None;
+            while let Ok(text) = out_rx.try_recv() {
+                if let Err(e) = sock.send(tungstenite::Message::Text(text.into())) {
+                    send_failed = Some(format!("{url} 로 보내지 못했다: {e}"));
+                    break;
+                }
+            }
+            if let Some(msg) = send_failed {
+                let _ = status_tx.send(WsStatus::Error(msg));
+                break;
+            }
+
+            match sock.read() {
+                Ok(tungstenite::Message::Text(t)) => {
+                    let v = text_to_value(t.as_str());
+                    for s in subscribers {
+                        let _ = s.send(v.clone());
+                    }
+                }
+                Ok(tungstenite::Message::Binary(b)) => {
+                    if !warned_binary {
+                        warned_binary = true;
+                        let _ = status_tx.send(WsStatus::Log(format!(
+                            "{url} 이 바이너리 프레임({}바이트)을 보냈다. 이 파이프라인은 텍스트만 다루므로 버린다",
+                            b.len()
+                        )));
+                    }
+                }
+                Ok(tungstenite::Message::Close(_)) => {
+                    let _ = status_tx.send(WsStatus::Error(format!("{url} 이 연결을 닫았다")));
+                    break;
+                }
+                // Ping/Pong 은 tungstenite 가 알아서 답한다. Frame 은 읽기에서 나오지 않는다.
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if would_block(&e) => {}
+                Err(e) => {
+                    let _ = status_tx.send(WsStatus::Error(format!("{url} 읽기 실패: {e}")));
+                    break;
+                }
+            }
+        }
+
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        sleep_interruptible(backoff, stop);
+        backoff = (backoff * 2).min(WS_BACKOFF_MAX);
+    }
+}
+
+/// 읽기 타임아웃이 만든 "지금은 읽을 게 없다" 신호인가.
+fn would_block(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+}
+
+fn set_read_timeout(
+    sock: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    t: Duration,
+) -> std::io::Result<()> {
+    match sock.get_mut() {
+        tungstenite::stream::MaybeTlsStream::Plain(s) => s.set_read_timeout(Some(t)),
+        tungstenite::stream::MaybeTlsStream::Rustls(s) => s.get_mut().set_read_timeout(Some(t)),
+        // `MaybeTlsStream` 은 non_exhaustive 다. 모르는 변형이면 타임아웃 없이 간다.
+        _ => Ok(()),
+    }
+}
+
+/// `stop` 을 자주 보면서 잔다.
+fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
+    let mut left = total;
+    while !left.is_zero() && !stop.load(Ordering::SeqCst) {
+        let s = left.min(SLEEP_SLICE);
+        std::thread::sleep(s);
+        left -= s;
     }
 }
 
@@ -164,14 +589,24 @@ struct NodeState {
     last_fire: Option<Instant>,
     /// 마지막 오류 보고 시각 (폭주 방지).
     last_error: Option<Instant>,
-    /// M1 미지원 안내를 이미 한 번 보냈는가.
-    reported_unsupported: bool,
+    /// 마지막 미리보기 발행 시각 (노드당 초당 4회 제한).
+    last_preview: Option<Instant>,
+    /// `Source::WebSocket` 가 받은 값.
+    ws_in: Option<Receiver<Value>>,
+    /// `Sink::WebSocketSend` 가 보낼 곳.
+    ws_out: Option<Sender<String>>,
 }
 
 // ───────────────────────────── 틱 루프 ─────────────────────────────
 
-fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInput>, stop: &AtomicBool) {
-    let Runner { project, pipeline, base_dir, device, arm_input } = runner;
+fn run_loop(
+    runner: Runner,
+    etx: &Sender<RunnerEvent>,
+    irx: &Receiver<RunnerInput>,
+    stop: &AtomicBool,
+    armed: &AtomicBool,
+) {
+    let Runner { project, pipeline, base_dir, device, arm_input, http_reply_timeout } = runner;
     let _ = etx.send(RunnerEvent::Started);
 
     let (order, cyclic) = topo_order(&pipeline);
@@ -247,6 +682,75 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
         }
     }
 
+    // ── 준비: 인바운드 HTTP 서버. 노드마다 소켓 하나를 연다.
+    let mut servers: HashMap<PNodeId, HttpServerState> = HashMap::new();
+    for id in &order {
+        let PNodeKind::Source { source: Source::HttpServer { bind, path } } = &pipeline.nodes[id].kind else {
+            continue;
+        };
+        match start_http_server(bind, path) {
+            Ok(srv) => {
+                let _ = etx.send(RunnerEvent::Log(format!(
+                    "HTTP 서버 http://{bind}{} 열림",
+                    normalize_path(path)
+                )));
+                servers.insert(*id, srv);
+            }
+            Err(e) => {
+                let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: e });
+            }
+        }
+    }
+
+    // ── 준비: WebSocket 연결. 같은 url 을 쓰는 소스·싱크는 연결 하나를 나눠 쓴다.
+    let mut ws_pool = WsPool::default();
+    {
+        // url → (소스 노드들, 싱크 노드들)
+        let mut by_url: BTreeMap<String, (Vec<PNodeId>, Vec<PNodeId>)> = BTreeMap::new();
+        for id in &order {
+            match &pipeline.nodes[id].kind {
+                PNodeKind::Source { source: Source::WebSocket { url } } => {
+                    by_url.entry(url.clone()).or_default().0.push(*id)
+                }
+                PNodeKind::Sink { sink: Sink::WebSocketSend { url } } => {
+                    by_url.entry(url.clone()).or_default().1.push(*id)
+                }
+                _ => {}
+            }
+        }
+        for (url, (sources, sinks)) in by_url {
+            // 소스 노드마다 자기 수신 채널을 준다 (하나의 채널을 나눠 가지면 프레임이 한 노드에게만 간다).
+            let mut subscribers = Vec::with_capacity(sources.len());
+            for id in &sources {
+                let (tx, rx) = crossbeam_channel::unbounded();
+                subscribers.push(tx);
+                states.get_mut(id).expect("상태 미리 생성").ws_in = Some(rx);
+            }
+            // 보내는 쪽 핸들은 싱크 노드 상태가 들고 있다. 싱크가 없으면 out_tx 는 여기서 사라지고,
+            // 연결 스레드의 `try_recv` 가 Disconnected 를 받아 조용히 지나간다(받기만 하는 연결).
+            let (out_tx, out_rx) = crossbeam_channel::unbounded::<String>();
+            for id in &sinks {
+                states.get_mut(id).expect("상태 미리 생성").ws_out = Some(out_tx.clone());
+            }
+            drop(out_tx);
+            let (status_tx, status_rx) = crossbeam_channel::unbounded();
+            let nodes: Vec<PNodeId> = sources.iter().chain(sinks.iter()).copied().collect();
+            match spawn_ws(url.clone(), subscribers, out_rx, status_tx, ws_pool.stop.clone()) {
+                Ok(handle) => {
+                    ws_pool.conns.insert(
+                        url,
+                        WsConn { status: status_rx, nodes, handle: Some(handle) },
+                    );
+                }
+                Err(e) => {
+                    for id in &nodes {
+                        let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: e.clone() });
+                    }
+                }
+            }
+        }
+    }
+
     // ── 준비: 입력 시뮬레이터.
     let mut sim = match InputSim::with_armed(arm_input) {
         Ok(s) => s,
@@ -265,8 +769,30 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
     let mut widget_inputs: HashMap<WidgetId, Value> = HashMap::new();
     let mut manual_inputs: HashMap<PNodeId, Value> = HashMap::new();
 
+    // 통계: 지난 구간의 틱 수와 순수 작업 시간(잠든 시간 제외).
+    let mut tick_total: u64 = 0;
+    let mut stats_at = Instant::now();
+    let mut stats_ticks: u32 = 0;
+    let mut stats_work = Duration::ZERO;
+    let mut armed_now = arm_input;
+
     while !stop.load(Ordering::SeqCst) {
         let tick_start = Instant::now();
+        tick_total += 1;
+
+        // 무장 상태를 틱마다 읽어 둔다. 실제 반영은 액션 직전에 한 번 더 확인한다.
+        let want = armed.load(Ordering::SeqCst);
+        if want != armed_now {
+            armed_now = want;
+            let _ = etx.send(RunnerEvent::Log(
+                if want {
+                    "마우스·키보드 싱크가 무장됐다 (실제 입력을 보낸다)"
+                } else {
+                    "마우스·키보드 싱크 무장을 풀었다 (로그만 남긴다)"
+                }
+                .into(),
+            ));
+        }
 
         // 1. 밖에서 들어온 입력을 모은다. 같은 대상에 여러 개면 마지막 것만 쓴다.
         loop {
@@ -281,7 +807,45 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
             }
         }
 
-        // 2. 위상 순서로 평가.
+        // 2. 응답이 오지 않은 HTTP 요청을 시간 초과로 닫는다.
+        for (id, srv) in servers.iter_mut() {
+            while srv.pending.front().is_some_and(|(at, _)| at.elapsed() >= http_reply_timeout) {
+                let (_, req) = srv.pending.pop_front().expect("바로 위에서 확인했다");
+                let _ = respond_json(
+                    req,
+                    504,
+                    "파이프라인이 제한 시간 안에 응답을 내지 않았다 (HTTP 응답 싱크가 연결돼 있는지 확인하라)",
+                );
+                if let Some(node_st) = states.get_mut(id) {
+                    report(etx, node_st, Some(*id), "HTTP 요청이 제한 시간 안에 응답을 받지 못해 504 로 닫았다".into());
+                }
+            }
+        }
+
+        // 3. WebSocket 연결 상태를 이벤트로 옮긴다. 오류는 그 url 을 쓰는 노드들에 붙인다.
+        for conn in ws_pool.conns.values() {
+            while let Ok(st) = conn.status.try_recv() {
+                match st {
+                    WsStatus::Connected | WsStatus::Log(_) => {
+                        let text = match st {
+                            WsStatus::Connected => "WebSocket 연결됨".to_string(),
+                            WsStatus::Log(m) => m,
+                            WsStatus::Error(_) => unreachable!("바로 위에서 걸렀다"),
+                        };
+                        let _ = etx.send(RunnerEvent::Log(text));
+                    }
+                    WsStatus::Error(m) => {
+                        for id in &conn.nodes {
+                            if let Some(node_st) = states.get_mut(id) {
+                                report(etx, node_st, Some(*id), m.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. 위상 순서로 평가.
         let mut values: HashMap<PNodeId, Value> = HashMap::new();
         for id in &order {
             let id = *id;
@@ -291,9 +855,18 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
             match &node.kind {
                 PNodeKind::Source { source } => {
                     let st = states.get_mut(&id).expect("상태 미리 생성");
-                    match eval_source(source, id, st, tick_start, &base_dir, &mut widget_inputs, &mut manual_inputs) {
+                    match eval_source(
+                        source,
+                        id,
+                        st,
+                        tick_start,
+                        &base_dir,
+                        &mut widget_inputs,
+                        &mut manual_inputs,
+                        &mut servers,
+                    ) {
                         Ok(Some(v)) => {
-                            emit_value(etx, id, &v);
+                            emit_value(etx, id, &v, st, tick_start);
                             values.insert(id, v);
                         }
                         Ok(None) => {}
@@ -309,7 +882,7 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
                     match sessions.get_mut(&id) {
                         Some(Ok(sess)) => match run_model(sess, spec, &v) {
                             Ok(out) => {
-                                emit_value(etx, id, &out);
+                                emit_value(etx, id, &out, st, tick_start);
                                 values.insert(id, out);
                             }
                             Err(msg) => report(etx, st, Some(id), format!("{name}: {msg}")),
@@ -326,7 +899,7 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
                     let st = states.get_mut(&id).expect("상태 미리 생성");
                     match eval_logic(logic, &v, st, tick_start) {
                         Ok(Some(out)) => {
-                            emit_value(etx, id, &out);
+                            emit_value(etx, id, &out, st, tick_start);
                             values.insert(id, out);
                         }
                         Ok(None) => {}
@@ -341,14 +914,31 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
                         report(etx, st, Some(id), format!("{name}: {msg}"));
                     }
                     let Some(v) = v else { continue };
-                    if let Err(msg) = eval_sink(sink, &v, st, tick_start, &base_dir, &mut sim, etx, name) {
+                    if let Err(msg) =
+                        eval_sink(sink, &v, st, tick_start, &base_dir, &mut sim, armed, etx, name, &mut servers)
+                    {
                         report(etx, st, Some(id), format!("{name}: {msg}"));
                     }
                 }
             }
         }
 
-        // 3. 남은 주기만큼 잔다. stop 을 자주 확인한다.
+        // 5. 통계. 잠들기 전에 순수 작업 시간을 재 둔다.
+        stats_ticks += 1;
+        stats_work += tick_start.elapsed();
+        if stats_at.elapsed() >= STATS_INTERVAL {
+            let secs = stats_at.elapsed().as_secs_f32().max(f32::EPSILON);
+            let _ = etx.send(RunnerEvent::Stats {
+                tick: tick_total,
+                tick_ms: stats_work.as_secs_f32() * 1000.0 / stats_ticks.max(1) as f32,
+                hz: stats_ticks as f32 / secs,
+            });
+            stats_at = Instant::now();
+            stats_ticks = 0;
+            stats_work = Duration::ZERO;
+        }
+
+        // 6. 남은 주기만큼 잔다. stop 을 자주 확인한다.
         let elapsed = tick_start.elapsed();
         if elapsed < period {
             let mut left = period - elapsed;
@@ -358,6 +948,13 @@ fn run_loop(runner: Runner, etx: &Sender<RunnerEvent>, irx: &Receiver<RunnerInpu
                 left -= s;
             }
         }
+    }
+
+    // WebSocket 스레드를 정리하고 나간다. 읽기 타임아웃이 WS_READ_TIMEOUT 이라 곧 끝난다.
+    ws_pool.shutdown();
+    // 대기 중인 HTTP 요청에 503 으로 답하고 소켓을 닫는다.
+    for srv in servers.values_mut() {
+        srv.shutdown();
     }
 }
 
@@ -379,11 +976,69 @@ fn upstream_value(p: &Pipeline, values: &HashMap<PNodeId, Value>, id: PNodeId) -
 }
 
 /// 이미지는 크기 때문에 `Value` 이벤트로 내보내지 않는다 (위젯 경로로만 간다).
-fn emit_value(etx: &Sender<RunnerEvent>, node: PNodeId, v: &Value) {
-    if matches!(v, Value::Image { .. }) {
+/// 대신 캔버스·인스펙터가 쓸 작은 축소판을 [`RunnerEvent::ValuePreview`] 로 초당 4회까지 보낸다.
+fn emit_value(etx: &Sender<RunnerEvent>, node: PNodeId, v: &Value, st: &mut NodeState, now: Instant) {
+    if let Value::Image { width, height, rgba } = v {
+        emit_preview(etx, node, *width, *height, rgba, st, now);
         return;
     }
     let _ = etx.send(RunnerEvent::Value { node, value: v.clone() });
+}
+
+/// 축소판 발행. 노드당 [`PREVIEW_INTERVAL`] 간격이고, 채널이 밀려 있으면 건너뛴다.
+fn emit_preview(
+    etx: &Sender<RunnerEvent>,
+    node: PNodeId,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    st: &mut NodeState,
+    now: Instant,
+) {
+    if let Some(at) = st.last_preview {
+        if now.duration_since(at) < PREVIEW_INTERVAL {
+            return;
+        }
+    }
+    // 소비자가 못 따라오면 최신 것만 보면 되므로 버린다 (원본 프레임과 같은 정책).
+    if etx.len() >= IMAGE_BACKLOG_LIMIT {
+        return;
+    }
+    let Some((w, h, small)) = thumbnail(width, height, rgba) else { return };
+    st.last_preview = Some(now);
+    let _ = etx.send(RunnerEvent::ValuePreview { node, width: w, height: h, rgba: small });
+}
+
+/// RGBA8 프레임을 최장변 [`PREVIEW_MAX_SIDE`] 이하로 줄인다. 비율은 그대로 두고,
+/// 이미 작으면 그대로 복사한다. 크기가 버퍼와 맞지 않으면 `None`.
+fn thumbnail(width: u32, height: u32, rgba: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if width == 0 || height == 0 || rgba.len() != expected {
+        return None;
+    }
+    let longest = width.max(height);
+    if longest <= PREVIEW_MAX_SIDE {
+        return Some((width, height, rgba.to_vec()));
+    }
+    let scale = f64::from(PREVIEW_MAX_SIDE) / f64::from(longest);
+    let w = ((f64::from(width) * scale).round() as u32).clamp(1, PREVIEW_MAX_SIDE);
+    let h = ((f64::from(height) * scale).round() as u32).clamp(1, PREVIEW_MAX_SIDE);
+
+    // 최근접 표본. 원본을 통째로 복사하지 않으려고 `image::imageops` 대신 직접 훑는다 —
+    // 1920×1080 프레임이면 8MB 복사를 초당 4번 아끼는 값이다. 미리보기라 화질은 이것으로 충분하다.
+    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h {
+        let sy = (u64::from(y) * u64::from(height) / u64::from(h)).min(u64::from(height) - 1) as usize;
+        let src_row = sy * width as usize * 4;
+        let dst_row = y as usize * w as usize * 4;
+        for x in 0..w {
+            let sx = (u64::from(x) * u64::from(width) / u64::from(w)).min(u64::from(width) - 1) as usize;
+            let s = src_row + sx * 4;
+            let d = dst_row + x as usize * 4;
+            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    Some((w, h, out))
 }
 
 /// 같은 노드의 오류를 `ERROR_THROTTLE` 간격으로 묶어 보낸다.
@@ -458,6 +1113,7 @@ fn eval_source(
     base_dir: &Path,
     widget_inputs: &mut HashMap<WidgetId, Value>,
     manual_inputs: &mut HashMap<PNodeId, Value>,
+    servers: &mut HashMap<PNodeId, HttpServerState>,
 ) -> Result<Option<Value>, String> {
     match source {
         Source::Timer { interval_ms } => {
@@ -527,12 +1183,34 @@ fn eval_source(
 
         Source::Manual => Ok(manual_inputs.remove(&id)),
 
-        Source::WebSocket { url } => {
-            if st.reported_unsupported {
+        // 미응답 요청이 없을 때만 다음 요청을 꺼낸다 ([`HttpServerState`] 의 "요청 하나씩 규칙" 참고).
+        Source::HttpServer { bind, path } => {
+            let Some(srv) = servers.get_mut(&id) else {
+                return Err(format!("http://{bind}{} 서버가 열려 있지 않다", normalize_path(path)));
+            };
+            if !srv.pending.is_empty() {
                 return Ok(None);
             }
-            st.reported_unsupported = true;
-            Err(format!("WebSocket 수신({url})은 M1 에서 붙인다. 지금은 지원하지 않는다"))
+            match srv.rx.try_recv() {
+                Ok(inc) => {
+                    srv.pending.push_back((now, inc.request));
+                    Ok(Some(inc.value))
+                }
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => Err("HTTP 수신 스레드가 사라졌다".into()),
+            }
+        }
+
+        // 연결 스레드가 채널에 넣어 둔 프레임을 가져온다. 한 틱에 하나씩 흘린다.
+        Source::WebSocket { url } => {
+            let Some(rx) = &st.ws_in else {
+                return Err(format!("{url} 연결이 준비되지 않았다"));
+            };
+            match rx.try_recv() {
+                Ok(v) => Ok(Some(v)),
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => Err(format!("{url} 연결 스레드가 사라졌다")),
+            }
         }
     }
 }
@@ -730,8 +1408,10 @@ fn eval_sink(
     now: Instant,
     base_dir: &Path,
     sim: &mut InputSim,
+    armed: &AtomicBool,
     etx: &Sender<RunnerEvent>,
     name: &str,
+    servers: &mut HashMap<PNodeId, HttpServerState>,
 ) -> Result<(), String> {
     match sink {
         Sink::MouseKeyboard { actions, cooldown_ms } => {
@@ -748,6 +1428,8 @@ fn eval_sink(
                 .ok()
                 .and_then(|i| actions.get(i))
                 .ok_or_else(|| format!("인덱스 {idx} 에 해당하는 액션이 없다 (액션 {}개)", actions.len()))?;
+            // 액션을 보내기 직전에 공유 플래그를 읽는다 — 실행 중 무장 해제가 이 액션부터 먹는다.
+            sim.armed = armed.load(Ordering::SeqCst);
             if matches!(a, InputAction::None) {
                 return Ok(());
             }
@@ -799,6 +1481,19 @@ fn eval_sink(
             Ok(())
         }
 
+        // 큐 맨 앞의 요청에 답한다. "요청 하나씩 규칙" 덕분에 그게 반드시 이 값의 주인이다.
+        Sink::HttpReply { server } => {
+            let Some(srv) = servers.get_mut(server) else {
+                return Err("가리키는 HTTP 서버 노드가 열려 있지 않다".into());
+            };
+            let Some((_, request)) = srv.pending.pop_front() else {
+                return Err(
+                    "답할 HTTP 요청이 없다 (이미 시간 초과로 닫혔거나, HTTP 서버에서 온 값이 아니다)".into()
+                );
+            };
+            respond_json(request, 200, &value_to_json(v).to_string())
+        }
+
         Sink::GuiWidget { widget } => {
             if matches!(v, Value::Image { .. }) && etx.len() >= IMAGE_BACKLOG_LIMIT {
                 // 소비자가 밀렸다. 새 프레임을 버려 지연이 쌓이지 않게 한다.
@@ -808,12 +1503,16 @@ fn eval_sink(
             Ok(())
         }
 
+        // 텍스트 값은 그대로, 나머지는 JSON 문자열로 보낸다.
         Sink::WebSocketSend { url } => {
-            if st.reported_unsupported {
-                return Ok(());
-            }
-            st.reported_unsupported = true;
-            Err(format!("WebSocket 송신({url})은 M1 에서 붙인다. 지금은 지원하지 않는다"))
+            let Some(tx) = &st.ws_out else {
+                return Err(format!("{url} 연결이 준비되지 않았다"));
+            };
+            let text = match v {
+                Value::Text(t) => t.clone(),
+                other => value_to_json(other).to_string(),
+            };
+            tx.send(text).map_err(|_| format!("{url} 연결 스레드가 사라져 보내지 못했다"))
         }
     }
 }
@@ -929,6 +1628,9 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    /// `eval_sink` 시험에서 쓰는 비무장 플래그. 실제 마우스가 움직이지 않게 언제나 꺼 둔다.
+    static ARMED_OFF: AtomicBool = AtomicBool::new(false);
+
     use super::*;
     use nl_core::pipeline::{PNode, PNodeKind};
     use nl_core::{ModelDef, Sink, Source};
@@ -943,6 +1645,210 @@ mod tests {
             }
         }
         out
+    }
+
+    /// 가로세로 그러데이션 RGBA 프레임. 축소해도 모서리 색으로 표본 위치를 확인할 수 있다.
+    fn frame(width: u32, height: u32) -> Value {
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgba.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 7, 255]);
+            }
+        }
+        Value::Image { width, height, rgba }
+    }
+
+    // ── 무장 스위치 ──────────────────────────────────────────────
+
+    #[test]
+    fn armed_flag_is_shared_with_the_running_loop() {
+        let mut p = Pipeline::new("무장");
+        p.tick_hz = 60.0;
+        let timer = p.add_node(PNode::new(
+            PNodeKind::Source { source: Source::Timer { interval_ms: 10 } },
+            [0.0, 0.0],
+        ));
+        let sink = p.add_node(PNode::new(
+            PNodeKind::Sink { sink: Sink::MouseKeyboard { actions: vec![InputAction::None], cooldown_ms: 0 } },
+            [1.0, 0.0],
+        ));
+        p.add_link(timer, sink);
+
+        let h = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu).start().unwrap();
+        assert!(!h.is_armed(), "기본은 비무장이다");
+
+        h.set_armed(true);
+        assert!(h.is_armed());
+        // 틱 루프가 바뀐 것을 알아채고 로그를 남긴다.
+        let ev = wait_for(&h, Duration::from_secs(3), |e| {
+            matches!(e, RunnerEvent::Log(m) if m.contains("무장됐다"))
+        });
+        assert!(ev.is_some(), "무장 로그가 오지 않았다");
+
+        h.set_armed(false);
+        let ev = wait_for(&h, Duration::from_secs(3), |e| {
+            matches!(e, RunnerEvent::Log(m) if m.contains("무장을 풀었다"))
+        });
+        assert!(ev.is_some(), "무장 해제 로그가 오지 않았다");
+        assert!(!h.is_armed());
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// `arm_input` 을 켜고 시작하면 핸들도 무장 상태로 보인다 (기존 필드가 초기값 노릇을 한다).
+    #[test]
+    fn arm_input_seeds_the_shared_flag() {
+        let mut p = Pipeline::new("초기 무장");
+        p.tick_hz = 60.0;
+        p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 50 } }, [0.0, 0.0]));
+
+        let mut r = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu);
+        r.arm_input = true;
+        let h = r.start().unwrap();
+        assert!(h.is_armed(), "arm_input=true 로 시작하면 무장 상태다");
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// 액션 직전에 공유 플래그를 읽으므로 `InputSim.armed` 가 그때그때 맞춰진다.
+    #[test]
+    fn eval_sink_syncs_armed_right_before_the_action() {
+        let dir = std::env::temp_dir();
+        let (etx, _erx) = crossbeam_channel::unbounded();
+        let mut servers = HashMap::new();
+        let mut st = NodeState::default();
+        let mut sim = InputSim::new().unwrap();
+        // 실제 입력이 나가지 않는 액션만 쓴다.
+        let sink = Sink::MouseKeyboard { actions: vec![InputAction::None], cooldown_ms: 0 };
+
+        let armed = AtomicBool::new(true);
+        sim.armed = false;
+        eval_sink(&sink, &Value::Number(0.0), &mut st, Instant::now(), &dir, &mut sim, &armed, &etx, "n", &mut servers)
+            .unwrap();
+        assert!(sim.armed, "플래그가 켜져 있으면 액션 직전에 무장된다");
+
+        armed.store(false, Ordering::SeqCst);
+        st.last_fire = None;
+        eval_sink(&sink, &Value::Number(0.0), &mut st, Instant::now(), &dir, &mut sim, &armed, &etx, "n", &mut servers)
+            .unwrap();
+        assert!(!sim.armed, "플래그가 꺼지면 다음 액션부터 비무장이다");
+    }
+
+    // ── 이미지 미리보기 ──────────────────────────────────────────
+
+    #[test]
+    fn thumbnail_fits_the_longest_side_and_keeps_the_ratio() {
+        let Value::Image { width, height, rgba } = frame(640, 480) else { unreachable!() };
+        let (w, h, small) = thumbnail(width, height, &rgba).unwrap();
+        assert_eq!(w, PREVIEW_MAX_SIDE);
+        assert_eq!(h, 120, "4:3 비율이 유지된다");
+        assert_eq!(small.len(), (w * h * 4) as usize);
+        assert_eq!(small[3], 255, "알파는 그대로다");
+
+        // 세로가 긴 그림은 세로가 상한에 맞는다.
+        let Value::Image { width, height, rgba } = frame(100, 400) else { unreachable!() };
+        let (w, h, _) = thumbnail(width, height, &rgba).unwrap();
+        assert_eq!(h, PREVIEW_MAX_SIDE);
+        assert_eq!(w, 40);
+
+        // 이미 작으면 그대로.
+        let Value::Image { width, height, rgba } = frame(32, 16) else { unreachable!() };
+        let (w, h, small) = thumbnail(width, height, &rgba).unwrap();
+        assert_eq!((w, h), (32, 16));
+        assert_eq!(small, rgba);
+    }
+
+    #[test]
+    fn thumbnail_rejects_a_mismatched_buffer() {
+        assert!(thumbnail(10, 10, &[0u8; 7]).is_none(), "버퍼 길이가 맞지 않는다");
+        assert!(thumbnail(0, 10, &[]).is_none(), "너비가 0");
+        assert!(thumbnail(2, 2, &[0u8; 16]).is_some());
+    }
+
+    #[test]
+    fn image_values_come_out_as_previews_not_as_values() {
+        let (etx, erx) = crossbeam_channel::unbounded();
+        let mut st = NodeState::default();
+        let node = PNodeId::from_u128(1);
+        let now = Instant::now();
+
+        emit_value(&etx, node, &frame(320, 240), &mut st, now);
+        match erx.try_recv().expect("미리보기가 와야 한다") {
+            RunnerEvent::ValuePreview { node: n, width, height, rgba } => {
+                assert_eq!(n, node);
+                assert_eq!((width, height), (PREVIEW_MAX_SIDE, 120));
+                assert_eq!(rgba.len(), (width * height * 4) as usize);
+            }
+            other => panic!("ValuePreview 가 아니다: {other:?}"),
+        }
+        assert!(erx.try_recv().is_err(), "원본 Value 이벤트는 나가지 않는다");
+
+        // 이미지가 아닌 값은 그대로 Value 로 나간다.
+        emit_value(&etx, node, &Value::Number(1.0), &mut st, now);
+        assert!(matches!(erx.try_recv(), Ok(RunnerEvent::Value { .. })));
+    }
+
+    #[test]
+    fn previews_are_capped_at_four_per_second_per_node() {
+        let (etx, erx) = crossbeam_channel::unbounded();
+        let mut st = NodeState::default();
+        let node = PNodeId::from_u128(1);
+        let img = frame(200, 200);
+        let t0 = Instant::now();
+
+        emit_value(&etx, node, &img, &mut st, t0);
+        assert_eq!(erx.len(), 1, "첫 프레임은 나간다");
+
+        // 같은 구간 안에서는 더 나가지 않는다.
+        emit_value(&etx, node, &img, &mut st, t0 + Duration::from_millis(100));
+        emit_value(&etx, node, &img, &mut st, t0 + Duration::from_millis(240));
+        assert_eq!(erx.len(), 1, "250ms 안에는 한 번뿐이다");
+
+        // 간격이 지나면 다시 나간다.
+        emit_value(&etx, node, &img, &mut st, t0 + PREVIEW_INTERVAL);
+        assert_eq!(erx.len(), 2);
+
+        // 노드마다 따로 센다.
+        let mut other = NodeState::default();
+        emit_value(&etx, PNodeId::from_u128(2), &img, &mut other, t0 + PREVIEW_INTERVAL);
+        assert_eq!(erx.len(), 3);
+    }
+
+    #[test]
+    fn previews_are_dropped_when_the_consumer_lags() {
+        let (etx, _erx) = crossbeam_channel::unbounded();
+        let mut st = NodeState::default();
+        let node = PNodeId::from_u128(1);
+        for _ in 0..IMAGE_BACKLOG_LIMIT {
+            let _ = etx.send(RunnerEvent::Log("밀린 이벤트".into()));
+        }
+        emit_value(&etx, node, &frame(200, 200), &mut st, Instant::now());
+        assert_eq!(etx.len(), IMAGE_BACKLOG_LIMIT, "밀려 있으면 미리보기를 버린다");
+        assert!(st.last_preview.is_none(), "버린 프레임은 주기를 소모하지 않는다");
+    }
+
+    // ── 통계 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stats_arrive_about_once_a_second() {
+        let mut p = Pipeline::new("통계");
+        p.tick_hz = 60.0;
+        p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 20 } }, [0.0, 0.0]));
+
+        let h = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu).start().unwrap();
+        let ev = wait_for(&h, Duration::from_secs(4), |e| matches!(e, RunnerEvent::Stats { .. }));
+        match ev {
+            Some(RunnerEvent::Stats { tick, tick_ms, hz }) => {
+                assert!(tick > 0, "누적 틱 수가 0 이다");
+                assert!((0.0..1000.0).contains(&tick_ms), "틱 작업 시간이 이상하다: {tick_ms}");
+                // 60Hz 를 목표로 도는 루프라 한참 못 미치거나 넘치면 잘못이다.
+                assert!((5.0..120.0).contains(&hz), "실제 속도가 이상하다: {hz}");
+            }
+            other => panic!("Stats 가 오지 않았다: {other:?}"),
+        }
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
     }
 
     /// `timeout` 안에 조건에 맞는 이벤트가 올 때까지 기다린다.
@@ -1262,23 +2168,434 @@ mod tests {
         let mut widgets = HashMap::new();
         manual.insert(id, Value::Number(1.0));
         let dir = std::env::temp_dir();
-        let call = |s: &mut NodeState, m: &mut HashMap<PNodeId, Value>, w: &mut HashMap<WidgetId, Value>| {
-            eval_source(&Source::Manual, id, s, Instant::now(), &dir, w, m).unwrap()
+        let mut servers = HashMap::new();
+        let mut call = |s: &mut NodeState, m: &mut HashMap<PNodeId, Value>, w: &mut HashMap<WidgetId, Value>| {
+            eval_source(&Source::Manual, id, s, Instant::now(), &dir, w, m, &mut servers).unwrap()
         };
         assert_eq!(call(&mut s, &mut manual, &mut widgets), Some(Value::Number(1.0)));
         assert_eq!(call(&mut s, &mut manual, &mut widgets), None, "수동 입력은 한 번만 쓰인다");
     }
 
     #[test]
-    fn websocket_source_reports_unsupported_once() {
+    fn websocket_source_without_a_connection_reports_it() {
         let mut s = st();
         let src = Source::WebSocket { url: "ws://x".into() };
         let dir = std::env::temp_dir();
         let (mut m, mut w) = (HashMap::new(), HashMap::new());
-        let e = eval_source(&src, PNodeId::from_u128(1), &mut s, Instant::now(), &dir, &mut w, &mut m).unwrap_err();
-        assert!(e.contains("M1"), "{e}");
-        // 두 번째부터는 조용히 지나간다 (30Hz 루프가 초당 30개씩 뱉지 않게).
-        let again = eval_source(&src, PNodeId::from_u128(1), &mut s, Instant::now(), &dir, &mut w, &mut m).unwrap();
-        assert!(again.is_none());
+        let mut servers = HashMap::new();
+        let e = eval_source(&src, PNodeId::from_u128(1), &mut s, Instant::now(), &dir, &mut w, &mut m, &mut servers)
+            .unwrap_err();
+        assert!(e.contains("ws://x"), "{e}");
+    }
+
+    #[test]
+    fn websocket_sink_serializes_text_as_is_and_others_as_json() {
+        let (tx, rx) = crossbeam_channel::unbounded::<String>();
+        let mut s = st();
+        s.ws_out = Some(tx);
+        let sink = Sink::WebSocketSend { url: "ws://x".into() };
+        let (etx, _erx) = crossbeam_channel::unbounded();
+        let mut sim = InputSim::new().unwrap();
+        let dir = std::env::temp_dir();
+        let now = Instant::now();
+
+        let mut servers = HashMap::new();
+        eval_sink(&sink, &Value::Text("그대로".into()), &mut s, now, &dir, &mut sim, &ARMED_OFF, &etx, "n", &mut servers).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "그대로", "텍스트는 따옴표 없이 그대로 나가야 한다");
+
+        eval_sink(&sink, &Value::Number(3.0), &mut s, now, &dir, &mut sim, &ARMED_OFF, &etx, "n", &mut servers).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "3.0");
+
+        eval_sink(&sink, &Value::Json(serde_json::json!({"a":1})), &mut s, now, &dir, &mut sim, &ARMED_OFF, &etx, "n", &mut servers)
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), r#"{"a":1}"#);
+    }
+
+    // ── 인바운드 HTTP 서버 ──
+
+    /// 비어 있는 TCP 포트를 잡아 주소만 돌려준다 (리스너는 바로 닫는다).
+    fn free_addr() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("포트를 잡지 못했다");
+        let a = l.local_addr().expect("주소를 알 수 없다");
+        drop(l);
+        a.to_string()
+    }
+
+    fn http_server_node(p: &mut Pipeline, bind: &str, path: &str) -> PNodeId {
+        p.add_node(PNode::new(
+            PNodeKind::Source { source: Source::HttpServer { bind: bind.into(), path: path.into() } },
+            [0.0, 0.0],
+        ))
+    }
+
+    /// 서버가 실제로 뜰 때까지 기다린다 (Log 이벤트로 확인).
+    fn wait_server_up(h: &RunnerHandle) {
+        assert!(
+            wait_for(h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("HTTP 서버")))
+                .is_some(),
+            "HTTP 서버가 열리지 않았다"
+        );
+    }
+
+    #[test]
+    fn http_server_select_reply_answers_a_post() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        // 본문 {"x":[1,9,2]} → Select 로 x 를 꺼낸다.
+        let pick = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Select { index: 1 } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [2.0, 0.0]));
+        p.add_link(server, pick).unwrap();
+        p.add_link(pick, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpsrv"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+
+        let res = crate::http::call(
+            "POST",
+            &format!("http://{addr}/infer"),
+            &BTreeMap::new(),
+            Some("[1, 9, 2]"),
+            Duration::from_secs(5),
+        )
+        .expect("요청이 실패했다");
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+        assert!(res.content_type.contains("application/json"), "content-type: {}", res.content_type);
+        // JSON 배열의 1번 원소. 정수는 정수 그대로 돌아온다 (JSON 값은 변환 없이 지나간다).
+        assert_eq!(res.json().expect("JSON 이 아니다"), serde_json::json!(9));
+
+        // 두 번째 요청도 같은 서버가 받는다 (요청 하나씩 규칙이 막히지 않는다).
+        let res2 = crate::http::call(
+            "POST",
+            &format!("http://{addr}/infer"),
+            &BTreeMap::new(),
+            Some("[5, 7, 3]"),
+            Duration::from_secs(5),
+        )
+        .expect("두 번째 요청이 실패했다");
+        assert_eq!(res2.json().unwrap(), serde_json::json!(7));
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn http_server_reads_the_query_string_when_the_body_is_empty() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/q");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpq"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+
+        let res = crate::http::call(
+            "GET",
+            &format!("http://{addr}/q?name=%EA%B0%80+%EB%82%98&n=3"),
+            &BTreeMap::new(),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("요청이 실패했다");
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+        assert_eq!(res.json().unwrap(), serde_json::json!({"name": "가 나", "n": "3"}));
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn http_server_returns_404_for_another_path() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("http404"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+
+        let res = crate::http::call("GET", &format!("http://{addr}/nope"), &BTreeMap::new(), None, Duration::from_secs(5))
+            .expect("요청이 실패했다");
+        assert_eq!(res.status, 404);
+        assert!(res.json().unwrap()["error"].is_string(), "본문: {}", res.body);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 응답 싱크가 없으면 제한 시간 뒤 504 가 나가야 한다.
+    /// 기본 10초를 다 기다리지 않도록 `http_reply_timeout` 을 줄여 실제 응답을 받아 본다.
+    #[test]
+    fn http_server_without_a_reply_sink_answers_504() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        // 응답 싱크 대신 로그만 붙인다 — 값은 흐르지만 답하는 노드가 없다.
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+        p.add_link(server, log).unwrap();
+
+        let mut runner = Runner::new(Project::new("p"), p, tmp_dir("http504"), DevicePref::Cpu);
+        assert_eq!(runner.http_reply_timeout, HTTP_REPLY_TIMEOUT, "기본값이 상수와 달라졌다");
+        runner.http_reply_timeout = Duration::from_millis(300);
+        let h = runner.start().unwrap();
+        wait_server_up(&h);
+
+        let res = crate::http::call(
+            "POST",
+            &format!("http://{addr}/infer"),
+            &BTreeMap::new(),
+            Some("{}"),
+            Duration::from_secs(5),
+        )
+        .expect("504 응답이 오지 않았다");
+        assert_eq!(res.status, 504, "본문: {}", res.body);
+        let body = res.json().expect("504 본문이 JSON 이 아니다");
+        assert_eq!(body["status"], serde_json::json!(504));
+        assert!(body["error"].as_str().unwrap().contains("응답"), "본문: {}", res.body);
+
+        // 504 가 나왔다는 것 자체가 "요청은 받았고, 제한 시간 안에 답이 없었다" 는 증거다.
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn stopping_closes_the_socket_and_refuses_new_connections() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpstop"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+
+        // 살아 있을 때는 답한다.
+        let url = format!("http://{addr}/infer");
+        let ok = crate::http::call("POST", &url, &BTreeMap::new(), Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(ok.status, 200);
+
+        let t = Instant::now();
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)), "stop 후에도 끝나지 않았다");
+        assert!(t.elapsed() < Duration::from_millis(400), "HTTP 서버 정리가 느리다: {:?}", t.elapsed());
+
+        // 소켓이 닫혔으니 새 연결은 거부된다.
+        let mut refused = false;
+        for _ in 0..20 {
+            match std::net::TcpStream::connect(&addr) {
+                Ok(_) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused, "stop 뒤에도 {addr} 이 연결을 받는다");
+    }
+
+    #[test]
+    fn normalize_path_is_forgiving() {
+        assert_eq!(normalize_path("/infer"), "/infer");
+        assert_eq!(normalize_path("infer"), "/infer");
+        assert_eq!(normalize_path("/infer/"), "/infer");
+        assert_eq!(normalize_path("  /a/b/  "), "/a/b");
+        assert_eq!(normalize_path(""), "/");
+        assert_eq!(normalize_path("/"), "/");
+    }
+
+    #[test]
+    fn query_strings_become_json_objects() {
+        assert_eq!(query_to_value("a=1&b=hi"), Value::Json(serde_json::json!({"a":"1","b":"hi"})));
+        // `+` 는 공백, `%XX` 는 바이트.
+        assert_eq!(query_to_value("s=a+b%21"), Value::Json(serde_json::json!({"s":"a b!"})));
+        // 값 없는 키, 빈 쿼리.
+        assert_eq!(query_to_value("flag"), Value::Json(serde_json::json!({"flag":""})));
+        assert_eq!(query_to_value(""), Value::Json(serde_json::json!({})));
+        // 깨진 이스케이프는 그대로 둔다.
+        assert_eq!(form_decode("a%zz"), "a%zz");
+        assert_eq!(form_decode("%ED%95%9C"), "한");
+    }
+
+    // ── WebSocket 통합 (로컬 에코 서버) ──
+
+    /// 붙는 클라이언트마다 받은 텍스트를 그대로 돌려주는 시험용 서버.
+    /// 드롭되면 리스너를 닫고 스레드를 접는다.
+    struct EchoServer {
+        url: String,
+        stop: Arc<AtomicBool>,
+        /// 서버가 실제로 받은 메시지 (싱크 검증용).
+        seen: Receiver<String>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl EchoServer {
+        /// `greet` 이 있으면 연결 직후 그 문자열을 먼저 보낸다.
+        fn start(greet: Option<&str>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("시험 서버를 열지 못했다");
+            let url = format!("ws://{}", listener.local_addr().expect("주소를 알 수 없다"));
+            listener.set_nonblocking(true).expect("논블로킹 설정 실패");
+            let stop = Arc::new(AtomicBool::new(false));
+            let (seen_tx, seen) = crossbeam_channel::unbounded();
+            let (s2, greet) = (stop.clone(), greet.map(|g| g.to_string()));
+            let handle = std::thread::spawn(move || {
+                while !s2.load(Ordering::SeqCst) {
+                    let stream = match listener.accept() {
+                        Ok((s, _)) => s,
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    stream.set_nonblocking(false).ok();
+                    let Ok(mut ws) = tungstenite::accept(stream) else { continue };
+                    ws.get_mut().set_read_timeout(Some(Duration::from_millis(20))).ok();
+                    if let Some(g) = &greet {
+                        let _ = ws.send(tungstenite::Message::Text(g.clone().into()));
+                    }
+                    while !s2.load(Ordering::SeqCst) {
+                        match ws.read() {
+                            Ok(tungstenite::Message::Text(t)) => {
+                                let _ = seen_tx.send(t.to_string());
+                                if ws.send(tungstenite::Message::Text(t)).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(tungstenite::Message::Close(_)) => break,
+                            Ok(_) => {}
+                            Err(tungstenite::Error::Io(e)) if would_block(&e) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = ws.close(None);
+                }
+            });
+            Self { url, stop, seen, handle: Some(handle) }
+        }
+    }
+
+    impl Drop for EchoServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    #[test]
+    fn websocket_source_receives_frames_into_the_log() {
+        let server = EchoServer::start(Some(r#"{"hello":1}"#));
+        let mut p = Pipeline::new("ws-in");
+        p.tick_hz = 60.0;
+        let src = p.add_node(PNode::new(
+            PNodeKind::Source { source: Source::WebSocket { url: server.url.clone() } },
+            [0.0, 0.0],
+        ));
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+        p.add_link(src, log).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsin"), DevicePref::Cpu).start().unwrap();
+        let ev = wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == src));
+        match ev {
+            Some(RunnerEvent::Value { value, .. }) => {
+                // 서버가 JSON 텍스트를 보냈으니 Json 으로 들어와야 한다.
+                assert_eq!(value, Value::Json(serde_json::json!({"hello":1})));
+            }
+            other => panic!("WebSocket 수신 값이 오지 않았다: {other:?}"),
+        }
+        assert!(wait_for(&h, Duration::from_secs(2), |e| matches!(e, RunnerEvent::Log(_))).is_some());
+
+        let t = Instant::now();
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)), "stop 후에도 끝나지 않았다");
+        assert!(t.elapsed() < Duration::from_millis(400), "WebSocket 스레드 정리가 느리다: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn websocket_sink_sends_and_shares_the_connection_with_the_source() {
+        let server = EchoServer::start(None);
+        let mut p = Pipeline::new("ws-roundtrip");
+        p.tick_hz = 60.0;
+        // 같은 url 의 소스와 싱크 → 연결 하나를 공유한다. 보낸 것이 에코로 되돌아온다.
+        let manual = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
+        let out = p.add_node(PNode::new(
+            PNodeKind::Sink { sink: Sink::WebSocketSend { url: server.url.clone() } },
+            [1.0, 0.0],
+        ));
+        let back = p.add_node(PNode::new(
+            PNodeKind::Source { source: Source::WebSocket { url: server.url.clone() } },
+            [0.0, 1.0],
+        ));
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 1.0]));
+        p.add_link(manual, out).unwrap();
+        p.add_link(back, log).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsout"), DevicePref::Cpu).start().unwrap();
+        // 연결이 설 때까지 기다렸다가 보낸다.
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("연결됨")))
+                .is_some(),
+            "WebSocket 연결 로그가 오지 않았다"
+        );
+        h.inputs.send(RunnerInput::Manual { node: manual, value: Value::Text("핑".into()) }).unwrap();
+
+        let got = server.seen.recv_timeout(Duration::from_secs(5)).expect("서버가 메시지를 받지 못했다");
+        assert_eq!(got, "핑", "텍스트 값은 따옴표 없이 그대로 가야 한다");
+
+        let ev = wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == back));
+        match ev {
+            Some(RunnerEvent::Value { value, .. }) => assert_eq!(value, Value::Text("핑".into())),
+            other => panic!("에코가 돌아오지 않았다: {other:?}"),
+        }
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn websocket_failure_reports_and_keeps_the_loop_running() {
+        // 아무도 듣지 않는 포트. 붙지 못하고 백오프로 재시도한다.
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = l.local_addr().unwrap();
+            drop(l);
+            format!("ws://{addr}")
+        };
+        let mut p = Pipeline::new("ws-dead");
+        p.tick_hz = 60.0;
+        let ws = p.add_node(PNode::new(PNodeKind::Source { source: Source::WebSocket { url: dead } }, [0.0, 0.0]));
+        let timer = p.add_node(PNode::new(
+            PNodeKind::Source { source: Source::Timer { interval_ms: 10 } },
+            [0.0, 1.0],
+        ));
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+        p.add_link(ws, log).unwrap();
+        p.add_link(timer, log).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsdead"), DevicePref::Cpu).start().unwrap();
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Error { node, .. } if *node == Some(ws)))
+                .is_some(),
+            "연결 실패 오류가 오지 않았다"
+        );
+        // 루프는 계속 돈다.
+        assert!(
+            wait_for(&h, Duration::from_secs(3), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == timer))
+                .is_some(),
+            "WebSocket 실패 뒤 타이머가 멈췄다"
+        );
+
+        let t = Instant::now();
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)), "stop 후에도 끝나지 않았다");
+        // 백오프로 자고 있어도 곧바로 깨야 한다.
+        assert!(t.elapsed() < Duration::from_millis(400), "백오프 중 stop 이 느리다: {:?}", t.elapsed());
+        assert!(wait_for(&h, Duration::from_secs(1), |e| matches!(e, RunnerEvent::Stopped)).is_some());
     }
 }

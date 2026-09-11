@@ -210,10 +210,10 @@ fn conv_out(n: usize, k: usize, s: usize, p: usize) -> Result<usize, GraphError>
 
 /// 레이어 하나의 출력 형상 규칙.
 pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
-    let one = || inputs.first().cloned().ok_or_else(|| GraphError::MissingInput { slot: 0 });
+    let one = || inputs.first().cloned().ok_or(GraphError::MissingInput { slot: 0 });
     match kind {
         LayerKind::Input { shape } => {
-            if shape.is_empty() || shape.iter().any(|&d| d == 0) {
+            if shape.is_empty() || shape.contains(&0) {
                 return Err(invalid("입력 형상은 비어 있거나 0 을 포함할 수 없음"));
             }
             Ok(Shape::from_sample(shape))
@@ -276,7 +276,7 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
         }
         LayerKind::Reshape { shape } => {
             let s = one()?;
-            if shape.is_empty() || shape.iter().any(|&d| d == 0) {
+            if shape.is_empty() || shape.contains(&0) {
                 return Err(invalid("Reshape 형상은 비어 있거나 0 을 포함할 수 없음"));
             }
             let want: usize = shape.iter().product();

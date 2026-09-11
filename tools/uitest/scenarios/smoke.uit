@@ -1,0 +1,56 @@
+# 빌더의 뷰 전환 연기 시험. 각 뷰를 골든 이미지와 견준다.
+#
+#   UITEST_FRESH=1 tools/uitest/uitest.sh run tools/uitest/scenarios/smoke.uit
+#
+# 골든이 없으면 첫 실행이 만들고 "골든 생성" 으로 알린다. 만들어진 PPM 을 눈으로 확인한 뒤
+# 커밋해야 다음 실행부터 실제 비교가 된다. 갱신 절차는 tools/uitest/README.md 참고.
+
+# ── 좌표·시간 상수 ───────────────────────────────────────────────
+# 창이 뜬 직후에는 아직 최종 화면이 아니다. 앱이 GPU 장치를 훑는 동안(이 기계에서 10초 남짓,
+# 드라이버가 패닉하면 더) 다른 화면이 떠 있고 그동안에도 화면은 멎어 있어 프레임 안정 판정으로는
+# 구분되지 않는다. 그래서 첫 캡처 앞에만 넉넉히 기다린다.
+#   앱이 "준비 완료" 마커를 로그에 찍게 되면 이 줄을 `wait-log "준비 완료" 60` 으로 바꾸면 된다.
+set SETTLE_FIRST 35
+# 뷰를 바꾼 뒤 다시 그려질 때까지. 앱이 데워진 뒤라 짧아도 된다.
+set SETTLE 1.2
+# 뷰 바 아래 중앙 영역만 견주고 싶을 때 쓰는 예시 영역 (지금은 전체를 본다).
+set BODY 0,80 1600x920
+
+# ── 앱 띄우기 ────────────────────────────────────────────────────
+# 인자로 `.nlproj` 를 주면 그 문서를 연다. 인자가 없으면 빈 프로젝트로 시작한다.
+app
+wait-app
+sleep $SETTLE_FIRST
+
+# 시작 화면 전체.
+expect-shot 01-start
+
+# ── 뷰 전환 (Ctrl+2 … Ctrl+7) ────────────────────────────────────
+key -M ctrl -k 2 -m ctrl
+sleep $SETTLE
+expect-shot 02-view2
+
+key -M ctrl -k 3 -m ctrl
+sleep $SETTLE
+expect-shot 03-view3
+
+key -M ctrl -k 4 -m ctrl
+sleep $SETTLE
+expect-shot 04-view4
+
+key -M ctrl -k 5 -m ctrl
+sleep $SETTLE
+expect-shot 05-view5
+
+key -M ctrl -k 6 -m ctrl
+sleep $SETTLE
+expect-shot 06-view6
+
+key -M ctrl -k 7 -m ctrl
+sleep $SETTLE
+expect-shot 07-view7
+
+# 첫 뷰로 돌아와 시작 화면과 같은지 본다.
+key -M ctrl -k 1 -m ctrl
+sleep $SETTLE
+expect-shot 08-back-to-start

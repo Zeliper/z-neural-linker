@@ -8,10 +8,13 @@ use super::{
     COL_WARN, COL_WEAK,
 };
 use crate::canvas::Selection;
-use eframe::egui::{self, RichText};
+use crate::record::{self, RecordSession};
+use eframe::egui::{self, DragValue, RichText};
 use nl_core::dataset::{DataSource, DatasetSpec, Split, SyntheticKind};
 use nl_core::payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
+use nl_core::pipeline::Region;
 use nl_core::{DatasetId, Op, PayloadId};
+use std::path::PathBuf;
 use std::collections::BTreeMap;
 
 // ── 뷰 상태 ─────────────────────────────────────────────────────────
@@ -53,6 +56,30 @@ impl CsvForm {
     }
 }
 
+/// 녹화 시작 전 폼.
+pub struct RecordForm {
+    pub name: String,
+    /// 직접 고른 폴더. 비어 있으면 `<프로젝트>/recordings/<이름>`.
+    pub dir: Option<PathBuf>,
+    pub region: Region,
+    pub fps: f32,
+    /// 숫자키 0~9 에 붙일 라벨 이름.
+    pub labels: Vec<String>,
+}
+
+impl Default for RecordForm {
+    fn default() -> Self {
+        Self {
+            name: "녹화".into(),
+            dir: None,
+            region: Region::default(),
+            // 포털 경로는 초당 1~3장이 한계라 기본값을 낮게 잡는다.
+            fps: 2.0,
+            labels: record::default_labels(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DataState {
     /// 데이터셋별 마지막 스캔 결과.
@@ -61,12 +88,22 @@ pub struct DataState {
     pub csv_form: Option<CsvForm>,
     /// 페이로드 편집기에서 펼친 필드.
     pub open_field: Option<(PayloadId, bool, usize)>,
+    /// 녹화 폼 (열려 있을 때만).
+    pub record_form: Option<RecordForm>,
 }
 
 // ── 뷰 ──────────────────────────────────────────────────────────────
 
 pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState) -> Vec<ViewAction> {
     let mut actions = Vec::new();
+    if let Some(rec) = ctx.recording {
+        recording_panel(ui, ctx, rec, &mut actions);
+        return actions;
+    }
+    if state.record_form.is_some() {
+        record_form(ui, ctx, state, &mut actions);
+        return actions;
+    }
     if state.csv_form.is_some() {
         csv_form(ui, state, &mut actions);
         return actions;
@@ -105,8 +142,13 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
                 actions.push(ViewAction::PickImageFolder);
                 ui.close();
             }
-            if ui.button("녹화 폴더…").clicked() {
+            if ui.button("녹화 폴더…").on_hover_text("이미 녹화해 둔 폴더를 가져옵니다").clicked() {
                 actions.push(ViewAction::PickRecordedFolder);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("⏺ 녹화 데이터셋 만들기…").clicked() {
+                actions.push(ViewAction::StartRecordForm);
                 ui.close();
             }
         });
@@ -299,6 +341,203 @@ fn csv_form(ui: &mut egui::Ui, state: &mut DataState, actions: &mut Vec<ViewActi
     }
     if !close {
         state.csv_form = Some(form);
+    }
+}
+
+// ── 녹화 ────────────────────────────────────────────────────────────
+
+/// 녹화 시작 폼. 폴더·영역·fps·라벨 키를 정한다.
+fn record_form(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &mut Vec<ViewAction>) {
+    let Some(mut form) = state.record_form.take() else { return };
+    let mut close = false;
+
+    ui.heading("녹화 데이터셋 만들기");
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("화면을 정해진 빠르기로 찍어 프레임과 라벨을 함께 저장합니다. 정지하면 데이터셋이 됩니다.")
+            .color(COL_WEAK)
+            .size(11.5),
+    );
+    ui.add_space(8.0);
+
+    egui::Grid::new("record-form").num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
+        ui.label(RichText::new("이름").color(COL_WEAK));
+        ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(240.0));
+        ui.end_row();
+
+        ui.label(RichText::new("폴더").color(COL_WEAK));
+        ui.horizontal(|ui| {
+            let shown = match (&form.dir, ctx.base_dir) {
+                (Some(d), _) => d.display().to_string(),
+                (None, Some(base)) => record::default_dir(base, &form.name).display().to_string(),
+                (None, None) => "(프로젝트를 먼저 저장하거나 폴더를 고르세요)".into(),
+            };
+            ui.label(RichText::new(shown).size(11.0));
+            if ui.small_button("고르기…").clicked() {
+                actions.push(ViewAction::PickRecordDir);
+            }
+            if form.dir.is_some() && ui.small_button("기본값").clicked() {
+                form.dir = None;
+            }
+        });
+        ui.end_row();
+
+        ui.label(RichText::new("초당 프레임").color(COL_WEAK));
+        ui.add(DragValue::new(&mut form.fps).range(0.2..=60.0).speed(0.2));
+        ui.end_row();
+    });
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("캡처 영역").strong());
+    crate::views::pipeline::region_editor(ui, &mut form.region, ctx);
+
+    // 백엔드는 한 장 찍어 봐야 확실히 알 수 있다.
+    ui.add_space(6.0);
+    shot_block(ui, ctx, form.region, actions);
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("라벨 키").strong());
+    ui.label(
+        RichText::new("녹화 중 빌더 창에서 숫자키를 누르면 그때부터 그 라벨로 기록됩니다. 이름은 비워 둬도 됩니다.")
+            .color(COL_WEAK)
+            .size(11.0),
+    );
+    egui::Grid::new("record-labels").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+        for (i, label) in form.labels.iter_mut().enumerate() {
+            ui.label(RichText::new(format!("{i}")).color(COL_WEAK).size(11.5));
+            ui.add(egui::TextEdit::singleline(label).desired_width(200.0).hint_text("라벨 이름"));
+            ui.end_row();
+        }
+    });
+
+    ui.add_space(10.0);
+    let dir = match (&form.dir, ctx.base_dir) {
+        (Some(d), _) => Some(d.clone()),
+        (None, Some(base)) => Some(record::default_dir(base, &form.name)),
+        (None, None) => None,
+    };
+    let mut start = false;
+    let mut cancel = false;
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(dir.is_some(), |ui| {
+            start = ui.button(RichText::new("⏺ 녹화 시작").color(COL_ERROR)).clicked();
+        });
+        if dir.is_none() {
+            ui.label(RichText::new("프로젝트를 저장하거나 폴더를 고르세요").color(COL_WARN).size(11.5));
+        }
+        cancel = ui.button("취소").clicked();
+    });
+
+    if start {
+        if let Some(dir) = dir {
+            actions.push(ViewAction::StartRecording {
+                dir,
+                name: form.name.clone(),
+                region: form.region,
+                fps: form.fps,
+                labels: form.labels.clone(),
+            });
+            close = true;
+        }
+    }
+    if cancel {
+        close = true;
+    }
+    if !close {
+        state.record_form = Some(form);
+    }
+}
+
+/// "지금 한 장 캡처" 버튼 + 썸네일 + 백엔드 힌트. 캡처 소스 인스펙터도 같은 블록을 쓴다.
+pub(crate) fn shot_block(ui: &mut egui::Ui, ctx: &ViewCtx, region: Region, actions: &mut Vec<ViewAction>) {
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!ctx.shot.busy, |ui| {
+            if ui.button("📷 지금 한 장 캡처").clicked() {
+                actions.push(ViewAction::CaptureShot(region));
+            }
+        });
+        if ctx.shot.busy {
+            ui.label(RichText::new("찍는 중… (포털이면 권한 창이 뜰 수 있습니다)").color(COL_WEAK).size(11.0));
+        }
+        if let Some(b) = ctx.shot.backend {
+            ui.label(RichText::new(b.label()).color(COL_OK).size(11.0)).on_hover_text(b.hint());
+        }
+    });
+    if let Some(e) = &ctx.shot.error {
+        ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.0));
+    }
+    if ctx.shot.backend == Some(nl_io::Backend::Portal) {
+        ui.label(
+            RichText::new("포털 경로라 초당 1~3장이 한계입니다 — fps 를 낮게 잡으세요").color(COL_WARN).size(11.0),
+        );
+    }
+    if let Some(t) = &ctx.shot.texture {
+        let (w, h) = ctx.shot.size;
+        let side = 260.0;
+        let scale = (side / w.max(1) as f32).min(side / h.max(1) as f32).min(1.0);
+        ui.add(egui::Image::new(t).fit_to_exact_size(egui::Vec2::new(w as f32 * scale, h as f32 * scale)));
+        ui.label(RichText::new(format!("{w}×{h}")).color(COL_WEAK).size(11.0));
+    }
+}
+
+/// 녹화 중 화면: 미리보기 · 프레임/드롭 수 · 현재 라벨 · 정지.
+fn recording_panel(ui: &mut egui::Ui, ctx: &ViewCtx, rec: &RecordSession, actions: &mut Vec<ViewAction>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("⏺ 녹화 중").color(COL_ERROR).size(16.0).strong());
+        ui.label(RichText::new(&rec.name).strong());
+        if ui.button(RichText::new("⏹ 정지하고 데이터셋 만들기").color(COL_OK)).clicked() {
+            actions.push(ViewAction::StopRecording);
+        }
+    });
+    ui.label(RichText::new(rec.dir.display().to_string()).color(COL_WEAK).size(11.0));
+    ui.separator();
+
+    let elapsed = (ctx.now - rec.started_at).max(0.0);
+    ui.horizontal_wrapped(|ui| {
+        super::kv(ui, "경과", super::fmt_duration(elapsed));
+        super::kv(ui, "프레임", rec.frames().to_string());
+        super::kv(ui, "버린 프레임", rec.dropped().to_string());
+        super::kv(ui, "목표 fps", format!("{:.1}", rec.fps));
+        let actual = if elapsed > 0.5 { rec.frames() as f64 / elapsed } else { 0.0 };
+        super::kv(ui, "실제 fps", format!("{actual:.1}"));
+    });
+    if let Some(b) = rec.backend {
+        ui.label(RichText::new(format!("백엔드 {}", b.label())).color(COL_WEAK).size(11.0)).on_hover_text(b.hint());
+        if b == nl_io::Backend::Portal {
+            ui.label(RichText::new("포털 경로라 초당 1~3장이 한계입니다").color(COL_WARN).size(11.0));
+        }
+    }
+    if let Some(e) = rec.error() {
+        ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.5));
+    }
+
+    ui.add_space(6.0);
+    let current = rec.label();
+    ui.label(RichText::new(format!("현재 라벨: {} ({current})", rec.label_name(current))).size(14.0).strong());
+    ui.label(
+        RichText::new("빌더 창에 포커스가 있을 때 숫자키 0~9 로 라벨을 바꿉니다 (텍스트 칸에 커서가 있으면 무시).")
+            .color(COL_WEAK)
+            .size(11.0),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for (i, name) in rec.labels.iter().enumerate() {
+            let on = current == i as i64;
+            let text = if name.trim().is_empty() { format!("{i}") } else { format!("{i} {name}") };
+            ui.label(RichText::new(text).color(if on { COL_OK } else { COL_WEAK }).size(11.5));
+        }
+    });
+
+    ui.add_space(8.0);
+    match &rec.texture {
+        Some(t) => {
+            let side = 420.0;
+            let [w, h] = t.size();
+            let scale = (side / w.max(1) as f32).min(side / h.max(1) as f32).min(1.0);
+            ui.add(egui::Image::new(t).fit_to_exact_size(egui::Vec2::new(w as f32 * scale, h as f32 * scale)));
+        }
+        None => {
+            ui.label(RichText::new("첫 프레임을 기다리는 중…").color(COL_WEAK));
+        }
     }
 }
 

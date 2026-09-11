@@ -1,0 +1,5 @@
+# 여러 시나리오가 함께 쓰는 앞머리. `include common.uit` 로 가져다 쓴다.
+set SETTLE 1.2
+app
+wait-app
+sleep $SETTLE

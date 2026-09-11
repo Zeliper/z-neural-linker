@@ -21,3 +21,15 @@ done
 joined="$(IFS=,; echo "${entries[*]}")"
 printf '{\n  "version": "%s",\n  "notes": "%s",\n  "assets": {%s}\n}\n' "$VERSION" "$NOTES" "$joined" > latest.json
 echo "latest.json 생성:"; cat latest.json
+
+# 선택: 매니페스트 서명. nl-update 의 verify_manifest 가 latest.json 옆의 latest.json.minisig 를 검증한다.
+#   minisign -Sm latest.json                        # 비밀키 암호를 대화형으로 묻는다
+#   minisign -Sm latest.json -s ~/.minisign/nl.key  # 키 파일 지정
+# 공개키(minisign.pub 의 둘째 줄)를 앱에 상수로 박아 Updater::with_public_key 에 주면
+# 배포 서버가 뚫려도 바꿔치기된 매니페스트로 자산을 내려받지 않는다.
+# MINISIGN_KEY 를 지정하면 여기서 바로 서명한다.
+if [[ -n "${MINISIGN_KEY:-}" ]]; then
+  command -v minisign >/dev/null || { echo "minisign 이 없습니다 — MINISIGN_KEY 를 지정했지만 서명할 수 없습니다"; exit 1; }
+  minisign -Sm latest.json -s "$MINISIGN_KEY"
+  echo "서명 생성: latest.json.minisig"
+fi

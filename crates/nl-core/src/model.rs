@@ -50,11 +50,14 @@ pub struct ProjectSettings {
     /// 실행 기록·체크포인트 폴더. 없으면 프로젝트 파일 옆 `<이름>.runs/`.
     #[serde(default)]
     pub runs_dir: Option<String>,
+    /// 배포 빌드 설정. 빌드 뷰에서 한 번 정하면 문서에 남는다.
+    #[serde(default)]
+    pub build: Option<crate::bundle::BuildSpec>,
 }
 
 impl Default for ProjectSettings {
     fn default() -> Self {
-        Self { default_device: DevicePref::Auto, runs_dir: None }
+        Self { default_device: DevicePref::Auto, runs_dir: None, build: None }
     }
 }
 

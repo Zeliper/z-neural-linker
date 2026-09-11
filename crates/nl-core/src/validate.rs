@@ -2,7 +2,7 @@
 
 use crate::ids::{ModelId, NodeId, PNodeId, PipelineId};
 use crate::model::{LayerKind, Project};
-use crate::pipeline::PNodeKind;
+use crate::pipeline::{PNodeKind, Sink, Source};
 use crate::shape::infer;
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +96,33 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                     }
                 }
             }
+            // HTTP 응답 싱크는 같은 파이프라인의 HTTP 서버 소스를 가리켜야 한다.
+            if let PNodeKind::Sink { sink: Sink::HttpReply { server } } = &n.kind {
+                match pl.nodes.get(server) {
+                    None => v.push(err(Where::PNode(*pid, n.id), "HTTP 응답: 가리키는 서버 노드가 이 파이프라인에 없음")),
+                    Some(target) => {
+                        if !matches!(target.kind, PNodeKind::Source { source: Source::HttpServer { .. } }) {
+                            v.push(err(
+                                Where::PNode(*pid, n.id),
+                                format!("HTTP 응답: 가리키는 노드가 HTTP 서버가 아님 ({})", target.kind.label()),
+                            ));
+                        }
+                    }
+                }
+            }
+            // 응답할 싱크가 없는 HTTP 서버는 모든 요청이 시간 초과로 끝난다.
+            if let PNodeKind::Source { source: Source::HttpServer { .. } } = &n.kind {
+                let replied = pl.nodes.values().any(|o| {
+                    matches!(&o.kind, PNodeKind::Sink { sink: Sink::HttpReply { server } } if *server == n.id)
+                });
+                if !replied {
+                    v.push(warn(
+                        Where::PNode(*pid, n.id),
+                        "HTTP 서버: 짝이 되는 HTTP 응답 싱크가 없어 모든 요청이 시간 초과로 끝남",
+                    ));
+                }
+            }
+
             let ups = pl.upstream(n.id).len();
             let downs = pl.downstream(n.id).len();
             if !n.kind.is_source() && ups == 0 {
@@ -106,7 +133,8 @@ pub fn validate(p: &Project) -> Vec<Issue> {
             }
         }
     }
-    v.sort_by(|a, b| b.severity.cmp(&a.severity));
+    // 심각한 것부터. `sort_by_key` 는 안정 정렬이라 같은 심각도 안의 순서는 유지된다.
+    v.sort_by_key(|a| std::cmp::Reverse(a.severity));
     v
 }
 
@@ -114,6 +142,66 @@ pub fn validate(p: &Project) -> Vec<Issue> {
 mod tests {
     use super::*;
     use crate::model::{Node, Port};
+
+    #[test]
+    fn http_reply_must_point_at_an_http_server_in_the_same_pipeline() {
+        use crate::pipeline::{PNode, PNodeKind, Pipeline, Sink, Source};
+        let mut p = Project::new("p");
+        let mut pl = Pipeline::new("api");
+        let server = pl.add_node(PNode::new(
+            PNodeKind::Source { source: Source::HttpServer { bind: "127.0.0.1:0".into(), path: "/x".into() } },
+            [0.0, 0.0],
+        ));
+        let log = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+        let reply = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [2.0, 0.0]));
+        pl.add_link(server, reply).unwrap();
+        let pid = pl.id;
+        p.pipelines.insert(pid, pl);
+
+        // 올바른 짝이면 HTTP 관련 오류가 없다.
+        let issues = validate(&p);
+        assert!(
+            !issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("HTTP 응답")),
+            "{issues:?}"
+        );
+
+        // 서버가 아닌 노드를 가리키면 오류.
+        p.pipelines.get_mut(&pid).unwrap().nodes.get_mut(&reply).unwrap().kind =
+            PNodeKind::Sink { sink: Sink::HttpReply { server: log } };
+        let issues = validate(&p);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("HTTP 서버가 아님")),
+            "{issues:?}"
+        );
+
+        // 없는 노드를 가리키면 오류.
+        p.pipelines.get_mut(&pid).unwrap().nodes.get_mut(&reply).unwrap().kind =
+            PNodeKind::Sink { sink: Sink::HttpReply { server: PNodeId::from_u128(999) } };
+        let issues = validate(&p);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("이 파이프라인에 없음")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn http_server_without_a_reply_sink_is_a_warning() {
+        use crate::pipeline::{PNode, PNodeKind, Pipeline, Sink, Source};
+        let mut p = Project::new("p");
+        let mut pl = Pipeline::new("api");
+        let server = pl.add_node(PNode::new(
+            PNodeKind::Source { source: Source::HttpServer { bind: "127.0.0.1:0".into(), path: "/x".into() } },
+            [0.0, 0.0],
+        ));
+        let log = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+        pl.add_link(server, log).unwrap();
+        p.pipelines.insert(pl.id, pl);
+        let issues = validate(&p);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Warning && i.message.contains("시간 초과")),
+            "{issues:?}"
+        );
+    }
 
     #[test]
     fn reports_missing_io_and_dangling() {

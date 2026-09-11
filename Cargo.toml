@@ -6,6 +6,7 @@ members = [
     "crates/nl-io",
     "crates/nl-gui",
     "crates/nl-bundle",
+    "crates/nl-update",
     "crates/nl-app",
     "crates/nl-runtime",
     "tools/uitest/vseat",
@@ -40,10 +41,10 @@ eframe = { version = "0.36.1", default-features = false }
 egui = "0.36"
 egui_extras = "0.36"
 egui_plot = "0.37"
-egui_kittest = "0.36"
+egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
 winit = { version = "0.30", default-features = true }
 rfd = "0.17"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
 # IO 어댑터
 # 화면 캡처: Windows 는 xcap, Linux 는 순수 Rust(x11rb + wlr-screencopy) — 시스템 개발 라이브러리 불필요
 xcap = "0.9"
@@ -54,13 +55,17 @@ enigo = { version = "0.6", default-features = false }
 # default = ["async-io", "blocking-api"] 그대로 쓴다(블로킹 API, tokio 없음).
 zbus = "5"
 ureq = { version = "3", features = ["json"] }
-tungstenite = "0.30"
+# WebSocket 소스/싱크. rustls TLS 로 wss:// 지원 — 시스템 개발 라이브러리 불필요
+# (webpki-roots 내장 인증서를 쓰므로 OS 인증서 저장소도 필요 없다).
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tiny_http = "0.12"
 sysinfo = "0.39"
 csv = "1"
 directories = "6"
 sha2 = "0.10"
+sha1 = "0.10"
 semver = "1"
+minisign-verify = "0.2"
 zip = { version = "6", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"

@@ -1,7 +1,7 @@
 //! 모델 뷰 = 모델 선택 줄 + 레이어 그래프 캔버스.
 
 use super::{ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_WEAK};
-use crate::canvas::{CanvasAction, CanvasState, Selection};
+use crate::canvas::{CanvasAction, CanvasState, Selection, SelectionState};
 use eframe::egui::{self, RichText};
 use nl_core::shape::ShapeReport;
 use nl_core::{ModelDef, ModelId};
@@ -13,7 +13,13 @@ pub struct ModelViewOut {
     pub actions: Vec<ViewAction>,
 }
 
-pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, canvas: &mut CanvasState, report: &ShapeReport) -> ModelViewOut {
+pub fn show(
+    ui: &mut egui::Ui,
+    ctx: &ViewCtx,
+    canvas: &mut CanvasState,
+    report: &ShapeReport,
+    sel: &mut SelectionState,
+) -> ModelViewOut {
     let mut out = ModelViewOut::default();
     let active = ctx.active_model();
 
@@ -51,7 +57,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, canvas: &mut CanvasState, report: 
     match active {
         Some(id) => {
             let graph = &ctx.project.models[&id].graph;
-            out.canvas = canvas.show(ui, id, graph, report);
+            out.canvas = canvas.show(ui, id, graph, report, sel);
         }
         None => {
             ui.vertical_centered(|ui| {

@@ -30,6 +30,10 @@ pub enum Source {
     GuiEvent { widget: WidgetId },
     /// 빌더에서 사용자가 값을 직접 넣는 시험용 소스.
     Manual,
+    /// **인바운드** HTTP 서버. 배포된 앱을 바깥 프로그램이 호출할 수 있게 연다.
+    /// 들어온 요청 본문이 값이 되고, 짝이 되는 [`Sink::HttpReply`] 가 응답을 돌려준다.
+    /// `bind` 는 `"127.0.0.1:8787"` 처럼 주소:포트, `path` 는 `"/infer"` 처럼 받을 경로다.
+    HttpServer { bind: String, path: String },
 }
 
 /// 마우스·키보드 액션. 모델 출력(클래스 인덱스)에 대응시킨다.
@@ -70,6 +74,9 @@ pub enum Sink {
     GuiWidget { widget: WidgetId },
     File { path: String, #[serde(default)] append: bool },
     Log,
+    /// [`Source::HttpServer`] 노드가 받은 요청에 값을 JSON 으로 돌려준다.
+    /// `server` 는 그 서버 노드의 id 여야 한다 (같은 파이프라인 안).
+    HttpReply { server: PNodeId },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,6 +116,7 @@ impl PNodeKind {
                 Source::Timer { .. } => "타이머",
                 Source::GuiEvent { .. } => "GUI 이벤트",
                 Source::Manual => "수동 입력",
+                Source::HttpServer { .. } => "HTTP 서버",
             },
             PNodeKind::Model { .. } => "모델",
             PNodeKind::Logic { logic } => match logic {
@@ -126,6 +134,7 @@ impl PNodeKind {
                 Sink::GuiWidget { .. } => "GUI 위젯",
                 Sink::File { .. } => "파일 쓰기",
                 Sink::Log => "로그",
+                Sink::HttpReply { .. } => "HTTP 응답",
             },
         }
     }

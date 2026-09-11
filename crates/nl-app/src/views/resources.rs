@@ -62,6 +62,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut ResourceState) -> Vec<
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(POLL_SECS));
     }
     let s = &state.snapshot;
+    let mut actions = Vec::new();
 
     egui::ScrollArea::vertical().id_salt("resources-scroll").show(ui, |ui| {
         egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
@@ -144,8 +145,64 @@ pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut ResourceState) -> Vec<
                 ui.label(RichText::new("일부 GPU 가 학습 장치로 열거되지 않았습니다").color(COL_WARN).size(11.5));
             }
         });
+        ui.add_space(10.0);
+        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
+            update_block(ui, ctx, &mut actions);
+        });
     });
-    Vec::new()
+    actions
+}
+
+/// 빌더 자체 업데이트 설정. 새 버전이 없으면 툴바에 배지가 뜨지 않으므로, 끄고 켜는 자리는 여기다.
+fn update_block(ui: &mut egui::Ui, ctx: &ViewCtx, actions: &mut Vec<ViewAction>) {
+    ui.label(RichText::new("빌더 업데이트").size(15.0).strong());
+    ui.separator();
+    ui.label(RichText::new(format!("현재 v{}", env!("CARGO_PKG_VERSION"))).color(COL_WEAK));
+
+    let mut check = ctx.update_check;
+    if ui
+        .checkbox(&mut check, "시작할 때 새 버전 확인")
+        .on_hover_text("끄면 이 컴퓨터에서 업데이트 서버에 연결하지 않습니다")
+        .changed()
+    {
+        actions.push(ViewAction::SetUpdateCheck(check));
+    }
+
+    let (text, color) = update_status(ctx.update_state);
+    ui.label(RichText::new(text).color(color).size(11.5));
+
+    ui.horizontal(|ui| {
+        let busy = ctx.update_state.map(|s| s.is_busy()).unwrap_or(false);
+        if ui.add_enabled(!busy, egui::Button::new("지금 확인")).clicked() {
+            actions.push(ViewAction::CheckUpdateNow);
+        }
+        if ui.button("업데이트 창 열기").clicked() {
+            actions.push(ViewAction::ShowUpdateWindow(true));
+        }
+    });
+}
+
+/// 상태 한 줄과 그 색.
+pub fn update_status(state: Option<&nl_update::State>) -> (String, egui::Color32) {
+    use nl_update::State as S;
+    match state {
+        None => ("아직 확인하지 않았습니다".to_string(), COL_WEAK),
+        Some(S::Idle) => ("대기 중".to_string(), COL_WEAK),
+        Some(S::Checking) => ("확인하는 중…".to_string(), COL_WEAK),
+        Some(S::UpToDate) => ("최신입니다".to_string(), COL_OK),
+        Some(S::Available(a)) => (format!("새 버전 v{} 이 있습니다", a.version), COL_OK),
+        Some(S::Downloading { received, total }) => (
+            match total {
+                Some(t) => format!("내려받는 중 {} / {}", fmt_bytes(*received), fmt_bytes(*t)),
+                None => format!("내려받는 중 {}", fmt_bytes(*received)),
+            },
+            COL_WEAK,
+        ),
+        Some(S::Downloaded { .. }) => ("내려받았습니다 — 적용을 기다립니다".to_string(), COL_OK),
+        Some(S::Applying) => ("적용하는 중…".to_string(), COL_WEAK),
+        Some(S::Applied(a)) => (a.message().to_string(), COL_OK),
+        Some(S::Failed(e)) => (format!("확인 실패: {e}"), COL_WARN),
+    }
 }
 
 pub fn kind_label(k: nl_engine::DeviceKind) -> &'static str {
@@ -180,6 +237,31 @@ mod tests {
         assert_eq!(v.len(), HISTORY);
         assert_eq!(v[0][0], 10.0);
         assert_eq!(v.last().unwrap()[0], (HISTORY + 9) as f64);
+    }
+
+    /// 상태마다 사람이 읽을 문구가 있어야 한다 — 빈 줄이 뜨면 무슨 일인지 알 수 없다.
+    #[test]
+    fn update_status_has_a_line_for_every_state() {
+        use nl_update::State as S;
+        let states = [
+            None,
+            Some(S::Idle),
+            Some(S::Checking),
+            Some(S::UpToDate),
+            Some(S::Downloading { received: 1024, total: Some(4096) }),
+            Some(S::Downloading { received: 1024, total: None }),
+            Some(S::Applying),
+            Some(S::Failed("주소를 찾지 못했습니다".into())),
+        ];
+        for st in &states {
+            let (text, _) = update_status(st.as_ref());
+            assert!(!text.trim().is_empty(), "{st:?} 의 문구가 비었다");
+        }
+        assert_eq!(update_status(Some(&S::UpToDate)).0, "최신입니다");
+        assert!(update_status(Some(&S::Failed("x".into()))).0.contains('x'));
+        // 진행률은 사람이 읽는 단위로 나온다.
+        let (text, _) = update_status(Some(&S::Downloading { received: 1024, total: Some(4096) }));
+        assert!(text.contains("1.0 KB") && text.contains("4.0 KB"), "{text}");
     }
 
     #[test]

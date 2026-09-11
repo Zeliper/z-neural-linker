@@ -5,9 +5,14 @@ pub mod canvas;
 pub mod fonts;
 pub mod inspector;
 pub mod outline;
+pub mod pcanvas;
 pub mod project;
+pub mod record;
 pub mod sample;
+pub mod session;
+pub mod tools;
+pub mod update_key;
 pub mod views;
 
 pub use app::{DocState, NlApp, View};
-pub use canvas::{CanvasAction, CanvasState, Selection};
+pub use canvas::{CanvasAction, CanvasState, Selection, SelectionState};
