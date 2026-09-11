@@ -19,6 +19,8 @@ image.workspace = true
 ureq.workspace = true
 tungstenite.workspace = true
 sysinfo.workspace = true
+# 녹화 meta.json 의 시작 시각(RFC 3339)
+chrono.workspace = true
 # 인바운드 HTTP 서버 (`Source::HttpServer`) + 시험용 로컬 서버
 tiny_http.workspace = true
 

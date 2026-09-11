@@ -54,19 +54,14 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum Split {
     /// 학습 설정의 `val_split` 비율로 자른다.
+    #[default]
     Ratio,
     /// 별도 검증 소스.
     Separate { validation: Box<DataSource> },
-}
-
-impl Default for Split {
-    fn default() -> Self {
-        Split::Ratio
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -3,6 +3,7 @@
 
 pub mod http;
 pub mod input;
+pub mod record;
 pub mod resources;
 pub mod runner;
 pub mod screen;
@@ -20,3 +21,5 @@ pub use input::parse_key;
 pub use runner::RunnerInput;
 /// 연결을 유지하는 화면 캡처기(반복 캡처용)와 실제로 쓰인 백엔드 이름.
 pub use screen::{Backend, Capturer};
+/// 화면 녹화 → `DataSource::Recorded` 폴더. `FrameSource` 로 다른 프레임 공급원을 끼울 수 있다.
+pub use record::{FrameSource, Recorder, RecorderHandle};

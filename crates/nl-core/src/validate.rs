@@ -133,7 +133,8 @@ pub fn validate(p: &Project) -> Vec<Issue> {
             }
         }
     }
-    v.sort_by(|a, b| b.severity.cmp(&a.severity));
+    // 심각한 것부터. `sort_by_key` 는 안정 정렬이라 같은 심각도 안의 순서는 유지된다.
+    v.sort_by_key(|a| std::cmp::Reverse(a.severity));
     v
 }
 
