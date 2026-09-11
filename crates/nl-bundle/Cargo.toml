@@ -13,6 +13,12 @@ zip.workspace = true
 tar.workspace = true
 flate2.workspace = true
 sha2.workspace = true
+sha1.workspace = true
+image.workspace = true
+ureq.workspace = true
+crossbeam-channel.workspace = true
+directories.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

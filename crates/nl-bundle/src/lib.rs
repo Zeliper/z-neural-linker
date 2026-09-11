@@ -1,5 +1,13 @@
 //! `.nlapp` 번들 (zip) 읽기/쓰기와 런타임 바이너리 첨부. 규약은 `nl_core::bundle`.
 
+pub mod icon;
+pub mod inno;
+pub mod tools;
+
+pub use icon::{png_bytes_to_ico, png_bytes_to_square_png, png_to_ico};
+pub use inno::{app_id, find_inno_setup, render_iss, windows_installer, InnoSetup};
+pub use tools::{install_inno_setup_plan, run_tool_plan, ToolPlan, ToolProgress};
+
 use nl_core::bundle::{trailer, BUNDLE_TRAILER_MAGIC, MANIFEST_NAME, PROJECT_NAME, WEIGHTS_DIR};
 use nl_core::{BundleManifest, Project, ProjectFile};
 use sha2::{Digest, Sha256};
@@ -263,17 +271,58 @@ const DESKTOP: &str = include_str!("../templates/app.desktop");
 const README_LINUX: &str = include_str!("../templates/README-linux.txt");
 const README_WINDOWS: &str = include_str!("../templates/README-windows.txt");
 
+/// `archive_with` 에 넘기는 설정. 기존 `archive` 가 받던 것에 아이콘이 더해졌다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchiveOptions<'a> {
+    pub target: Target,
+    /// 번들이 첨부된 앱 실행 파일.
+    pub app_exe: &'a Path,
+    pub app_name: &'a str,
+    pub version: &'a str,
+    pub out_dir: &'a Path,
+    /// 앱 아이콘 PNG. Linux 아카이브에 `<slug>.png` 로 들어가고 `install.sh` 가 아이콘 테마에 설치한다.
+    pub icon: Option<&'a Path>,
+}
+
+impl<'a> ArchiveOptions<'a> {
+    pub fn new(target: Target, app_exe: &'a Path, app_name: &'a str, version: &'a str, out_dir: &'a Path) -> Self {
+        Self { target, app_exe, app_name, version, out_dir, icon: None }
+    }
+
+    pub fn icon(mut self, icon: Option<&'a Path>) -> Self {
+        self.icon = icon;
+        self
+    }
+}
+
 /// 배포 아카이브: Linux `tar.gz`(실행 파일 + install.sh + .desktop), Windows `zip`. 산출물 경로와 sha256 을 돌려준다.
+/// 아이콘까지 넣으려면 `archive_with` 를 쓴다.
 pub fn archive(target: Target, app_exe: &Path, app_name: &str, version: &str, out_dir: &Path) -> anyhow::Result<Artifact> {
+    archive_with(ArchiveOptions::new(target, app_exe, app_name, version, out_dir))
+}
+
+/// 아이콘을 비롯한 추가 설정까지 받는 배포 아카이브.
+pub fn archive_with(opts: ArchiveOptions<'_>) -> anyhow::Result<Artifact> {
+    let ArchiveOptions { target, app_exe, app_name, version, out_dir, icon } = opts;
     let slug = slugify(app_name);
     let exe_bytes = std::fs::read(app_exe)
         .map_err(|e| anyhow::anyhow!("앱 실행 파일을 읽지 못했습니다 ({}): {e}", app_exe.display()))?;
-    std::fs::create_dir_all(out_dir)?;
 
+    // 아이콘은 아이콘 테마가 요구하는 정사각 PNG 로 맞춰 둔다.
+    let icon_png = match icon {
+        Some(p) => {
+            let raw = std::fs::read(p)
+                .map_err(|e| anyhow::anyhow!("아이콘을 읽지 못했습니다 ({}): {e}", p.display()))?;
+            Some(icon::png_bytes_to_square_png(&raw, icon::LINUX_ICON_SIZE)?)
+        }
+        None => None,
+    };
+
+    std::fs::create_dir_all(out_dir)?;
     let path = match target {
         Target::LinuxX64 => {
             let out = out_dir.join(format!("{slug}-{version}-linux-x86_64.tar.gz"));
-            write_tar_gz(&out, &slug, app_name, version, &exe_bytes)?;
+            write_tar_gz(&out, &slug, app_name, version, &exe_bytes, icon_png.as_deref())?;
             out
         }
         Target::WindowsX64 => {
@@ -287,7 +336,14 @@ pub fn archive(target: Target, app_exe: &Path, app_name: &str, version: &str, ou
     Ok(Artifact { sha256: sha256_hex(&bytes), size: bytes.len() as u64, path })
 }
 
-fn write_tar_gz(out: &Path, slug: &str, app_name: &str, version: &str, exe: &[u8]) -> anyhow::Result<()> {
+fn write_tar_gz(
+    out: &Path,
+    slug: &str,
+    app_name: &str,
+    version: &str,
+    exe: &[u8],
+    icon_png: Option<&[u8]>,
+) -> anyhow::Result<()> {
     let file = File::create(out)?;
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
@@ -300,6 +356,9 @@ fn write_tar_gz(out: &Path, slug: &str, app_name: &str, version: &str, exe: &[u8
     tar_append(&mut tar, &format!("{slug}/install.sh"), install.as_bytes(), 0o755)?;
     tar_append(&mut tar, &format!("{slug}/{slug}.desktop"), desktop.as_bytes(), 0o644)?;
     tar_append(&mut tar, &format!("{slug}/README.txt"), readme.as_bytes(), 0o644)?;
+    if let Some(png) = icon_png {
+        tar_append(&mut tar, &format!("{slug}/{slug}.png"), png, 0o644)?;
+    }
 
     tar.into_inner()?.finish()?;
     Ok(())
@@ -329,10 +388,34 @@ fn write_windows_zip(out: &Path, slug: &str, app_name: &str, version: &str, exe:
 }
 
 fn fill(template: &str, slug: &str, app_name: &str, version: &str) -> String {
-    template
-        .replace("{{APP_SLUG}}", slug)
-        .replace("{{APP_NAME}}", app_name)
-        .replace("{{APP_VERSION}}", version)
+    fill_tokens(
+        template,
+        "{{",
+        &[("{{APP_SLUG}}", slug), ("{{APP_NAME}}", app_name), ("{{APP_VERSION}}", version)],
+    )
+}
+
+/// 템플릿을 한 번만 훑어 치환한다. 값 안에 다른 자리표시자 문자열이 들어 있어도 다시 치환되지 않는다.
+/// `open` 은 자리표시자가 시작하는 글자(`@` 또는 `{{`), `pairs` 는 구분자를 포함한 전체 토큰과 값이다.
+pub(crate) fn fill_tokens(template: &str, open: &str, pairs: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len() + 256);
+    let mut rest = template;
+    'scan: while let Some(at) = rest.find(open) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        for (token, value) in pairs {
+            if let Some(next) = tail.strip_prefix(*token) {
+                out.push_str(value);
+                rest = next;
+                continue 'scan;
+            }
+        }
+        // 아는 토큰이 아니면 여는 글자 하나만 흘려보내고 계속 찾는다.
+        out.push_str(&tail[..open.len()]);
+        rest = &tail[open.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 파일·디렉터리 이름으로 안전한 소문자 ASCII 슬러그. 한글 등 비 ASCII 는 `-` 로 접힌다.
@@ -556,6 +639,72 @@ mod tests {
         let mut readme = String::new();
         zip.by_name("README.txt").unwrap().read_to_string(&mut readme).unwrap();
         assert!(readme.contains("Demo App 0.9.0"));
+    }
+
+    #[test]
+    fn linux_archive_with_icon_adds_png_and_installs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("built-app");
+        std::fs::write(&exe, b"fake app binary").unwrap();
+        let icon = dir.path().join("icon.png");
+        std::fs::write(&icon, icon::sample_png(300, 300)).unwrap();
+
+        let art = archive_with(
+            ArchiveOptions::new(Target::LinuxX64, &exe, "내 앱", "1.2.3", dir.path()).icon(Some(&icon)),
+        )
+        .unwrap();
+
+        let gz = flate2::read::GzDecoder::new(File::open(&art.path).unwrap());
+        let mut tar = tar::Archive::new(gz);
+        let mut names = Vec::new();
+        let mut png = Vec::new();
+        let mut install = String::new();
+        for e in tar.entries().unwrap() {
+            let mut e = e.unwrap();
+            let name = e.path().unwrap().to_string_lossy().to_string();
+            if name.ends_with(".png") {
+                e.read_to_end(&mut png).unwrap();
+            }
+            if name.ends_with("install.sh") {
+                e.read_to_string(&mut install).unwrap();
+            }
+            names.push(name);
+        }
+        assert!(names.iter().any(|n| n == "app/app.png"), "{names:?}");
+        // 아이콘 테마가 요구하는 256×256 정사각으로 맞춰 들어간다.
+        let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
+        assert_eq!((img.width(), img.height()), (icon::LINUX_ICON_SIZE, icon::LINUX_ICON_SIZE));
+        assert!(install.contains("hicolor/256x256/apps"), "install.sh 가 아이콘을 설치하지 않습니다");
+        assert!(install.contains("app.png"));
+    }
+
+    #[test]
+    fn linux_archive_without_icon_has_no_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("built-app");
+        std::fs::write(&exe, b"x").unwrap();
+        let art = archive(Target::LinuxX64, &exe, "내 앱", "1.0.0", dir.path()).unwrap();
+
+        let gz = flate2::read::GzDecoder::new(File::open(&art.path).unwrap());
+        let mut tar = tar::Archive::new(gz);
+        let names: Vec<String> =
+            tar.entries().unwrap().map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string()).collect();
+        assert!(!names.iter().any(|n| n.ends_with(".png")), "{names:?}");
+        assert_eq!(names.len(), 4);
+    }
+
+    #[test]
+    fn fill_does_not_substitute_inside_substituted_values() {
+        // 앱 이름이 다른 자리표시자처럼 생겨도 한 번만 치환된다.
+        let out = fill("이름={{APP_NAME}} 버전={{APP_VERSION}}", "slug", "{{APP_VERSION}}", "9.9");
+        assert_eq!(out, "이름={{APP_VERSION}} 버전=9.9");
+    }
+
+    #[test]
+    fn fill_tokens_leaves_unknown_markers_alone() {
+        assert_eq!(fill_tokens("a@B@c", "@", &[("@X@", "1")]), "a@B@c");
+        assert_eq!(fill_tokens("a@X@c", "@", &[("@X@", "1")]), "a1c");
+        assert_eq!(fill_tokens("{{A}}{{B}}", "{{", &[("{{A}}", "1")]), "1{{B}}");
     }
 
     #[test]
