@@ -26,9 +26,93 @@ $U hold alt; $U drag 300 170 500 170; $U release alt   # Alt+드래그(노드 �
 $U key -M ctrl -k s -m ctrl   # Ctrl+S      /  key -k Tab  /  key -k Return  /  key -M alt -k Left -m alt
 $U type "sync"                # 문자열 입력
 $U ime; $U click 130 77; $U key -M ctrl -k space -m ctrl; $U type "dkssud"   # → 안녕
+$U run scenarios/smoke.uit    # 시나리오 실행(아래 "시나리오 러너")
 $U log; $U status; $U stop
 ```
 좌표는 가상 출력 기준이고 앱 창은 출력 전체를 채우므로 캡처의 픽셀 좌표를 그대로 쓰면 된다.
+
+## 시나리오 러너
+
+한 줄에 한 명령인 `.uit` 파일을 순서대로 실행한다. 명령 이름은 `uitest.sh` 하위 명령과 같아서
+손으로 치던 것을 그대로 옮겨 적으면 된다.
+
+```sh
+$U start
+UITEST_FRESH=1 $U run tools/uitest/scenarios/smoke.uit
+$U stop
+```
+
+실패한 단계에서 즉시 멈추고, 어느 파일 몇 번째 줄인지와 함께 전체 화면을 `$UITEST_DIR/fail-<단계>.ppm`
+으로 남긴다. 종료 코드로 성공(0)·실패(1)를 알리므로 CI 에 그대로 건다.
+
+### 문법
+
+| 쓰기 | 뜻 |
+| --- | --- |
+| `# …` | 줄 전체 주석. 줄 맨 앞(앞쪽 공백 허용)에만 쓴다 — 인자 안의 `#` 는 글자 그대로다 |
+| `set 이름 값…` | 변수 정의. 명령줄에서 `이름=값` 으로 준 것이 있으면 그쪽이 이겨 기본값 노릇을 한다 |
+| `$이름` · `${이름}` | 토큰 안 어디서나 치환. 정의되지 않은 변수는 오류 |
+| `include 다른.uit` | 그 자리에 펼친다. 경로는 포함하는 파일 기준. 순환은 오류 |
+| `"따옴표"` | 공백이 든 인자를 한 덩어리로 (shlex 규칙) |
+
+명령은 `app`, `wait-app`, `wait-log`, `ime`, `shot`, `expect-shot`, `move`, `click`, `dblclick`,
+`drag`, `hold`, `release`, `key`, `type`, `sleep <초>`, `log`, `stop`.
+
+좌표 상수는 시나리오 맨 위에 모아 두면 화면이 바뀌었을 때 한 곳만 고친다.
+
+```
+set TOOLBAR_Y 45
+set SAVE_X 161
+click $SAVE_X $TOOLBAR_Y
+```
+
+### 화면이 준비되기를 기다리기
+
+캡처를 OCR 할 수는 없으니 "무엇이 떴다" 는 **앱이 로그에 찍는 마커**로 기다린다.
+
+```
+wait-log "프로젝트 열림" 10      # app.log 에 그 정규식이 나올 때까지 최대 10초
+```
+
+`expect-shot` 은 찍기 전에 잇따른 두 캡처가 같아질 때까지 기다려(기본 8회 × 0.3초) 애니메이션과
+커서 깜빡임 때문에 나는 헛실패를 막는다. 다만 **앱이 준비되기 전에도 화면은 멎어 있을 수 있다** —
+빌더는 시작할 때 GPU 장치를 훑느라 10초 넘게 다른 화면을 보여 주고 그동안에도 프레임은 고정이다.
+첫 캡처 앞에는 `sleep` 을 넉넉히 주거나, 앱이 준비 마커를 찍게 되면 `wait-log` 로 바꾼다.
+
+## 골든 이미지
+
+`expect-shot <이름> [x,y WxH]` 는 `tools/uitest/golden/<이름>.ppm` 과 견준다.
+
+- **골든이 없으면** 지금 캡처를 골든으로 삼고 "골든 생성" 으로 알린다(그 단계는 통과).
+  만들어진 PPM 을 **눈으로 확인한 뒤** 커밋해야 다음 실행부터 실제 비교가 된다.
+- **있으면** 다른 픽셀 비율을 재서 허용 오차를 넘으면 실패하고 차이 이미지를
+  `$UITEST_DIR/diff/<이름>.ppm` 에 남긴다(다른 곳은 빨강, 같은 곳은 원본을 어둡게).
+
+| 환경 변수 | 기본 | 뜻 |
+| --- | --- | --- |
+| `UITEST_TOLERANCE` | `0.5` | 다른 픽셀이 이 비율(%)을 넘으면 실패 |
+| `UITEST_PIXEL_DELTA` | `8` | 채널 차이가 이 값 이하인 픽셀은 같은 것으로 (안티에일리어싱 잔 떨림) |
+| `UITEST_GOLDEN_DIR` | `tools/uitest/golden` | 골든 위치 |
+| `UITEST_DIFF_DIR` | `$UITEST_DIR/diff` | 차이 이미지 위치 |
+| `UITEST_SETTLE_TRIES` | `8` | 프레임이 멎을 때까지 다시 찍는 횟수 |
+| `UITEST_SETTLE_INTERVAL` | `0.3` | 그 사이 간격(초) |
+| `UITEST_APP_BIN` | `target/release/nl-app` | 다른 트리에서 빌드한 바이너리로 돌릴 때 |
+
+### 골든 갱신 절차
+
+화면이 의도적으로 바뀌었으면 (1) 옛 골든을 지우고 (2) 시나리오를 한 번 돌려 새로 만들고
+(3) 새 PPM 을 눈으로 확인한 뒤 커밋한다.
+
+```sh
+rm tools/uitest/golden/03-view3.ppm
+UITEST_FRESH=1 $U run tools/uitest/scenarios/smoke.uit   # "골든 생성" 확인
+```
+
+의도치 않은 차이인지 가리려면 먼저 차이 이미지를 본다. PPM 은 대부분의 뷰어가 바로 열고,
+PNG 가 필요하면 `magick diff/03-view3.ppm 03-view3.png` 처럼 바꾼다.
+
+허용 오차를 올려 넘기는 것은 마지막 수단이다. 0.5% 는 1600×1000 에서 8000 픽셀이라
+작은 위젯 하나가 통째로 바뀌어도 통과할 만큼 이미 넉넉하다.
 
 ## 주의
 - **드래그 모션**: 버튼이 눌린 동안 `swaymsg seat cursor set` 의 이동은 클라이언트에 전달되지 않는다(릴리스가 누른 자리에서
@@ -40,4 +124,8 @@ $U log; $U status; $U stop
 - 앱 로그의 "arboard clipboard: X11 …" 경고는 헤드리스라 X 가 없어서 나는 것으로 무해하다.
 
 ## 검증 이력
+2026-09-11: 시나리오 러너와 골든 비교를 `scenarios/smoke.uit` 로 확인. 같은 시나리오를 두 번 돌려
+8장 전부 일치(뷰 7 만 0.004% 잔 떨림, 허용 0.5% 안), 골든 하나를 일부러 바꿔치기하니 그 단계에서
+멈추고 차이 이미지와 `fail-<단계>.ppm` 을 남기며 종료 코드 1. 앱 바이너리는 `UITEST_APP_BIN` 으로
+다른 워크트리 것을 썼다.
 2026-09-10: 표 탭 클릭, 검색창 타이핑, fcitx5 한글 조합("dkssud" → "안녕"), 자동 저장 복구 모달 표시를 이 하네스로 확인.
