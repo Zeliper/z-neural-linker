@@ -27,6 +27,7 @@ tiny_http.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb.workspace = true
 libwayshot.workspace = true
+zbus.workspace = true
 enigo = { workspace = true, features = ["x11rb", "wayland"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
