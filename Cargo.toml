@@ -8,6 +8,7 @@ members = [
     "crates/nl-bundle",
     "crates/nl-app",
     "crates/nl-runtime",
+    "crates/nl-cli",
     "tools/uitest/vseat",
 ]
 
@@ -60,6 +61,8 @@ tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tiny_http = "0.12"
 sysinfo = "0.39"
 csv = "1"
+# 명령줄 도구(nl-cli)
+clap = { version = "4", features = ["derive"] }
 directories = "6"
 sha2 = "0.10"
 sha1 = "0.10"
