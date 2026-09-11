@@ -13,7 +13,7 @@ use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::ops::ConvOptions;
-use burn::tensor::{activation, module, Distribution, ElementConversion, Shape, Tensor, TensorData};
+use burn::tensor::{activation, module, Distribution, ElementConversion, Int, Shape, Tensor, TensorData};
 use nl_core::model::{Act, Graph, LayerKind, ModelDef};
 use nl_core::shape::{self, ShapeReport};
 use nl_core::NodeId;
@@ -130,6 +130,23 @@ impl<B: Backend> DynTensor<B> {
             DynTensor::R4(t) => go!(t),
             DynTensor::R5(t) => go!(t),
         })
+    }
+
+    /// `dim` 차원에서 `[start, start + len)` 만 잘라낸다 (뷰).
+    pub fn narrow_dim(self, dim: usize, start: usize, len: usize) -> Result<Self> {
+        let dims = self.dims();
+        if dim >= dims.len() {
+            bail!("narrow dim {dim} 이 랭크 {} 밖", dims.len());
+        }
+        if start + len > dims[dim] {
+            bail!("narrow 범위 [{start}, {}) 가 차원 {dim} 크기 {} 를 넘습니다", start + len, dims[dim]);
+        }
+        Ok(map_t!(self, |t| t.narrow(dim, start, len)))
+    }
+
+    /// 0번(배치) 차원에서 `indices` 순서로 행을 고른다 — 에포크 셔플에 쓴다.
+    pub fn select_rows(self, indices: &Tensor<B, 1, Int>) -> Self {
+        map_t!(self, |t| t.select(0, indices.clone()))
     }
 
     pub fn into_r1(self) -> Result<Tensor<B, 1>> {

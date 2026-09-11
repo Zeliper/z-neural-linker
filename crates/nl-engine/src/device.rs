@@ -79,6 +79,13 @@ pub(crate) enum Handle {
     Gpu(WgpuDevice),
 }
 
+impl Handle {
+    /// 호스트 메모리와 장치 메모리가 분리되어 있는가 (전송 비용이 있는가).
+    pub(crate) fn is_gpu(&self) -> bool {
+        matches!(self, Handle::Gpu(_))
+    }
+}
+
 /// 열거 결과 캐시 (wgpu 어댑터 열거는 수백 ms 걸릴 수 있다).
 static CACHE: OnceLock<Vec<(DeviceInfo, Handle)>> = OnceLock::new();
 

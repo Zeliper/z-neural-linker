@@ -10,10 +10,12 @@ use crate::tensor::HostTensor;
 use crate::weights;
 use anyhow::{bail, Context, Result};
 use burn::tensor::backend::AutodiffBackend;
-use burn::tensor::{activation, ElementConversion, Tensor};
+use burn::tensor::{activation, ElementConversion, Int, Shape, Tensor, TensorData};
 use crossbeam_channel::{Receiver, Sender};
 use nl_core::dataset::Split;
-use nl_core::{DatasetSpec, EpochMetrics, Loss, Metric, ModelDef, Optimizer, RunId, RunRecord, RunStatus};
+use nl_core::{
+    DatasetSpec, EpochMetrics, Loss, LrSchedule, Metric, ModelDef, Optimizer, RunId, RunRecord, RunStatus, TrainConfig,
+};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -189,10 +191,31 @@ fn write_run_json(run_dir: &Path, run: &RunRecord) -> Result<()> {
 fn run_training(req: &TrainRequest, tx: &Sender<TrainEvent>, ctl: &TrainControl, run: &mut RunRecord) -> Result<()> {
     let (info, handle) = device::resolve_entry(req.model.train.device);
     run.device_name = info.name.clone();
-    dispatch_autodiff!(handle, train_on, req, tx, ctl, run, &info.name)
+    let gpu = handle.is_gpu();
+    dispatch_autodiff!(handle, train_on, req, tx, ctl, run, &info.name, gpu)
 }
 
 // ───────────────────────────── 학습 본체 ─────────────────────────────
+
+/// 데이터셋을 장치에 통째로 올려 두는 상한.
+///
+/// 에포크마다 셔플된 사본을 한 벌 더 만들기 때문에 실제 점유는 이 값의 두 배까지 간다 —
+/// 그래서 상한(512 MiB) 의 절반을 데이터셋 기준으로 잡는다. 넘으면 배치마다 호스트에서 올린다.
+const RESIDENT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
+/// CPU(ndarray)에서 상주 경로가 이득이 되기 시작하는 샘플 크기.
+///
+/// ndarray 는 호스트 `Vec` 을 복사 없이 텐서로 삼기 때문에, 표본이 작으면 배치를 그때그때 만드는 쪽이
+/// `select`/`narrow` 로 잘라내는 쪽보다 싸다. 교대 측정(CPU 시간 중앙값, 각 5 라운드):
+///
+/// | 작업 | 샘플 | 상주 | 호스트 |
+/// |---|---|---|---|
+/// | XOR 1000×200 | 12 B | 10.20 s | 8.72 s |
+/// | 8×8 CNN 1000×8 | 260 B | 23.18 s | 25.84 s |
+///
+/// 교차점을 정확히 재지는 않았으므로 이득이 확인된 쪽(260 B)에 맞춰 보수적으로 잡는다.
+/// GPU 는 배치마다 호스트→장치 전송이 들어가므로 크기와 무관하게 상주가 유리하다.
+const RESIDENT_MIN_SAMPLE_BYTES: usize = 256;
 
 fn train_on<B: AutodiffBackend>(
     device: &B::Device,
@@ -201,38 +224,48 @@ fn train_on<B: AutodiffBackend>(
     ctl: &TrainControl,
     run: &mut RunRecord,
     device_name: &str,
+    gpu: bool,
 ) -> Result<()> {
     let cfg = req.model.train.clone();
     let mut model = Model::<B>::new(&req.model, device, cfg.seed)?;
 
-    if model.input_nodes().len() != 1 {
-        bail!("학습은 Input 레이어가 하나인 모델만 지원합니다 (지금 {} 개)", model.input_nodes().len());
+    let in_shapes = model.input_sample_shapes();
+    let outs = model.output_nodes().to_vec();
+    if outs.len() > 1 {
+        let first = model.graph().nodes[&outs[0]].display_name();
+        let _ = tx.send(TrainEvent::Log(format!(
+            "Output 레이어가 {} 개입니다 — 손실과 지표는 첫 번째 Output '{first}' 만 씁니다. 나머지는 추론에서만 쓰입니다.",
+            outs.len()
+        )));
     }
-    if model.output_nodes().len() != 1 {
-        bail!("학습은 Output 레이어가 하나인 모델만 지원합니다 (지금 {} 개)", model.output_nodes().len());
+    if in_shapes.len() > 1 {
+        let names: Vec<String> =
+            model.input_nodes().iter().map(|id| model.graph().nodes[id].display_name()).collect();
+        let counts: Vec<usize> = in_shapes.iter().map(|s| s.iter().product()).collect();
+        let _ = tx.send(TrainEvent::Log(format!(
+            "Input 레이어가 {} 개입니다 — 샘플을 {names:?} 순서로 {counts:?} 개씩 잘라 넣습니다.",
+            in_shapes.len()
+        )));
     }
-    let in_shape = model.input_sample_shapes().first().cloned().unwrap_or_default();
 
-    // 이어서 학습.
+    // 이어서 학습 — 가중치만 복원한다. 옵티마이저 모멘트·스텝 수는 새로 시작한다.
     if let Some(p) = &req.resume_from {
         let loaded = weights::load(p)?;
         model.load_host_params(&loaded).with_context(|| format!("체크포인트 적용 실패: {}", p.display()))?;
-        let _ = tx.send(TrainEvent::Log(format!("체크포인트에서 이어서 학습: {}", p.display())));
+        let _ = tx.send(TrainEvent::Log(format!(
+            "체크포인트에서 이어서 학습: {} (가중치만 복원 — 옵티마이저 상태와 워밍업은 처음부터입니다)",
+            p.display()
+        )));
     }
     model.require_grad_all();
 
-    // 데이터.
-    let (mut train_set, info) = data::load_all(&req.dataset, &req.base_dir, Some(&in_shape))?;
+    // 데이터. 이미지 리사이즈 힌트는 Input 이 하나일 때만 의미가 있다.
+    let hint = if in_shapes.len() == 1 { Some(in_shapes[0].clone()) } else { None };
+    let (mut train_set, info) = data::load_all(&req.dataset, &req.base_dir, hint.as_deref())?;
     if train_set.is_empty() {
         bail!("데이터셋이 비어 있습니다");
     }
-    if info.input_shape != in_shape {
-        bail!(
-            "데이터 입력 형상 {:?} 이 모델 Input 형상 {:?} 과 다릅니다",
-            info.input_shape,
-            in_shape
-        );
-    }
+    check_dataset_inputs(&info.input_shape, &in_shapes)?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
     if req.dataset.shuffle {
@@ -242,7 +275,7 @@ fn train_on<B: AutodiffBackend>(
     let mut val_set: Vec<Sample> = Vec::new();
     match &req.dataset.split {
         Split::Separate { validation } => {
-            let (v, _) = data::load_source(validation, &req.base_dir, Some(&in_shape), None)?;
+            let (v, _) = data::load_source(validation, &req.base_dir, hint.as_deref(), None)?;
             val_set = v;
         }
         Split::Ratio => {
@@ -254,6 +287,10 @@ fn train_on<B: AutodiffBackend>(
         }
     }
 
+    // 데이터셋을 장치에 상주시킨다 — 매 스텝 호스트에서 올리는 비용을 없앤다.
+    let resident_train = resident(&train_set, device, tx, gpu, "학습");
+    let resident_val = resident(&val_set, device, tx, gpu, "검증");
+
     let batch_size = cfg.batch_size.max(1);
     let batches = train_set.len().div_ceil(batch_size);
     let _ = tx.send(TrainEvent::Started {
@@ -263,7 +300,11 @@ fn train_on<B: AutodiffBackend>(
     });
 
     let mut opt = Opt::<B>::new(cfg.optimizer);
+    let mut lrc = LrController::new(&cfg);
+    let mut global_step = 0usize;
     let mut stopped = false;
+    let mut best_val: Option<f64> = None;
+    let mut since_improve = 0usize;
 
     'epochs: for epoch in 1..=cfg.epochs.max(1) {
         let t0 = std::time::Instant::now();
@@ -273,15 +314,30 @@ fn train_on<B: AutodiffBackend>(
             order.shuffle(&mut ep_rng);
         }
 
+        let epoch_set = match &resident_train {
+            Some(d) => Some(d.permuted(&order, device)?),
+            None => None,
+        };
+
+        let epoch_lr = lrc.epoch_lr(epoch);
+        let mut last_lr = epoch_lr;
         let mut epoch_loss = 0.0f64;
         let mut seen = 0usize;
+
         for (step, chunk) in order.chunks(batch_size).enumerate() {
             if ctl.wait_if_paused() || ctl.should_stop() {
                 stopped = true;
                 break 'epochs;
             }
-            let (x, y) = stack::<B>(&train_set, chunk, device)?;
-            let out = model.forward(vec![x], true)?.pop().context("출력이 없습니다")?;
+            last_lr = lrc.step_lr(epoch_lr, global_step);
+            opt.set_lr(last_lr);
+            global_step += 1;
+
+            let (x, y) = match &epoch_set {
+                Some(d) => d.batch(step * batch_size, chunk.len())?,
+                None => stack_generic::<B>(&train_set, chunk, device)?,
+            };
+            let out = forward_first::<B>(&mut model, x, &in_shapes, true)?;
             let loss = device_loss::<B>(&out, &y, cfg.loss)?;
             let value: f64 = loss.clone().into_scalar().elem::<f64>();
             if !value.is_finite() {
@@ -300,17 +356,53 @@ fn train_on<B: AutodiffBackend>(
         let (val_loss, val_metric) = if val_set.is_empty() {
             (None, None)
         } else {
-            let (l, m) = evaluate::<B>(&mut model, &val_set, batch_size, device, cfg.loss, cfg.metric)?;
+            let (l, m) = evaluate::<B>(
+                &mut model,
+                &val_set,
+                resident_val.as_ref(),
+                &in_shapes,
+                batch_size,
+                device,
+                cfg.loss,
+                cfg.metric,
+            )?;
             (Some(l), m)
         };
-        let em = EpochMetrics { epoch, train_loss, val_loss, val_metric, seconds: t0.elapsed().as_secs_f64() };
+        let em = EpochMetrics {
+            epoch,
+            train_loss,
+            val_loss,
+            val_metric,
+            seconds: t0.elapsed().as_secs_f64(),
+            lr: Some(last_lr),
+        };
         run.epochs.push(em);
         let _ = tx.send(TrainEvent::Epoch(em));
+        lrc.on_epoch_end(val_loss);
 
         if cfg.checkpoint_every > 0 && epoch % cfg.checkpoint_every == 0 {
             let path = req.run_dir.join(format!("epoch-{epoch:04}.safetensors"));
             weights::save(&path, req.model.id, &model.host_params())?;
             let _ = tx.send(TrainEvent::Checkpoint { path });
+        }
+
+        // 조기 종료 — 검증 손실 기준. 중지(Stopped)가 아니라 정상 종료(Finished)다.
+        if cfg.early_stop_patience > 0 {
+            if let Some(v) = val_loss {
+                if best_val.is_none_or(|b| v + 1e-12 < b) {
+                    best_val = Some(v);
+                    since_improve = 0;
+                } else {
+                    since_improve += 1;
+                    if since_improve >= cfg.early_stop_patience {
+                        let _ = tx.send(TrainEvent::Log(format!(
+                            "조기 종료: 검증 손실이 {since_improve} 에포크 동안 나아지지 않았습니다 (최저 {:.6})",
+                            best_val.unwrap_or(v)
+                        )));
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -323,6 +415,241 @@ fn train_on<B: AutodiffBackend>(
     Ok(())
 }
 
+/// 배치 입력을 Input 노드별로 나눠 순전파하고 **첫 Output** 만 돌려준다.
+fn forward_first<B: AutodiffBackend>(
+    model: &mut Model<B>,
+    x: DynTensor<B>,
+    in_shapes: &[Vec<usize>],
+    train: bool,
+) -> Result<DynTensor<B>> {
+    let inputs = split_inputs(x, in_shapes)?;
+    model.forward(inputs, train)?.into_iter().next().context("출력이 없습니다")
+}
+
+/// 데이터셋 형상이 모델 Input 과 맞는지 본다.
+///
+/// - Input 이 하나면 형상이 **정확히** 같아야 한다.
+/// - 여럿이면 샘플의 평탄한 원소 수가 Input 원소 수의 합과 같아야 하고, `Graph::input_nodes()`
+///   순서대로 잘라 넣는다 (CSV 라면 `input_cols` 를 그 개수만큼 앞에서부터 묶는다).
+fn check_dataset_inputs(ds: &[usize], model_inputs: &[Vec<usize>]) -> Result<()> {
+    if model_inputs.len() == 1 {
+        if ds != model_inputs[0].as_slice() {
+            bail!("데이터 입력 형상 {ds:?} 이 모델 Input 형상 {:?} 과 다릅니다", model_inputs[0]);
+        }
+        return Ok(());
+    }
+    let counts: Vec<usize> = model_inputs.iter().map(|s| s.iter().product()).collect();
+    let want: usize = counts.iter().sum();
+    let got: usize = ds.iter().product();
+    if got != want {
+        bail!(
+            "Input 레이어가 {} 개인 모델은 샘플당 원소 {want} 개가 필요합니다 (노드 순서대로 {counts:?} 개씩). \
+             데이터는 {ds:?} = {got} 개를 줍니다",
+            model_inputs.len()
+        );
+    }
+    Ok(())
+}
+
+/// 배치 입력 텐서를 `Graph::input_nodes()` 순서의 Input 텐서들로 나눈다.
+/// Input 이 하나면 그대로 쓴다 (형상은 이미 맞다).
+fn split_inputs<B: burn::tensor::backend::Backend>(
+    x: DynTensor<B>,
+    shapes: &[Vec<usize>],
+) -> Result<Vec<DynTensor<B>>> {
+    if shapes.len() <= 1 {
+        return Ok(vec![x]);
+    }
+    let dims = x.dims();
+    let batch = *dims.first().context("배치 차원이 없습니다")?;
+    let total: usize = dims[1..].iter().product();
+    let flat = x.reshape(&[batch, total])?;
+
+    let mut out = Vec::with_capacity(shapes.len());
+    let mut offset = 0usize;
+    for s in shapes {
+        let count: usize = s.iter().product();
+        if offset + count > total {
+            bail!("입력을 {shapes:?} 로 나눌 수 없습니다 — 샘플 원소 수가 {total} 개뿐입니다");
+        }
+        let piece = flat.clone().narrow_dim(1, offset, count)?;
+        let mut target = vec![batch];
+        target.extend(s.iter().copied());
+        out.push(piece.reshape(&target)?);
+        offset += count;
+    }
+    Ok(out)
+}
+
+// ───────────────────────────── 장치 상주 데이터 ─────────────────────────────
+
+/// 데이터셋 전체를 장치에 올려 둔 것. 배치는 여기서 잘라 쓴다.
+///
+/// 에포크마다 `permuted` 로 셔플 순서를 한 번에 적용해 두면, 배치는 `narrow` 로 자르기만 하면 된다
+/// (게더 커널이 에포크당 한 번, 스텝당 0 번).
+struct DeviceSet<B: burn::tensor::backend::Backend> {
+    x: DynTensor<B>,
+    y: DynTensor<B>,
+}
+
+impl<B: burn::tensor::backend::Backend> DeviceSet<B> {
+    fn upload(set: &[Sample], device: &B::Device) -> Result<Self> {
+        let all: Vec<usize> = (0..set.len()).collect();
+        let (x, y) = stack_generic::<B>(set, &all, device)?;
+        Ok(Self { x, y })
+    }
+
+    /// `order` 순서로 행을 재배열한 사본. 순서가 원래대로면 복사하지 않는다.
+    fn permuted(&self, order: &[usize], device: &B::Device) -> Result<Self> {
+        if order.iter().enumerate().all(|(i, &v)| i == v) {
+            return Ok(Self { x: self.x.clone(), y: self.y.clone() });
+        }
+        let data = TensorData::new(
+            order.iter().map(|&i| i as i64).collect::<Vec<i64>>(),
+            Shape::from(vec![order.len()]),
+        );
+        let idx = Tensor::<B, 1, Int>::from_data(data, device);
+        Ok(Self {
+            x: self.x.clone().select_rows(&idx).detach(),
+            y: self.y.clone().select_rows(&idx).detach(),
+        })
+    }
+
+    /// `[start, start+len)` 행.
+    ///
+    /// **`detach` 가 핵심이다.** 떼어내지 않으면 배치가 autodiff 그래프에서 데이터셋 전체 텐서와
+    /// 이어진 채 남아, 역전파가 스텝마다 데이터셋 크기의 버퍼를 다룬다 —
+    /// 8×8 CNN 2000×20 에서 CPU 시간 252 s 대 129 s 로 두 배 가까이 벌어졌다.
+    fn batch(&self, start: usize, len: usize) -> Result<(DynTensor<B>, DynTensor<B>)> {
+        Ok((
+            self.x.clone().narrow_dim(0, start, len)?.detach(),
+            self.y.clone().narrow_dim(0, start, len)?.detach(),
+        ))
+    }
+}
+
+/// 샘플 하나가 차지하는 바이트 (f32 기준).
+fn sample_bytes(set: &[Sample]) -> usize {
+    set.first().map_or(0, |s| (s.input.data.len() + s.target.data.len()) * 4)
+}
+
+fn dataset_bytes(set: &[Sample]) -> usize {
+    sample_bytes(set) * set.len()
+}
+
+/// 상주 경로를 쓸지 정하고, 쓸 만하면 장치에 올린다. `None` 이면 배치마다 호스트에서 올린다.
+fn resident<B: burn::tensor::backend::Backend>(
+    set: &[Sample],
+    device: &B::Device,
+    tx: &Sender<TrainEvent>,
+    gpu: bool,
+    what: &str,
+) -> Option<DeviceSet<B>> {
+    if set.is_empty() {
+        return None;
+    }
+    // 문제 진단용 탈출구 — 드라이버가 select/narrow 에서 말썽이면 호스트 경로로 되돌린다.
+    if std::env::var("NL_NO_RESIDENT").as_deref() == Ok("1") {
+        let _ = tx.send(TrainEvent::Log(format!("NL_NO_RESIDENT=1 — {what} 데이터를 배치마다 올립니다")));
+        return None;
+    }
+    let sample_bytes = sample_bytes(set);
+    if !gpu && sample_bytes < RESIDENT_MIN_SAMPLE_BYTES {
+        // 작은 표본은 호스트에서 배치를 만드는 쪽이 더 빠르다 (상수 설명 참고).
+        return None;
+    }
+    let bytes = dataset_bytes(set);
+    if bytes > RESIDENT_LIMIT_BYTES {
+        let _ = tx.send(TrainEvent::Log(format!(
+            "{what} 데이터가 {:.0} MiB 라 장치에 상주시키지 않고 배치마다 올립니다",
+            bytes as f64 / (1024.0 * 1024.0)
+        )));
+        return None;
+    }
+    match DeviceSet::upload(set, device) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            let _ = tx.send(TrainEvent::Log(format!("{what} 데이터 상주 실패, 배치마다 올립니다: {e:#}")));
+            None
+        }
+    }
+}
+
+// ───────────────────────────── 학습률 스케줄 ─────────────────────────────
+
+/// 스케줄 · 워밍업 · 정체 감쇠를 한 곳에서 계산한다.
+struct LrController {
+    base: f64,
+    schedule: LrSchedule,
+    warmup_steps: usize,
+    total_epochs: usize,
+    plateau_scale: f64,
+    plateau_best: Option<f64>,
+    plateau_wait: usize,
+}
+
+impl LrController {
+    fn new(cfg: &TrainConfig) -> Self {
+        Self {
+            base: cfg.optimizer.lr(),
+            schedule: cfg.schedule,
+            warmup_steps: cfg.warmup_steps,
+            total_epochs: cfg.epochs.max(1),
+            plateau_scale: 1.0,
+            plateau_best: None,
+            plateau_wait: 0,
+        }
+    }
+
+    /// 에포크(1 기반) 시작 학습률.
+    fn epoch_lr(&self, epoch: usize) -> f64 {
+        match self.schedule {
+            LrSchedule::None => self.base,
+            LrSchedule::Step { every, gamma } => {
+                let every = every.max(1);
+                self.base * gamma.powi(((epoch - 1) / every) as i32)
+            }
+            LrSchedule::Cosine { min_lr } => {
+                let span = self.total_epochs.saturating_sub(1).max(1) as f64;
+                let t = ((epoch - 1) as f64 / span).clamp(0.0, 1.0);
+                min_lr + (self.base - min_lr) * 0.5 * (1.0 + (std::f64::consts::PI * t).cos())
+            }
+            LrSchedule::Plateau { .. } => self.base * self.plateau_scale,
+        }
+    }
+
+    /// 워밍업까지 반영한 스텝 학습률 (`global_step` 은 0 기반).
+    fn step_lr(&self, epoch_lr: f64, global_step: usize) -> f64 {
+        if self.warmup_steps == 0 || global_step >= self.warmup_steps {
+            return epoch_lr;
+        }
+        epoch_lr * (global_step + 1) as f64 / self.warmup_steps as f64
+    }
+
+    /// 에포크가 끝날 때 정체 스케줄의 상태를 갱신한다.
+    fn on_epoch_end(&mut self, val_loss: Option<f64>) {
+        let LrSchedule::Plateau { patience, factor } = self.schedule else {
+            return;
+        };
+        let Some(v) = val_loss else {
+            return;
+        };
+        match self.plateau_best {
+            Some(best) if v + 1e-12 >= best => {
+                self.plateau_wait += 1;
+                if self.plateau_wait >= patience.max(1) {
+                    self.plateau_scale *= factor;
+                    self.plateau_wait = 0;
+                }
+            }
+            _ => {
+                self.plateau_best = Some(v);
+                self.plateau_wait = 0;
+            }
+        }
+    }
+}
+
 /// `base_dir` 기준 상대 경로. 만들 수 없으면 절대 경로 문자열.
 fn relative_to(base_dir: &Path, path: &Path) -> String {
     match path.strip_prefix(base_dir) {
@@ -331,15 +658,7 @@ fn relative_to(base_dir: &Path, path: &Path) -> String {
     }
 }
 
-/// 샘플 묶음을 장치 텐서 한 쌍으로 (배치 차원 포함).
-fn stack<B: AutodiffBackend>(
-    set: &[Sample],
-    idx: &[usize],
-    device: &B::Device,
-) -> Result<(DynTensor<B>, DynTensor<B>)> {
-    stack_generic::<B>(set, idx, device)
-}
-
+/// 샘플 묶음을 장치 텐서 한 쌍으로 (배치 차원 포함). 상주 경로를 못 쓸 때의 폴백이다.
 fn stack_generic<B: burn::tensor::backend::Backend>(
     set: &[Sample],
     idx: &[usize],
@@ -431,9 +750,12 @@ fn check_same_shape<B: burn::tensor::backend::Backend>(
 }
 
 /// 검증: 손실과 지표를 호스트에서 계산한다 (autodiff 그래프를 남기지 않는다).
+#[allow(clippy::too_many_arguments)]
 fn evaluate<B: AutodiffBackend>(
     model: &mut Model<B>,
     set: &[Sample],
+    resident: Option<&DeviceSet<B>>,
+    in_shapes: &[Vec<usize>],
     batch_size: usize,
     device: &B::Device,
     loss: Loss,
@@ -442,10 +764,13 @@ fn evaluate<B: AutodiffBackend>(
     let mut loss_sum = 0.0f64;
     let mut hit = 0.0f64;
     let mut n = 0usize;
-    let idx: Vec<usize> = (0..set.len()).collect();
-    for chunk in idx.chunks(batch_size.max(1)) {
-        let (x, y) = stack::<B>(set, chunk, device)?;
-        let out = model.forward(vec![x], false)?.pop().context("출력이 없습니다")?;
+    let order: Vec<usize> = (0..set.len()).collect();
+    for (step, chunk) in order.chunks(batch_size.max(1)).enumerate() {
+        let (x, y) = match resident {
+            Some(d) => d.batch(step * batch_size.max(1), chunk.len())?,
+            None => stack_generic::<B>(set, chunk, device)?,
+        };
+        let out = forward_first::<B>(model, x, in_shapes, false)?;
         let oh = out.to_host();
         let th = y.to_host();
         loss_sum += host_loss(&oh, &th, loss)? * chunk.len() as f64;
@@ -575,6 +900,11 @@ impl<B: AutodiffBackend> Opt<B> {
         Self { kind, state: BTreeMap::new(), t: 0 }
     }
 
+    /// 스케줄이 정한 학습률로 바꾼다 (모멘트 상태는 그대로).
+    fn set_lr(&mut self, lr: f64) {
+        self.kind.set_lr(lr);
+    }
+
     fn step(&mut self, model: &mut Model<B>, mut grads: B::Gradients, grad_clip: f64) -> Result<()> {
         self.t += 1;
 
@@ -675,5 +1005,136 @@ impl<B: AutodiffBackend> Opt<B> {
         let p = if weight_decay > 0.0 { p.mul_scalar(1.0 - lr * weight_decay) } else { p };
         let step = m_hat.try_div(v_hat.sqrt().add_scalar(eps))?.mul_scalar(lr);
         p.try_sub(step)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::CpuB;
+    use burn::backend::ndarray::NdArrayDevice;
+
+    fn t(shape: &[usize], data: Vec<f32>) -> DynTensor<CpuB> {
+        DynTensor::from_host(&HostTensor::new(shape.to_vec(), data), &NdArrayDevice::Cpu).unwrap()
+    }
+
+    #[test]
+    fn split_inputs_cuts_in_node_order() {
+        // 배치 2, 샘플당 5 원소 → Input 형상 [2] 와 [1, 3] 으로 나뉜다.
+        let x = t(&[2, 5], vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]);
+        let shapes = vec![vec![2], vec![1, 3]];
+        let parts = split_inputs::<CpuB>(x, &shapes).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].dims(), vec![2, 2]);
+        assert_eq!(parts[1].dims(), vec![2, 1, 3]);
+        assert_eq!(parts[0].to_host().data, vec![1., 2., 6., 7.]);
+        assert_eq!(parts[1].to_host().data, vec![3., 4., 5., 8., 9., 10.]);
+    }
+
+    #[test]
+    fn split_inputs_is_identity_for_a_single_input() {
+        let x = t(&[2, 3], vec![1., 2., 3., 4., 5., 6.]);
+        let parts = split_inputs::<CpuB>(x, &[vec![3]]).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].dims(), vec![2, 3]);
+    }
+
+    #[test]
+    fn dataset_input_rules() {
+        // Input 하나면 형상이 정확히 같아야 한다.
+        assert!(check_dataset_inputs(&[1, 8, 8], &[vec![1, 8, 8]]).is_ok());
+        assert!(check_dataset_inputs(&[64], &[vec![1, 8, 8]]).is_err(), "원소 수만 같아도 거절해야 한다");
+        // 여럿이면 원소 수 합이 맞으면 된다 (형상은 자유).
+        assert!(check_dataset_inputs(&[5], &[vec![2], vec![3]]).is_ok());
+        assert!(check_dataset_inputs(&[2, 3], &[vec![2], vec![4]]).is_ok(), "6 = 2 + 4 이므로 통과");
+        assert!(check_dataset_inputs(&[2, 3], &[vec![2], vec![5]]).is_err(), "6 ≠ 2 + 5");
+        let e = check_dataset_inputs(&[4], &[vec![2], vec![3]]).unwrap_err().to_string();
+        assert!(e.contains("[2, 3]"), "오류에 노드별 원소 수가 없습니다: {e}");
+    }
+
+    fn cfg_with(schedule: LrSchedule, lr: f64, epochs: usize, warmup: usize) -> TrainConfig {
+        TrainConfig {
+            optimizer: Optimizer::Sgd { lr, momentum: 0.0 },
+            epochs,
+            schedule,
+            warmup_steps: warmup,
+            ..TrainConfig::default()
+        }
+    }
+
+    #[test]
+    fn step_schedule_halves_every_n_epochs() {
+        let c = LrController::new(&cfg_with(LrSchedule::Step { every: 2, gamma: 0.5 }, 1.0, 6, 0));
+        let got: Vec<f64> = (1..=6).map(|e| c.epoch_lr(e)).collect();
+        assert_eq!(got, vec![1.0, 1.0, 0.5, 0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn cosine_schedule_goes_from_base_to_min() {
+        let c = LrController::new(&cfg_with(LrSchedule::Cosine { min_lr: 0.1 }, 1.0, 5, 0));
+        assert!((c.epoch_lr(1) - 1.0).abs() < 1e-12);
+        assert!((c.epoch_lr(5) - 0.1).abs() < 1e-12);
+        let mid = c.epoch_lr(3);
+        assert!(mid < 1.0 && mid > 0.1, "중간값이 범위 밖: {mid}");
+    }
+
+    #[test]
+    fn plateau_schedule_decays_after_patience() {
+        let mut c = LrController::new(&cfg_with(LrSchedule::Plateau { patience: 2, factor: 0.5 }, 1.0, 10, 0));
+        assert_eq!(c.epoch_lr(1), 1.0);
+        c.on_epoch_end(Some(1.0)); // 첫 기록
+        c.on_epoch_end(Some(1.0)); // 정체 1
+        assert_eq!(c.epoch_lr(3), 1.0);
+        c.on_epoch_end(Some(1.0)); // 정체 2 → 감쇠
+        assert_eq!(c.epoch_lr(4), 0.5);
+        c.on_epoch_end(Some(0.1)); // 개선 → 대기 초기화
+        assert_eq!(c.epoch_lr(5), 0.5);
+    }
+
+    #[test]
+    fn warmup_ramps_the_first_steps_only() {
+        let c = LrController::new(&cfg_with(LrSchedule::None, 1.0, 10, 4));
+        assert_eq!(c.step_lr(1.0, 0), 0.25);
+        assert_eq!(c.step_lr(1.0, 1), 0.5);
+        assert_eq!(c.step_lr(1.0, 3), 1.0);
+        assert_eq!(c.step_lr(1.0, 4), 1.0);
+        // 워밍업을 끄면 항상 그대로.
+        let off = LrController::new(&cfg_with(LrSchedule::None, 1.0, 10, 0));
+        assert_eq!(off.step_lr(0.3, 0), 0.3);
+    }
+
+    #[test]
+    fn device_set_batches_match_host_stacking() {
+        let set: Vec<Sample> = (0..6)
+            .map(|i| Sample {
+                input: HostTensor::new(vec![2], vec![i as f32, i as f32 + 0.5]),
+                target: HostTensor::new(vec![1], vec![(i % 2) as f32]),
+            })
+            .collect();
+        let dev = NdArrayDevice::Cpu;
+        let resident = DeviceSet::<CpuB>::upload(&set, &dev).unwrap();
+
+        // 원래 순서와 뒤섞은 순서 모두 호스트 경로와 같은 배치를 내야 한다.
+        for order in [vec![0, 1, 2, 3, 4, 5], vec![4, 1, 5, 0, 3, 2]] {
+            let epoch = resident.permuted(&order, &dev).unwrap();
+            for start in [0usize, 2, 4] {
+                let (rx, ry) = epoch.batch(start, 2).unwrap();
+                let (hx, hy) = stack_generic::<CpuB>(&set, &order[start..start + 2], &dev).unwrap();
+                assert_eq!(rx.to_host(), hx.to_host(), "order {order:?} start {start}");
+                assert_eq!(ry.to_host(), hy.to_host());
+            }
+        }
+    }
+
+    #[test]
+    fn dataset_bytes_counts_inputs_and_targets() {
+        let set: Vec<Sample> = (0..10)
+            .map(|_| Sample {
+                input: HostTensor::new(vec![3], vec![0.0; 3]),
+                target: HostTensor::new(vec![1], vec![0.0]),
+            })
+            .collect();
+        assert_eq!(dataset_bytes(&set), (3 + 1) * 4 * 10);
+        assert_eq!(dataset_bytes(&[]), 0);
     }
 }

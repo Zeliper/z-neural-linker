@@ -26,6 +26,59 @@ fn add(g: &mut Graph, k: LayerKind) -> nl_core::NodeId {
     g.add_node(Node::new(k, [0.0, 0.0]))
 }
 
+/// 이름 붙은 노드 — `input_nodes()`/`output_nodes()` 순서는 이름 순이다.
+fn named(g: &mut Graph, k: LayerKind, name: &str) -> nl_core::NodeId {
+    let mut n = Node::new(k, [0.0, 0.0]);
+    n.name = name.to_string();
+    g.add_node(n)
+}
+
+/// 학습을 끝까지 돌리고 로그까지 모아 돌려준다.
+fn train_collecting_logs(def: ModelDef, ds: DatasetSpec, dir: &Path) -> (RunRecord, Vec<String>) {
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: ds,
+        base_dir: dir.to_path_buf(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let handle = nl_engine::start(req).expect("학습 스레드 시작");
+    let mut logs = Vec::new();
+    while let Ok(ev) = handle.events.recv() {
+        match ev {
+            TrainEvent::Log(m) => logs.push(m),
+            TrainEvent::Finished { run } => return (run, logs),
+            TrainEvent::Failed { error, .. } => panic!("학습 실패: {error} (로그: {logs:?})"),
+            _ => {}
+        }
+    }
+    panic!("Finished/Failed 없이 이벤트 채널이 끊겼습니다");
+}
+
+/// 4 열 CSV 데이터셋을 만든다: y = 3·c0 − 2·c2 + 0.5.
+fn four_column_csv(dir: &Path, rows: usize) -> DatasetSpec {
+    use std::fmt::Write as _;
+    let mut text = String::from("a0,a1,b0,b1,y\n");
+    for i in 0..rows {
+        let f = |k: usize| ((i * 7 + k * 13) % 21) as f32 / 10.0 - 1.0;
+        let (c0, c1, c2, c3) = (f(0), f(1), f(2), f(3));
+        let y = 3.0 * c0 - 2.0 * c2 + 0.5;
+        let _ = writeln!(text, "{c0},{c1},{c2},{c3},{y}");
+    }
+    let path = dir.join("four.csv");
+    std::fs::write(&path, text).unwrap();
+    DatasetSpec::new(
+        "4열",
+        DataSource::Csv {
+            path: "four.csv".into(),
+            input_cols: vec!["a0".into(), "a1".into(), "b0".into(), "b1".into()],
+            target_cols: vec!["y".into()],
+            header: true,
+        },
+    )
+}
+
 fn link(g: &mut Graph, a: nl_core::NodeId, b: nl_core::NodeId) {
     g.add_edge(a, Port::new(b, 0)).expect("엣지 추가");
 }
@@ -440,6 +493,356 @@ fn resume_from_checkpoint_starts_from_a_lower_loss() {
     let a = first.epochs.first().unwrap().train_loss;
     let b = second.epochs.first().unwrap().train_loss;
     assert!(b < a, "이어서 학습한 첫 에포크 손실이 더 낮아야 합니다: 처음 {a}, 이어서 {b}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ───────────────────────────── 다입력 · 다출력 ─────────────────────────────
+
+#[test]
+fn two_input_model_trains_with_columns_split_in_node_order() {
+    let dir = temp_dir("multi-in");
+    let ds = four_column_csv(&dir, 600);
+
+    // Input "a"[2] + Input "b"[2] → Concat → MLP → 회귀 출력.
+    let mut def = ModelDef::new("2입력");
+    let g = &mut def.graph;
+    let a = named(g, LayerKind::Input { shape: vec![2] }, "a");
+    let b = named(g, LayerKind::Input { shape: vec![2] }, "b");
+    let cat = add(g, LayerKind::Concat { dim: 0 });
+    let l1 = add(g, LayerKind::Linear { out_features: 32, bias: true });
+    let act = add(g, LayerKind::Activation { act: Act::Relu });
+    let l2 = add(g, LayerKind::Linear { out_features: 1, bias: true });
+    let o = add(g, LayerKind::Output);
+    g.add_edge(a, Port::new(cat, 0)).unwrap();
+    g.add_edge(b, Port::new(cat, 1)).unwrap();
+    link(g, cat, l1);
+    link(g, l1, act);
+    link(g, act, l2);
+    link(g, l2, o);
+
+    assert_eq!(def.graph.input_nodes(), vec![a, b], "input_nodes 는 이름 순이어야 한다");
+    def.train.loss = Loss::Mse;
+    def.train.metric = Metric::Mae;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 60;
+    def.train.batch_size = 32;
+    def.train.device = DevicePref::Cpu;
+
+    let (run, logs) = train_collecting_logs(def, ds, &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    assert!(
+        logs.iter().any(|m| m.contains("Input 레이어가 2 개")),
+        "다입력 안내 로그가 없습니다: {logs:?}"
+    );
+    let last = run.last().unwrap();
+    let val = last.val_loss.expect("검증 손실");
+    assert!(val < 0.05, "2입력 회귀가 수렴하지 않았습니다: {val} (train {})", last.train_loss);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn mismatched_column_count_is_rejected_with_a_clear_message() {
+    let dir = temp_dir("multi-in-bad");
+    let ds = four_column_csv(&dir, 20);
+
+    // Input 이 [2] + [3] = 5 개를 원하는데 CSV 는 4 열만 준다.
+    let mut def = ModelDef::new("어긋남");
+    let g = &mut def.graph;
+    let a = named(g, LayerKind::Input { shape: vec![2] }, "a");
+    let b = named(g, LayerKind::Input { shape: vec![3] }, "b");
+    let cat = add(g, LayerKind::Concat { dim: 0 });
+    let l = add(g, LayerKind::Linear { out_features: 1, bias: true });
+    let o = add(g, LayerKind::Output);
+    g.add_edge(a, Port::new(cat, 0)).unwrap();
+    g.add_edge(b, Port::new(cat, 1)).unwrap();
+    link(g, cat, l);
+    link(g, l, o);
+    def.train.loss = Loss::Mse;
+    def.train.epochs = 1;
+    def.train.device = DevicePref::Cpu;
+
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: ds,
+        base_dir: dir.clone(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let h = nl_engine::start(req).unwrap();
+    let mut err = None;
+    while let Ok(ev) = h.events.recv() {
+        if let TrainEvent::Failed { error, .. } = ev {
+            err = Some(error);
+            break;
+        }
+    }
+    let err = err.expect("Failed 이벤트가 와야 합니다");
+    assert!(err.contains("5 개"), "필요 원소 수가 없습니다: {err}");
+    assert!(err.contains("[2, 3]"), "노드별 원소 수가 없습니다: {err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn two_output_model_trains_on_the_first_output() {
+    let dir = temp_dir("multi-out");
+
+    // 공통 몸통 → Output "a"(분류, 손실 대상) + Output "b"(보조 회귀, 추론 전용).
+    let mut def = ModelDef::new("2출력");
+    let g = &mut def.graph;
+    let i = add(g, LayerKind::Input { shape: vec![2] });
+    let l1 = add(g, LayerKind::Linear { out_features: 16, bias: true });
+    let act = add(g, LayerKind::Activation { act: Act::Relu });
+    let head_a = add(g, LayerKind::Linear { out_features: 2, bias: true });
+    let head_b = add(g, LayerKind::Linear { out_features: 1, bias: true });
+    let oa = named(g, LayerKind::Output, "a");
+    let ob = named(g, LayerKind::Output, "b");
+    link(g, i, l1);
+    link(g, l1, act);
+    link(g, act, head_a);
+    link(g, act, head_b);
+    link(g, head_a, oa);
+    link(g, head_b, ob);
+    assert_eq!(def.graph.output_nodes(), vec![oa, ob], "output_nodes 는 이름 순이어야 한다");
+
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 40;
+    def.train.batch_size = 64;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 7;
+
+    let (run, logs) = train_collecting_logs(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    assert!(
+        logs.iter().any(|m| m.contains("Output 레이어가 2 개") && m.contains("'a'")),
+        "다출력 안내 로그가 없습니다: {logs:?}"
+    );
+    let acc = run.last().unwrap().val_metric.expect("정확도");
+    assert!(acc >= 0.95, "첫 Output 으로 학습되지 않았습니다: {acc}");
+
+    // 추론은 두 출력을 모두 돌려준다.
+    let ckpt = dir.join(run.checkpoint.as_ref().unwrap());
+    let mut s = Session::load(&def, Some(&ckpt), DevicePref::Cpu).unwrap();
+    let out = s.run(&[HostTensor::new(vec![2, 2], vec![0.8, 0.8, -0.8, 0.8])]).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].shape, vec![2, 2]);
+    assert_eq!(out[1].shape, vec![2, 1]);
+    assert_eq!(out[0].argmax_last(), vec![0, 1]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ───────────────────────────── 스케줄 · 조기 종료 ─────────────────────────────
+
+#[test]
+fn step_schedule_is_reported_per_epoch() {
+    let dir = temp_dir("sched-step");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.optimizer = Optimizer::Sgd { lr: 0.1, momentum: 0.0 };
+    def.train.schedule = nl_core::LrSchedule::Step { every: 2, gamma: 0.5 };
+    def.train.epochs = 6;
+    def.train.batch_size = 128;
+    def.train.device = DevicePref::Cpu;
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 256), &dir);
+    let lrs: Vec<f64> = run.epochs.iter().map(|e| e.lr.expect("lr 이 기록되어야 합니다")).collect();
+    assert_eq!(lrs, vec![0.1, 0.1, 0.05, 0.05, 0.025, 0.025]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn cosine_schedule_and_warmup_shape_the_learning_rate() {
+    let dir = temp_dir("sched-cos");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.optimizer = Optimizer::Sgd { lr: 0.2, momentum: 0.0 };
+    def.train.schedule = nl_core::LrSchedule::Cosine { min_lr: 0.02 };
+    def.train.epochs = 5;
+    def.train.batch_size = 256; // 에포크당 1 스텝
+    def.train.warmup_steps = 2;
+    def.train.device = DevicePref::Cpu;
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 256), &dir);
+    let lrs: Vec<f64> = run.epochs.iter().map(|e| e.lr.unwrap()).collect();
+    // 1 스텝째는 워밍업 절반, 2 스텝째부터 스케줄 그대로.
+    assert!((lrs[0] - 0.1).abs() < 1e-9, "워밍업이 적용되지 않았습니다: {lrs:?}");
+    assert!(lrs[1] < 0.2 && lrs[1] > 0.02);
+    assert!((lrs[4] - 0.02).abs() < 1e-9, "마지막이 min_lr 이 아닙니다: {lrs:?}");
+    assert!(lrs[1] > lrs[2] && lrs[2] > lrs[3], "코사인이 단조 감소해야 합니다: {lrs:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn early_stopping_ends_the_run_as_finished() {
+    let dir = temp_dir("early");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    // 학습률 0 → 검증 손실이 절대 나아지지 않는다.
+    def.train.optimizer = Optimizer::Sgd { lr: 0.0, momentum: 0.0 };
+    def.train.epochs = 50;
+    def.train.batch_size = 64;
+    def.train.val_split = 0.25;
+    def.train.early_stop_patience = 2;
+    def.train.device = DevicePref::Cpu;
+
+    let (run, logs) = train_collecting_logs(def, synthetic(SyntheticKind::Xor, 256), &dir);
+    assert_eq!(run.status, RunStatus::Finished, "조기 종료는 정상 종료여야 합니다");
+    assert_eq!(run.epochs.len(), 3, "patience 2 면 3 에포크에서 멈춰야 합니다");
+    assert!(logs.iter().any(|m| m.contains("조기 종료")), "조기 종료 로그가 없습니다: {logs:?}");
+    assert!(run.checkpoint.is_some());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn resume_restores_weights_only_and_says_so() {
+    let dir = temp_dir("resume-log");
+    let mut def = mlp(2, 16, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 10;
+    def.train.batch_size = 64;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 3;
+
+    let first = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 512), &dir);
+    let ckpt = dir.join(first.checkpoint.as_ref().unwrap());
+
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: synthetic(SyntheticKind::Xor, 512),
+        base_dir: dir.clone(),
+        run_dir: dir.join("run2"),
+        resume_from: Some(ckpt),
+    };
+    let h = nl_engine::start(req).unwrap();
+    let mut logs = Vec::new();
+    let mut second = None;
+    while let Ok(ev) = h.events.recv() {
+        match ev {
+            TrainEvent::Log(m) => logs.push(m),
+            TrainEvent::Finished { run } => {
+                second = Some(run);
+                break;
+            }
+            TrainEvent::Failed { error, .. } => panic!("이어서 학습 실패: {error}"),
+            _ => {}
+        }
+    }
+    let second = second.unwrap();
+    assert!(
+        logs.iter().any(|m| m.contains("가중치만 복원") && m.contains("옵티마이저")),
+        "이어서 학습 로그가 계약을 밝히지 않습니다: {logs:?}"
+    );
+    assert!(
+        second.epochs[0].train_loss < first.epochs[0].train_loss,
+        "가중치가 이어지지 않았습니다: {} → {}",
+        first.epochs[0].train_loss,
+        second.epochs[0].train_loss
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 샘플이 이미지 크기면 데이터셋이 장치에 상주한 채 배치가 잘린다 — 그 경로를 실제로 태운다.
+#[test]
+fn image_sized_samples_train_through_the_resident_path() {
+    let dir = temp_dir("resident-cnn");
+    let mut def = chain(vec![
+        LayerKind::Input { shape: vec![1, 8, 8] },
+        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
+        LayerKind::Activation { act: Act::Relu },
+        LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 4, bias: true },
+    ]);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = Optimizer::Adam { lr: 5e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 8;
+    def.train.batch_size = 32;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 5;
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Quadrants, 512), &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    let first = run.epochs.first().unwrap().train_loss;
+    let last = run.epochs.last().unwrap();
+    assert!(last.train_loss < first, "학습이 진행되지 않았습니다: {first} → {}", last.train_loss);
+    let acc = last.val_metric.expect("정확도");
+    assert!(acc > 0.5, "사분면 분류가 무작위 수준입니다: {acc}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ───────────────────────────── 성능 측정 (NL_BENCH=1) ─────────────────────────────
+
+/// XOR 1000 샘플 × 200 에포크 CPU 소요 시간. 배치 업로드 경로를 바꿀 때 전후 비교용.
+#[test]
+fn bench_xor_1000_samples_200_epochs() {
+    if std::env::var("NL_BENCH").as_deref() != Ok("1") {
+        eprintln!("NL_BENCH=1 이 아니어서 건너뜁니다");
+        return;
+    }
+    let dir = temp_dir("bench");
+    let mut def = mlp(2, 16, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::None;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 200;
+    def.train.batch_size = 32;
+    def.train.val_split = 0.0;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 7;
+
+    let t0 = std::time::Instant::now();
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 1000), &dir);
+    let elapsed = t0.elapsed();
+    assert_eq!(run.status, RunStatus::Finished);
+    let last = run.last().unwrap();
+    println!(
+        "BENCH xor 1000×200: {:.3}초 (에포크당 {:.1} ms, 최종 train_loss {:.4})",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / 200.0,
+        last.train_loss
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 샘플당 데이터가 큰 경우(8×8 이미지 + CNN). 배치 업로드 비용이 드러나는 쪽.
+#[test]
+fn bench_quadrants_cnn() {
+    if std::env::var("NL_BENCH").as_deref() != Ok("1") {
+        eprintln!("NL_BENCH=1 이 아니어서 건너뜁니다");
+        return;
+    }
+    let dir = temp_dir("bench-cnn");
+    let mut def = chain(vec![
+        LayerKind::Input { shape: vec![1, 8, 8] },
+        LayerKind::Conv2d { out_channels: 8, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
+        LayerKind::Activation { act: Act::Relu },
+        LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 4, bias: true },
+    ]);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::None;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 8;
+    def.train.batch_size = 32;
+    def.train.val_split = 0.0;
+    def.train.device = DevicePref::Cpu;
+
+    let t0 = std::time::Instant::now();
+    let run = train_to_end(def, synthetic(SyntheticKind::Quadrants, 1000), &dir);
+    let elapsed = t0.elapsed();
+    assert_eq!(run.status, RunStatus::Finished);
+    println!(
+        "BENCH quadrants-cnn 1000×8: {:.3}초 (에포크당 {:.1} ms)",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / 8.0
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
