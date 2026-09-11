@@ -19,9 +19,7 @@ image.workspace = true
 ureq.workspace = true
 tungstenite.workspace = true
 sysinfo.workspace = true
-
-[dev-dependencies]
-# 로컬 HTTP 왕복 시험용 서버
+# 인바운드 HTTP 서버 (`Source::HttpServer`) + 시험용 로컬 서버
 tiny_http.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
