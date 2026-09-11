@@ -71,6 +71,8 @@ tar = "0.4"
 flate2 = "1"
 tempfile = "3"
 libc = "0.2"
+# Windows 콘솔 붙잡기에만 쓴다 (GUI 서브시스템 앱의 --version 출력).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
 [profile.release]
 opt-level = 3

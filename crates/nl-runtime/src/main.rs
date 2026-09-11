@@ -4,6 +4,7 @@
 
 mod app;
 mod cli;
+mod console;
 mod signals;
 mod update;
 
@@ -17,7 +18,13 @@ use std::time::Duration;
 
 fn main() -> ExitCode {
     env_logger::init();
-    match cli::parse(std::env::args().skip(1)) {
+    let command = cli::parse(std::env::args().skip(1));
+    // Windows 릴리스 빌드는 GUI 서브시스템이라 표준 출력이 갈 곳이 없다.
+    // 터미널에서 부른 것이 분명한 경로에서만 부모 콘솔에 붙는다 (창을 띄우는 경로는 그대로 둔다).
+    if wants_console(&command) {
+        console::attach_parent();
+    }
+    match command {
         Command::Version => {
             println!("nl-runtime {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -37,6 +44,15 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+/// 터미널에 글을 쓰는 경로인가. 창을 띄우는 GUI 실행만 아니면 전부 그렇다.
+fn wants_console(command: &Command) -> bool {
+    match command {
+        Command::Version | Command::Help | Command::Error(_) => true,
+        // 헤드리스는 로그가 전부고, GUI 실행도 시작 실패 메시지는 터미널에 보여야 한다.
+        Command::Run(opts) => opts.headless || opts.bundle_path.is_some(),
     }
 }
 
