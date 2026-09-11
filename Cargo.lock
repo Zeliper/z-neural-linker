@@ -5218,12 +5218,18 @@ name = "nl-bundle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
+ "directories",
  "flate2",
+ "image",
+ "log",
  "nl-core",
  "serde_json",
+ "sha1 0.10.7",
  "sha2",
  "tar",
  "tempfile",
+ "ureq 3.4.1",
  "zip 6.0.0",
 ]
 
