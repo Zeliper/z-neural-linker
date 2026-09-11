@@ -2,9 +2,13 @@
 
 pub mod icon;
 pub mod inno;
+pub mod manifest;
 pub mod tools;
 
 pub use icon::{png_bytes_to_ico, png_bytes_to_square_png, png_to_ico};
+pub use manifest::{build_manifest, write_manifest, MANIFEST_FILE};
+// 빌더가 매니페스트를 만들 때 nl-update 를 따로 의존하지 않아도 되도록 다시 내보낸다.
+pub use nl_update::{Asset, AssetKind, Manifest as UpdateManifest};
 pub use inno::{app_id, find_inno_setup, render_iss, windows_installer, InnoSetup};
 pub use tools::{install_inno_setup_plan, run_tool_plan, ToolPlan, ToolProgress};
 

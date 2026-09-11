@@ -5,6 +5,7 @@
 mod app;
 mod cli;
 mod signals;
+mod update;
 
 use app::{RuntimeApp, WorkDir};
 use cli::{Command, Options};
@@ -47,9 +48,9 @@ fn run(opts: Options) -> anyhow::Result<ExitCode> {
     };
     let device = opts.device.unwrap_or(bundle.manifest.default_device);
     if opts.headless {
-        run_headless(bundle, device, opts.run_for.map(Duration::from_secs_f64))?;
+        run_headless(bundle, device, opts.run_for.map(Duration::from_secs_f64), !opts.no_update)?;
     } else {
-        run_gui(bundle, device)?;
+        run_gui(bundle, device, !opts.no_update)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -73,7 +74,7 @@ fn load_bundle(path: Option<&Path>) -> anyhow::Result<Option<Bundle>> {
     }
 }
 
-fn run_gui(bundle: Bundle, device: DevicePref) -> anyhow::Result<()> {
+fn run_gui(bundle: Bundle, device: DevicePref, updates: bool) -> anyhow::Result<()> {
     let work = WorkDir::create()?;
     app::prepare_workspace(&bundle, work.path())?;
     let base_dir = work.path().to_path_buf();
@@ -95,7 +96,7 @@ fn run_gui(bundle: Bundle, device: DevicePref) -> anyhow::Result<()> {
         "nl-runtime",
         options,
         Box::new(move |cc| {
-            let app = RuntimeApp::new(&bundle, base_dir, device);
+            let app = RuntimeApp::new(&bundle, base_dir, device).with_updates(updates);
             app.install_style(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
@@ -105,7 +106,12 @@ fn run_gui(bundle: Bundle, device: DevicePref) -> anyhow::Result<()> {
     result.map_err(|e| anyhow::anyhow!("창을 열지 못했습니다: {e}"))
 }
 
-fn run_headless(bundle: Bundle, device: DevicePref, run_for: Option<Duration>) -> anyhow::Result<()> {
+fn run_headless(
+    bundle: Bundle,
+    device: DevicePref,
+    run_for: Option<Duration>,
+    updates: bool,
+) -> anyhow::Result<()> {
     let work = WorkDir::create()?;
     app::prepare_workspace(&bundle, work.path())?;
     let Some(pipeline) = app::entry_pipeline(&bundle.project, &bundle.manifest) else {
@@ -126,9 +132,17 @@ fn run_headless(bundle: Bundle, device: DevicePref, run_for: Option<Duration>) -
     }
     let deadline = run_for.map(|d| std::time::Instant::now() + d);
 
+    // 헤드리스는 확인만 한다 — 서버형 배포를 사람 확인 없이 바꿔치우지 않는다.
+    let mut update = updates.then(|| update::UpdateUi::new(&bundle.manifest)).flatten();
+    if let Some(u) = &mut update {
+        println!("업데이트를 확인합니다: {}", u.manifest_url());
+        u.start_check();
+    }
+
     let handle = app::spawn_runner(&bundle.project, &pipeline, work.path(), device)?;
     let mut asked_to_stop = false;
     loop {
+        drain_update(&mut update);
         let timed_out = deadline.is_some_and(|t| std::time::Instant::now() >= t);
         if (signals::interrupted() || timed_out) && !asked_to_stop {
             asked_to_stop = true;
@@ -150,5 +164,17 @@ fn run_headless(bundle: Bundle, device: DevicePref, run_for: Option<Duration>) -
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
+    // 파이프라인이 먼저 끝났어도 확인 결과가 와 있으면 알려 준다.
+    drain_update(&mut update);
     Ok(())
+}
+
+/// 업데이트 이벤트를 stdout 으로 흘린다. 헤드리스는 적용하지 않는다.
+fn drain_update(update: &mut Option<update::UpdateUi>) {
+    let Some(u) = update else { return };
+    for ev in u.poll() {
+        if let Some(line) = update::describe(&ev) {
+            println!("{line}");
+        }
+    }
 }
