@@ -121,6 +121,23 @@ pub struct BuildSpec {
     /// 산출물 폴더 (프로젝트 폴더 기준 상대 경로 또는 절대 경로). 없으면 `dist`.
     #[serde(default)]
     pub output_dir: Option<String>,
+    /// 앱 아이콘 PNG (프로젝트 폴더 기준 상대 경로 또는 절대 경로).
+    /// Linux 아카이브에는 정사각 PNG 로, Windows 설치 프로그램에는 `.ico` 로 들어간다.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// 산출물을 올릴 기본 주소. `latest.json` 의 자산 URL 은 여기에 파일 이름을 붙여 만든다.
+    #[serde(default)]
+    pub update_base_url: Option<String>,
+    /// 배포 앱이 읽을 업데이트 매니페스트 주소. 없으면 배포 앱의 자동 업데이트가 꺼진다.
+    /// 보통 `update_base_url` + `/latest.json` 이지만 따로 둘 수 있다.
+    #[serde(default)]
+    pub update_url: Option<String>,
+    /// 매니페스트 서명을 검증할 minisign 공개키. 없으면 배포 앱이 검증을 건너뛴다.
+    #[serde(default)]
+    pub update_public_key: Option<String>,
+    /// 배포 앱이 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 fn yes() -> bool {
@@ -141,6 +158,11 @@ impl Default for BuildSpec {
             default_device: DevicePref::Auto,
             models: vec![],
             output_dir: None,
+            icon: None,
+            update_base_url: None,
+            update_url: None,
+            update_public_key: None,
+            auto_update: false,
         }
     }
 }

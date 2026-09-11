@@ -4,6 +4,7 @@
 //! `check()` 가 상태를 보고하고, 없는 항목은 [`Plan`] 으로 "무엇을 · 어디서 · 어디에 · 얼마나" 를 명시한 뒤
 //! 승인 시에만 [`spawn`] 으로 백그라운드 작업을 시작한다. 내려받은 파일은 sha256 으로 검증한다.
 
+use crate::views::fmt_bytes;
 use nl_core::BuildTarget;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -102,13 +103,14 @@ fn check_runtime(target: BuildTarget) -> ToolState {
 }
 
 fn check_inno() -> ToolState {
-    if let Some(p) = which("iscc").or_else(|| which("ISCC.exe")) {
-        let note = p.display().to_string();
-        return ToolState { kind: ToolKind::InnoSetup, path: Some(p), note };
+    // 탐지 규칙은 nl-bundle 이 소유한다 — 빌드할 때 실제로 쓰는 것과 같은 경로여야 한다.
+    if let Some(found) = nl_bundle::find_inno_setup() {
+        let note = found.describe();
+        return ToolState { kind: ToolKind::InnoSetup, path: Some(found.path.clone()), note };
     }
     let note = match which("wine") {
-        Some(w) => format!("wine 은 있음({}) — Inno Setup(iscc)은 없음", w.display()),
-        None => "iscc 도 wine 도 PATH 에 없음".into(),
+        Some(w) => format!("wine 은 있음({}) — Inno Setup 컴파일러는 없음", w.display()),
+        None => "Inno Setup 도 wine 도 찾지 못함".into(),
     };
     ToolState { kind: ToolKind::InnoSetup, path: None, note }
 }
@@ -212,6 +214,8 @@ pub struct Plan {
     pub tool: ToolKind,
     /// 무엇을 하는지 한 줄.
     pub what: String,
+    /// 승인 화면에 차례대로 보여 줄 자세한 단계. 비어 있어도 된다.
+    pub steps: Vec<String>,
     /// 어디서 (URL 또는 실행할 명령).
     pub from: String,
     /// 어디에 놓는지.
@@ -227,6 +231,22 @@ pub enum Method {
     Download { url: String, sha256: String },
     /// 이 소스 워크스페이스에서 직접 빌드한다.
     CargoBuild { workspace: PathBuf },
+    /// nl-bundle 이 소유한 도구 설치 계획(내려받기 + 조용한 설치)을 그대로 실행한다.
+    BundleTool(Box<nl_bundle::ToolPlan>),
+}
+
+/// Inno Setup 설치 계획. 내용은 nl-bundle 이 정하고, 여기서는 동의 화면에 맞게 감싸기만 한다.
+pub fn plan_inno_setup() -> Plan {
+    let inner = nl_bundle::install_inno_setup_plan();
+    Plan {
+        tool: ToolKind::InnoSetup,
+        what: format!("{} 을 내려받아 조용히 설치합니다", inner.name),
+        steps: inner.steps.clone(),
+        from: inner.url.clone(),
+        to: inner.dest.clone(),
+        size: inner.size_hint,
+        method: Method::BundleTool(Box::new(inner)),
+    }
 }
 
 /// 런타임을 구할 방법을 정한다. 매니페스트를 먼저 보고, 없거나 그 대상이 빠져 있으면
@@ -241,6 +261,11 @@ pub fn plan_runtime(target: BuildTarget, manifest_url: &str) -> Result<Plan, Str
                 return Ok(Plan {
                     tool: ToolKind::Runtime(target),
                     what: format!("{} 런타임 실행 파일을 내려받습니다", target.label()),
+                    steps: vec![
+                        format!("매니페스트가 알려 준 자산을 내려받습니다 ({}).", fmt_bytes(a.size)),
+                        "내려받은 파일의 sha256 을 매니페스트 값과 맞춰 봅니다.".to_string(),
+                        format!("맞으면 {} 에 실행 권한을 주고 놓습니다.", to.display()),
+                    ],
                     from: a.url.clone(),
                     to,
                     size: a.size,
@@ -257,7 +282,12 @@ pub fn plan_runtime(target: BuildTarget, manifest_url: &str) -> Result<Plan, Str
         if let Some(ws) = workspace_root() {
             return Ok(Plan {
                 tool: ToolKind::Runtime(target),
-                what: format!("이 소스 워크스페이스에서 런타임을 빌드합니다 ({manifest_err})"),
+                what: "이 소스 워크스페이스에서 런타임을 직접 빌드합니다".to_string(),
+                steps: vec![
+                    format!("내려받기로는 구할 수 없었습니다: {manifest_err}"),
+                    format!("워크스페이스 {} 에서 `cargo build --release -p nl-runtime` 를 돌립니다.", ws.display()),
+                    "빌드에는 몇 분이 걸릴 수 있고 그동안 네트워크로 의존성을 받습니다.".to_string(),
+                ],
                 from: "cargo build --release -p nl-runtime".into(),
                 to: ws.join("target/release").join(runtime_file_name(target)),
                 size: 0,
@@ -313,6 +343,7 @@ pub fn spawn(plan: Plan) -> Receiver<ToolEvent> {
         let result = match plan.method.clone() {
             Method::Download { url, sha256 } => download(&url, &sha256, plan.size, &plan.to, &tx),
             Method::CargoBuild { workspace } => cargo_build_runtime(&workspace, &plan.to, &tx),
+            Method::BundleTool(inner) => run_bundle_tool(&inner, &tx),
         };
         let _ = match result {
             Ok(p) => tx.send(ToolEvent::Done(p)),
@@ -429,6 +460,36 @@ fn cargo_build_runtime(
     Ok(dest.to_path_buf())
 }
 
+/// nl-bundle 의 도구 설치를 돌리며 진행 상황을 우리 이벤트로 옮긴다.
+fn run_bundle_tool(plan: &nl_bundle::ToolPlan, tx: &std::sync::mpsc::Sender<ToolEvent>) -> Result<PathBuf, String> {
+    use nl_bundle::ToolProgress;
+    // nl-bundle 은 crossbeam 채널을 받는다.
+    let (ptx, prx) = crossbeam_channel::unbounded::<ToolProgress>();
+    let out = tx.clone();
+    // 진행 이벤트는 별도 스레드에서 옮긴다 — `run_tool_plan` 이 끝날 때까지 막히기 때문이다.
+    let pump = std::thread::Builder::new().name("nl-tool-pump".into()).spawn(move || {
+        for p in prx {
+            let ev = match p {
+                ToolProgress::Started { name } => ToolEvent::Log(format!("{name} 설치를 시작합니다")),
+                ToolProgress::Downloading { received, total } => match total {
+                    Some(t) if t > 0 => ToolEvent::Progress((received as f32 / t as f32).clamp(0.0, 1.0)),
+                    _ => ToolEvent::Log(format!("내려받는 중… {received} 바이트")),
+                },
+                ToolProgress::Downloaded { path } => ToolEvent::Log(format!("내려받음: {}", path.display())),
+                ToolProgress::Running { command } => ToolEvent::Log(format!("실행: {command}")),
+                ToolProgress::Done => ToolEvent::Log("설치 완료".into()),
+                ToolProgress::Failed { message } => ToolEvent::Log(format!("실패: {message}")),
+            };
+            let _ = out.send(ev);
+        }
+    });
+    let result = nl_bundle::run_tool_plan(plan, ptx).map_err(|e| format!("{e:#}"));
+    if let Ok(h) = pump {
+        let _ = h.join();
+    }
+    result.map(|()| plan.dest.clone())
+}
+
 #[cfg(unix)]
 fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -502,6 +563,23 @@ mod tests {
         // Inno Setup 이 없어도 빌드는 막지 않는다.
         assert!(ToolKind::InnoSetup.optional());
         assert!(!ToolKind::Runtime(BuildTarget::LinuxX64).optional());
+    }
+
+    /// Inno Setup 계획은 네트워크 없이 만들어지고, 동의 화면에 보여 줄 내용이 모두 채워져야 한다.
+    #[test]
+    fn inno_plan_is_ready_for_the_consent_modal() {
+        let plan = plan_inno_setup();
+        assert_eq!(plan.tool, ToolKind::InnoSetup);
+        assert!(plan.from.starts_with("https://"), "어디서 받는지가 보여야 한다");
+        assert!(!plan.what.trim().is_empty(), "무엇을 하는지가 보여야 한다");
+        // 단계는 모달에 줄줄이 그려진다 — 한 줄로 이어 붙이면 창이 화면 밖까지 커진다.
+        assert!(plan.steps.len() >= 3, "자세한 단계가 목록으로 있어야 한다: {:?}", plan.steps);
+        assert!(plan.steps.iter().all(|s| !s.trim().is_empty()));
+        assert!(plan.what.lines().count() == 1, "요약은 한 줄이어야 한다");
+        assert!(plan.size > 0, "크기 어림값이 있어야 한다");
+        assert!(matches!(plan.method, Method::BundleTool(_)));
+        // 계획을 만드는 것만으로는 아무것도 설치되지 않는다.
+        assert!(!plan.to.exists() || plan.to.is_file());
     }
 
     #[test]

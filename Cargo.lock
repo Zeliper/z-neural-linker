@@ -5268,6 +5268,7 @@ dependencies = [
  "nl-engine",
  "nl-gui",
  "nl-io",
+ "nl-update",
  "rfd",
  "semver",
  "serde",

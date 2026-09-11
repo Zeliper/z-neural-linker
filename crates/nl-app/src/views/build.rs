@@ -9,7 +9,7 @@ use crate::tools::{ToolKind, ToolState};
 use eframe::egui::{self, RichText};
 use nl_bundle::Bundle;
 use nl_core::bundle::{BundledModel, DEFAULT_OUTPUT_DIR};
-use nl_core::{BuildSpec, BuildTarget, BundleManifest, DevicePref, ModelId, Op, Project, Severity};
+use nl_core::{BuildSpec, BuildTarget, BundleManifest, DevicePref, Op, Project, Severity};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -45,6 +45,10 @@ pub struct BuildRequest {
     pub runtimes: BTreeMap<BuildTarget, PathBuf>,
     /// 빌더 버전 (매니페스트 진단용).
     pub built_with: String,
+    /// 앱 아이콘 PNG (이미 절대 경로로 풀린 것).
+    pub icon: Option<PathBuf>,
+    /// Windows 설치 프로그램에 적을 발행자.
+    pub publisher: String,
 }
 
 /// 번들을 만들고 대상마다 런타임에 붙여 배포 아카이브까지 만든다.
@@ -60,7 +64,7 @@ pub fn run_build(req: BuildRequest, tx: &Sender<BuildEvent>) {
 }
 
 fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), String> {
-    let BuildRequest { project, spec, base_dir, out_dir, runtimes, built_with } = req;
+    let BuildRequest { project, spec, base_dir, out_dir, runtimes, built_with, icon, publisher } = req;
 
     // 1. 검증. 오류가 하나라도 있으면 만들지 않는다 — 깨진 앱을 배포하는 것이 더 나쁘다.
     send(BuildEvent::Log("검증 중…".into()));
@@ -88,6 +92,9 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         models,
         default_device: spec.default_device,
         autostart: spec.autostart,
+        update_url: spec.update_url.clone().filter(|u| !u.trim().is_empty()),
+        update_public_key: spec.update_public_key.clone().filter(|k| !k.trim().is_empty()),
+        auto_update: spec.auto_update,
     };
     let mut bundle = Bundle::new(manifest, bundle_project);
     bundle.weights = weights;
@@ -100,7 +107,8 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
     std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
 
     let slug = nl_bundle::slugify(&spec.app_name);
-    let mut artifacts: Vec<BuildArtifact> = Vec::new();
+    let icon = icon.as_deref();
+    let mut artifacts: Vec<(BuildArtifact, nl_bundle::AssetKind)> = Vec::new();
     let step = 0.5 / spec.targets.len() as f32;
     for (i, target) in spec.targets.iter().enumerate() {
         let runtime = runtimes
@@ -115,27 +123,76 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         let staged = staging.join(&exe_name);
         nl_bundle::attach(runtime, &zip, &staged).map_err(|e| format!("번들을 붙이지 못했습니다: {e:#}"))?;
 
-        let art = nl_bundle::archive(
-            crate::tools::bundle_target(*target),
-            &staged,
-            &spec.app_name,
-            &spec.app_version,
-            &out_dir,
-        )
-        .map_err(|e| format!("아카이브를 만들지 못했습니다: {e:#}"))?;
-        send(BuildEvent::Log(format!("{} → {}", target.label(), art.path.display())));
-        artifacts.push(BuildArtifact { target: *target, path: art.path, size: art.size, sha256: art.sha256 });
+        // Windows 는 설치 프로그램을 먼저 시도한다. 컴파일러가 없으면 zip 으로 떨어진다.
+        let mut made: Option<(BuildArtifact, nl_bundle::AssetKind)> = None;
+        if *target == BuildTarget::WindowsX64 {
+            match nl_bundle::windows_installer(&staged, &spec.app_name, &spec.app_version, &publisher, &out_dir, icon)
+            {
+                Ok(Some(art)) => {
+                    send(BuildEvent::Log(format!("설치 프로그램 → {}", art.path.display())));
+                    made = Some((
+                        BuildArtifact { target: *target, path: art.path, size: art.size, sha256: art.sha256 },
+                        nl_bundle::AssetKind::Installer,
+                    ));
+                }
+                Ok(None) => send(BuildEvent::Log(
+                    "Inno Setup 컴파일러가 없어 zip 으로 만듭니다 (.iss 스크립트는 남겨 뒀습니다)".into(),
+                )),
+                Err(e) => send(BuildEvent::Log(format!("설치 프로그램을 만들지 못해 zip 으로 갑니다: {e:#}"))),
+            }
+        }
+        let (artifact, kind) = match made {
+            Some(x) => x,
+            None => {
+                let opts = nl_bundle::ArchiveOptions::new(
+                    crate::tools::bundle_target(*target),
+                    &staged,
+                    &spec.app_name,
+                    &spec.app_version,
+                    &out_dir,
+                )
+                .icon(icon);
+                let art = nl_bundle::archive_with(opts)
+                    .map_err(|e| format!("아카이브를 만들지 못했습니다: {e:#}"))?;
+                send(BuildEvent::Log(format!("{} → {}", target.label(), art.path.display())));
+                let kind = match target {
+                    BuildTarget::LinuxX64 => nl_bundle::AssetKind::Binary,
+                    BuildTarget::WindowsX64 => nl_bundle::AssetKind::Installer,
+                };
+                (BuildArtifact { target: *target, path: art.path, size: art.size, sha256: art.sha256 }, kind)
+            }
+        };
+        artifacts.push((artifact, kind));
         send(BuildEvent::Progress(0.45 + step * (i + 1) as f32));
     }
     let _ = std::fs::remove_dir_all(&staging);
 
-    // 3. 배포 매니페스트. 자산 URL 은 파일 이름만 넣는다 — 올리는 쪽에서 기본 주소를 앞에 붙인다.
-    let manifest_path = out_dir.join("latest.json");
-    let json = latest_json(&spec.app_version, &artifacts);
-    crate::project::write_atomic(&manifest_path, json.as_bytes())?;
-    send(BuildEvent::Log(format!("매니페스트 {}", manifest_path.display())));
+    // 3. 배포 매니페스트. 형식은 nl-update 가 읽는 것과 같아야 하므로 nl-bundle 에 맡긴다.
+    let base_url = spec.update_base_url.clone().unwrap_or_default();
+    let entries: Vec<(String, nl_bundle::Artifact, nl_bundle::AssetKind)> = artifacts
+        .iter()
+        .map(|(a, kind)| {
+            (
+                crate::tools::short_key(a.target).to_string(),
+                nl_bundle::Artifact { path: a.path.clone(), sha256: a.sha256.clone(), size: a.size },
+                *kind,
+            )
+        })
+        .collect();
+    match nl_bundle::write_manifest(&spec.app_version, "", &entries, &base_url, &out_dir) {
+        Ok(p) => {
+            send(BuildEvent::Log(format!("매니페스트 {}", p.display())));
+            if base_url.trim().is_empty() {
+                send(BuildEvent::Log(
+                    "자산 기본 주소가 비어 있어 latest.json 의 URL 이 파일 이름뿐입니다 — 올릴 때 앞에 주소를 붙이세요"
+                        .into(),
+                ));
+            }
+        }
+        Err(e) => send(BuildEvent::Log(format!("매니페스트를 쓰지 못했습니다: {e:#}"))),
+    }
 
-    for a in artifacts {
+    for (a, _) in artifacts {
         send(BuildEvent::Artifact(a));
     }
     send(BuildEvent::Progress(1.0));
@@ -188,29 +245,6 @@ fn weights_ext(rel: &str) -> String {
     Path::new(rel).extension().and_then(|e| e.to_str()).unwrap_or("safetensors").to_string()
 }
 
-/// `packaging/make-manifest.sh` 와 같은 형식.
-pub fn latest_json(version: &str, artifacts: &[BuildArtifact]) -> String {
-    let assets: Vec<String> = artifacts
-        .iter()
-        .map(|a| {
-            let name = a.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let kind = match a.target {
-                BuildTarget::LinuxX64 => "binary",
-                BuildTarget::WindowsX64 => "installer",
-            };
-            format!(
-                "\"{}\": {{\"url\": \"{}\", \"sha256\": \"{}\", \"kind\": \"{}\", \"size\": {}}}",
-                crate::tools::short_key(a.target),
-                name,
-                a.sha256,
-                kind,
-                a.size
-            )
-        })
-        .collect();
-    format!("{{\n  \"version\": \"{}\",\n  \"notes\": \"\",\n  \"assets\": {{{}}}\n}}\n", version, assets.join(", "))
-}
-
 // ───────────────────────────── 뷰 ─────────────────────────────
 
 #[derive(Default)]
@@ -222,6 +256,12 @@ pub struct BuildViewState {
     pub error: Option<String>,
     /// 런타임 매니페스트 주소 (설정에 저장).
     pub manifest_url: String,
+    /// 아이콘 미리보기 텍스처와 다시 읽어야 하는지.
+    pub icon_preview: Option<egui::TextureHandle>,
+    pub icon_dirty: bool,
+    pub icon_error: Option<String>,
+    /// 미리보기를 만든 경로 (바뀌면 다시 읽는다).
+    pub icon_path: Option<PathBuf>,
 }
 
 impl BuildViewState {
@@ -233,12 +273,47 @@ impl BuildViewState {
     }
 }
 
+/// 아이콘 PNG 를 읽어 미리보기 텍스처를 갱신한다. 경로가 그대로면 아무 일도 하지 않는다.
+fn refresh_icon(ui: &egui::Ui, ctx: &ViewCtx, state: &mut BuildViewState, spec: &BuildSpec) {
+    let resolved = spec.icon.as_deref().map(|rel| resolve_path(ctx.base_dir, rel));
+    if !state.icon_dirty && state.icon_path == resolved {
+        return;
+    }
+    state.icon_dirty = false;
+    state.icon_path = resolved.clone();
+    state.icon_error = None;
+    state.icon_preview = None;
+    let Some(path) = resolved else { return };
+    match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| {
+        image::load_from_memory(&b).map_err(|e| format!("PNG 를 읽지 못했습니다: {e}"))
+    }) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            state.icon_preview =
+                Some(ui.ctx().load_texture("build-icon", color, egui::TextureOptions::LINEAR));
+        }
+        Err(e) => state.icon_error = Some(format!("{}: {e}", path.display())),
+    }
+}
+
+/// 프로젝트 폴더 기준 상대 경로를 푼다.
+pub fn resolve_path(base: Option<&Path>, rel: &str) -> PathBuf {
+    let p = PathBuf::from(rel);
+    match base {
+        Some(b) if p.is_relative() => b.join(p),
+        _ => p,
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut BuildViewState, tools: &[ToolState]) -> Vec<ViewAction> {
     let mut actions = Vec::new();
     let spec = ctx.project.settings.build.clone().unwrap_or_else(|| BuildSpec::from_project(ctx.project));
 
+    refresh_icon(ui, ctx, state, &spec);
     egui::ScrollArea::vertical().id_salt("build-scroll").show(ui, |ui| {
-        spec_editor(ui, ctx, &spec, &mut actions);
+        spec_editor(ui, ctx, &spec, state, &mut actions);
         ui.add_space(8.0);
         tools_table(ui, tools, state, &mut actions);
         ui.add_space(8.0);
@@ -253,7 +328,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut BuildViewState, tools:
     actions
 }
 
-fn spec_editor(ui: &mut egui::Ui, ctx: &ViewCtx, spec: &BuildSpec, actions: &mut Vec<ViewAction>) {
+fn spec_editor(
+    ui: &mut egui::Ui,
+    ctx: &ViewCtx,
+    spec: &BuildSpec,
+    state: &BuildViewState,
+    actions: &mut Vec<ViewAction>,
+) {
     let mut next = spec.clone();
     let mut changed = false;
     egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
@@ -340,6 +421,78 @@ fn spec_editor(ui: &mut egui::Ui, ctx: &ViewCtx, spec: &BuildSpec, actions: &mut
                 changed = true;
             }
             ui.end_row();
+
+            ui.label(RichText::new("아이콘").color(COL_WEAK));
+            ui.horizontal(|ui| {
+                if let Some(t) = &state.icon_preview {
+                    ui.add(egui::Image::new(t).fit_to_exact_size(egui::Vec2::splat(40.0)));
+                }
+                match &next.icon {
+                    Some(p) => {
+                        ui.label(RichText::new(super::short_path(p)).size(11.0)).on_hover_text(p);
+                    }
+                    None => {
+                        ui.label(RichText::new("(없음)").color(COL_WEAK).size(11.0));
+                    }
+                }
+                if ui.small_button("PNG 고르기…").clicked() {
+                    actions.push(ViewAction::PickIcon);
+                }
+                if next.icon.is_some() && ui.small_button("지우기").clicked() {
+                    next.icon = None;
+                    changed = true;
+                }
+            });
+            ui.end_row();
+        });
+        if let Some(e) = &state.icon_error {
+            ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.0));
+        }
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("배포 앱 자동 업데이트").strong());
+        egui::Grid::new("build-update").num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
+            ui.label(RichText::new("자산 기본 주소").color(COL_WEAK));
+            let mut base = next.update_base_url.clone().unwrap_or_default();
+            if ui
+                .add(egui::TextEdit::singleline(&mut base).desired_width(320.0).hint_text("https://example.com/앱/0.1.0"))
+                .on_hover_text("latest.json 의 자산 주소는 여기에 파일 이름을 붙여 만듭니다")
+                .changed()
+            {
+                next.update_base_url = (!base.trim().is_empty()).then_some(base);
+                changed = true;
+            }
+            ui.end_row();
+
+            ui.label(RichText::new("매니페스트 주소").color(COL_WEAK));
+            let mut url = next.update_url.clone().unwrap_or_default();
+            if ui
+                .add(egui::TextEdit::singleline(&mut url).desired_width(320.0).hint_text("https://example.com/앱/latest.json"))
+                .on_hover_text("비우면 배포 앱의 자동 업데이트가 꺼집니다")
+                .changed()
+            {
+                next.update_url = (!url.trim().is_empty()).then_some(url);
+                changed = true;
+            }
+            ui.end_row();
+
+            ui.label(RichText::new("서명 공개키").color(COL_WEAK));
+            let mut key = next.update_public_key.clone().unwrap_or_default();
+            if ui
+                .add(egui::TextEdit::singleline(&mut key).desired_width(320.0).hint_text("minisign 공개키 (RWQ…)"))
+                .on_hover_text("비우면 배포 앱이 매니페스트 서명을 검증하지 않습니다")
+                .changed()
+            {
+                next.update_public_key = (!key.trim().is_empty()).then_some(key);
+                changed = true;
+            }
+            ui.end_row();
+
+            ui.label(RichText::new("자동 내려받기").color(COL_WEAK));
+            changed |= ui
+                .checkbox(&mut next.auto_update, "새 버전을 알아서 내려받기 (적용은 사용자 확인)")
+                .changed();
+            ui.end_row();
         });
 
         ui.add_space(4.0);
@@ -418,6 +571,13 @@ fn tools_table(ui: &mut egui::Ui, tools: &[ToolState], state: &mut BuildViewStat
                             }
                         }
                         ToolKind::InnoSetup => {
+                            if ui
+                                .small_button("설치…")
+                                .on_hover_text("jrsoftware.org 에서 Inno Setup 6 을 내려받아 설치합니다")
+                                .clicked()
+                            {
+                                actions.push(ViewAction::ToolPlanInno);
+                            }
                             ui.label(RichText::new(ToolKind::InnoSetup.why()).color(COL_WEAK).size(11.0));
                         }
                     }
@@ -550,42 +710,48 @@ fn log_section(ui: &mut egui::Ui, state: &BuildViewState) {
     });
 }
 
-/// 모델 목록에서 가중치가 있는 것만 (설정 기본값).
-pub fn models_with_weights(project: &Project) -> Vec<ModelId> {
-    project.models.values().filter(|m| m.weights.is_some()).map(|m| m.id).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn artifact(t: BuildTarget, name: &str) -> BuildArtifact {
-        BuildArtifact { target: t, path: PathBuf::from("/out").join(name), size: 1234, sha256: "abc123".into() }
+    fn artifact(t: BuildTarget, name: &str) -> (nl_bundle::Artifact, nl_bundle::AssetKind) {
+        let kind = match t {
+            BuildTarget::LinuxX64 => nl_bundle::AssetKind::Binary,
+            BuildTarget::WindowsX64 => nl_bundle::AssetKind::Installer,
+        };
+        (
+            nl_bundle::Artifact {
+                path: PathBuf::from("/out").join(name),
+                sha256: "a".repeat(64),
+                size: 1234,
+            },
+            kind,
+        )
+    }
+
+    /// 빌더가 만드는 매니페스트는 배포 앱(`nl_update`)이 그대로 읽는 형식이어야 한다.
+    #[test]
+    fn manifest_is_what_the_deployed_app_reads() {
+        let (art, kind) = artifact(BuildTarget::LinuxX64, "앱-0.2.0-linux-x86_64.tar.gz");
+        let entries = vec![(crate::tools::short_key(BuildTarget::LinuxX64).to_string(), art, kind)];
+        let m = nl_bundle::build_manifest("0.2.0", "메모", &entries, "https://example.com/앱/0.2.0").unwrap();
+        assert_eq!(m.version, "0.2.0");
+        let asset = m.assets.get("linux-x86_64").expect("리눅스 자산");
+        assert_eq!(asset.url, "https://example.com/앱/0.2.0/앱-0.2.0-linux-x86_64.tar.gz");
+        assert_eq!(asset.kind, nl_bundle::AssetKind::Binary);
+        assert_eq!(asset.size, 1234);
+        // 배포 앱 쪽 판정도 같은 결론을 내야 한다.
+        let current = semver::Version::new(0, 1, 0);
+        assert!(m.newer_for(&current, "linux-x86_64").is_some());
+        assert!(m.newer_for(&semver::Version::new(9, 0, 0), "linux-x86_64").is_none());
     }
 
     #[test]
-    fn latest_json_matches_the_packaging_format() {
-        let json = latest_json("0.2.0", &[artifact(BuildTarget::LinuxX64, "앱-0.2.0-linux-x86_64.tar.gz")]);
-        let v: serde_json::Value = serde_json::from_str(&json).expect("올바른 JSON");
-        assert_eq!(v["version"], "0.2.0");
-        let a = &v["assets"]["linux-x86_64"];
-        assert_eq!(a["url"], "앱-0.2.0-linux-x86_64.tar.gz");
-        assert_eq!(a["sha256"], "abc123");
-        assert_eq!(a["kind"], "binary");
-        assert_eq!(a["size"], 1234);
-    }
-
-    #[test]
-    fn latest_json_handles_two_targets_and_no_target() {
-        let json = latest_json(
-            "1.0.0",
-            &[artifact(BuildTarget::LinuxX64, "a.tar.gz"), artifact(BuildTarget::WindowsX64, "a.zip")],
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["assets"].as_object().unwrap().len(), 2);
-        assert_eq!(v["assets"]["windows-x86_64"]["kind"], "installer");
-        let empty: serde_json::Value = serde_json::from_str(&latest_json("1.0.0", &[])).unwrap();
-        assert!(empty["assets"].as_object().unwrap().is_empty());
+    fn windows_artifacts_are_installers_in_the_manifest() {
+        let (art, kind) = artifact(BuildTarget::WindowsX64, "앱-0.2.0-setup.exe");
+        let entries = vec![(crate::tools::short_key(BuildTarget::WindowsX64).to_string(), art, kind)];
+        let m = nl_bundle::build_manifest("0.2.0", "", &entries, "https://example.com").unwrap();
+        assert_eq!(m.assets["windows-x86_64"].kind, nl_bundle::AssetKind::Installer);
     }
 
     #[test]

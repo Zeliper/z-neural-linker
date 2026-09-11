@@ -44,6 +44,14 @@ pub struct ViewCtx<'a> {
     pub monitors: &'a [MonitorInfo],
     /// 모니터 목록을 못 읽었을 때의 이유.
     pub monitors_error: Option<&'a str>,
+    /// 진행 중인 녹화.
+    pub recording: Option<&'a crate::record::RecordSession>,
+    /// "지금 한 장 캡처" 결과.
+    pub shot: &'a crate::record::ShotPreview,
+    /// 시작할 때 빌더 업데이트를 확인하는 설정이 켜져 있는가.
+    pub update_check: bool,
+    /// 빌더 업데이트의 지금 상태. 확인을 시작한 적이 없으면 `None`.
+    pub update_state: Option<&'a nl_update::State>,
     /// 앱 시계(초) — 같은 프레임 안에서 모두 같은 값을 쓴다.
     pub now: f64,
 }
@@ -106,10 +114,35 @@ pub enum ViewAction {
     BuildStart,
     /// 도구 설치 계획을 만든다 (네트워크를 타므로 앱이 스레드에서 처리).
     ToolPlan(BuildTarget),
+    /// Inno Setup 설치 계획 (네트워크 없이 바로 만든다).
+    ToolPlanInno,
     RecheckTools,
     OpenPath(PathBuf),
     /// 만든 배포 아카이브를 풀어 실행한다.
     RunArtifact(PathBuf),
+    /// 아이콘 PNG 고르기.
+    PickIcon,
+    // 녹화
+    /// 녹화 폼을 연다.
+    StartRecordForm,
+    /// 녹화 폴더를 직접 고른다.
+    PickRecordDir,
+    StartRecording {
+        dir: PathBuf,
+        name: String,
+        region: nl_core::pipeline::Region,
+        fps: f32,
+        labels: Vec<String>,
+    },
+    StopRecording,
+    /// 화면 한 장을 찍어 미리보기에 올린다.
+    CaptureShot(nl_core::pipeline::Region),
+    // 빌더 업데이트
+    ShowUpdateWindow(bool),
+    /// 시작할 때 업데이트를 확인할지 바꾼다.
+    SetUpdateCheck(bool),
+    /// 지금 한 번 확인한다.
+    CheckUpdateNow,
 }
 
 /// 뷰가 프레임 사이에 들고 있는 UI 상태 (문서가 아닌 것). 앱이 소유한다.

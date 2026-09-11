@@ -152,7 +152,7 @@ pub fn xor_project() -> Project {
         autostart: true,
         default_device: nl_core::DevicePref::Cpu,
         models: vec![m.id],
-        output_dir: None,
+        ..BuildSpec::default()
     });
 
     p.pipelines.insert(pl.id, pl);

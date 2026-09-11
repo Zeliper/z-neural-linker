@@ -230,6 +230,9 @@ pub fn inspect_node(
             if matches!(source, Source::Manual) {
                 manual_sender(ui, state, nid, &mut actions, live.running);
             }
+            if let Source::HttpServer { bind, path } = source {
+                http_server_tester(ui, bind, path, live.running);
+            }
         }
         PNodeKind::Model { model, payload } => changed |= model_editor(ui, model, payload, ctx),
         PNodeKind::Logic { logic } => changed |= logic_editor(ui, logic, state),
@@ -362,21 +365,59 @@ fn source_editor(
                 changed |= ui.add(DragValue::new(fps).range(0.1..=60.0).speed(0.5)).changed();
             });
             changed |= region_editor(ui, region, ctx);
+            ui.add_space(6.0);
+            // 실제로 무엇이 찍히는지, 어떤 백엔드로 얼마나 나오는지는 한 장 찍어 봐야 안다.
+            super::data::shot_block(ui, ctx, *region, actions);
         }
         Source::GuiEvent { widget } => {
             changed |= widget_picker(ui, widget, ctx, "이 위젯의 이벤트를 받습니다", "src-widget");
         }
+        Source::HttpServer { bind, path } => {
+            ui.label(RichText::new("주소:포트").color(COL_WEAK).size(11.0));
+            changed |= ui.add(egui::TextEdit::singleline(bind).desired_width(f32::INFINITY)).changed();
+            match bind.parse::<std::net::SocketAddr>() {
+                Ok(addr) if addr.ip().is_loopback() => {
+                    ui.label(RichText::new("✔ 루프백 — 이 컴퓨터에서만 닿습니다").color(COL_OK).size(11.0));
+                }
+                Ok(_) => {
+                    ui.label(
+                        RichText::new("⚠ 바깥에서 닿을 수 있는 주소입니다 — 방화벽을 확인하세요")
+                            .color(COL_WARN)
+                            .size(11.0),
+                    );
+                }
+                Err(e) => {
+                    ui.label(RichText::new(format!("✖ 주소를 읽을 수 없습니다: {e}")).color(COL_ERROR).size(11.0));
+                }
+            }
+            ui.label(RichText::new("경로").color(COL_WEAK).size(11.0));
+            changed |= ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY)).changed();
+            if !path.starts_with('/') {
+                ui.label(RichText::new("경로는 / 로 시작해야 합니다").color(COL_WARN).size(11.0));
+            }
+            ui.label(
+                RichText::new("요청 본문이 값이 됩니다. 응답은 같은 파이프라인의 'HTTP 응답' 싱크가 돌려줍니다.")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
+        }
     }
-    let _ = (actions, pid);
+    let _ = pid;
     changed
+}
+
+/// 이 서버 노드를 부르는 curl 한 줄.
+pub fn curl_example(bind: &str, path: &str) -> String {
+    let host = if bind.starts_with("0.0.0.0") { bind.replacen("0.0.0.0", "127.0.0.1", 1) } else { bind.to_string() };
+    format!("curl -X POST http://{host}{path} -d '[0,1]'")
 }
 
 pub fn source_label(s: &Source) -> &'static str {
     PNodeKind::Source { source: s.clone() }.label()
 }
 
-/// 모니터 목록 콤보 + 상대 좌표 + "모니터 전체".
-fn region_editor(ui: &mut egui::Ui, region: &mut Region, ctx: &ViewCtx) -> bool {
+/// 모니터 목록 콤보 + 상대 좌표 + "모니터 전체". 녹화 폼도 같은 편집기를 쓴다.
+pub(crate) fn region_editor(ui: &mut egui::Ui, region: &mut Region, ctx: &ViewCtx) -> bool {
     let mut changed = false;
     ui.add_space(4.0);
     ui.label(RichText::new("모니터").color(COL_WEAK).size(11.0));
@@ -499,6 +540,26 @@ fn manual_sender(
                 ui.label(RichText::new("실행 중일 때만 보낼 수 있습니다").color(COL_WEAK).size(11.0));
             } else if let Err(e) = &parsed {
                 ui.label(RichText::new(e).color(COL_WARN).size(11.0));
+            }
+        });
+    });
+}
+
+/// 실행 중인 HTTP 서버 노드를 바깥에서 불러 보는 칸.
+fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, running: bool) {
+    ui.add_space(8.0);
+    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(8).corner_radius(4).show(ui, |ui| {
+        ui.label(RichText::new("바깥에서 불러 보기").strong());
+        let cmd = curl_example(bind, path);
+        ui.label(RichText::new(&cmd).size(11.0).monospace());
+        ui.horizontal(|ui| {
+            if ui.button("복사").clicked() {
+                ui.ctx().copy_text(cmd.clone());
+            }
+            if running {
+                ui.label(RichText::new("● 서버가 열려 있습니다").color(COL_OK).size(11.0));
+            } else {
+                ui.label(RichText::new("시험 실행 중에만 열립니다").color(COL_WEAK).size(11.0));
             }
         });
     });
@@ -648,7 +709,7 @@ fn sink_editor(
     sink: &mut Sink,
     ctx: &ViewCtx,
     _actions: &mut [ViewAction],
-    _pid: PipelineId,
+    pid: PipelineId,
     state: &mut PipelineViewState,
 ) -> bool {
     let mut changed = false;
@@ -701,6 +762,44 @@ fn sink_editor(
             changed |= ui
                 .add(egui::TextEdit::multiline(body_template).desired_rows(3).desired_width(f32::INFINITY))
                 .changed();
+        }
+        Sink::HttpReply { server } => {
+            ui.label(RichText::new("응답할 서버 노드").color(COL_WEAK).size(11.0));
+            let servers: Vec<(PNodeId, String)> = ctx
+                .project
+                .pipelines
+                .get(&pid)
+                .map(|pl| {
+                    pl.nodes
+                        .values()
+                        .filter(|n| matches!(n.kind, PNodeKind::Source { source: Source::HttpServer { .. } }))
+                        .map(|n| (n.id, crate::pcanvas::node_title(n)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let label = servers
+                .iter()
+                .find(|(id, _)| id == server)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| "(고르세요)".into());
+            egui::ComboBox::from_id_salt("sink-http-server").selected_text(label).show_ui(ui, |ui| {
+                if servers.is_empty() {
+                    ui.label(RichText::new("같은 파이프라인에 HTTP 서버 소스가 없습니다").weak());
+                }
+                for (id, name) in &servers {
+                    if ui.selectable_label(server == id, name).clicked() && server != id {
+                        *server = *id;
+                        changed = true;
+                    }
+                }
+            });
+            if servers.iter().any(|(id, _)| id == server) {
+                ui.label(RichText::new("✔ 서버 노드와 짝지어졌습니다").color(COL_OK).size(11.0));
+            } else {
+                ui.label(
+                    RichText::new("✖ 짝이 없으면 요청이 타임아웃까지 기다립니다").color(COL_ERROR).size(11.0),
+                );
+            }
         }
         Sink::MouseKeyboard { actions: list, cooldown_ms } => {
             ui.horizontal(|ui| {
@@ -973,6 +1072,24 @@ mod tests {
         labels.dedup();
         assert_eq!(labels.len(), n, "같은 라벨이 두 번");
         assert_eq!(n, 10, "새 InputAction 변형을 팔레트에 추가할 것");
+    }
+
+    #[test]
+    fn curl_example_points_at_something_reachable() {
+        assert_eq!(
+            curl_example("127.0.0.1:8787", "/infer"),
+            "curl -X POST http://127.0.0.1:8787/infer -d '[0,1]'"
+        );
+        // 0.0.0.0 에 묶었어도 부를 때는 루프백으로 부른다.
+        assert!(curl_example("0.0.0.0:9000", "/x").contains("http://127.0.0.1:9000/x"));
+    }
+
+    /// 팔레트의 기본 HttpServer 는 루프백이어야 한다 — 새 노드가 바깥에 열려 있으면 안 된다.
+    #[test]
+    fn default_http_server_binds_to_loopback() {
+        let bind: std::net::SocketAddr = crate::pcanvas::DEFAULT_HTTP_BIND.parse().expect("주소");
+        assert!(bind.ip().is_loopback());
+        assert!(crate::pcanvas::DEFAULT_HTTP_PATH.starts_with('/'));
     }
 
     /// 편집기가 만들어 내는 키 이름 기본값은 실행기가 반드시 해석할 수 있어야 한다.
