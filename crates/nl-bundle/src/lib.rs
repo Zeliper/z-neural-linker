@@ -730,19 +730,34 @@ mod tests {
         assert!(safe_relative("/etc/passwd").is_none());
     }
 
+    /// `NL_RUNTIMES_DIR` 은 프로세스 전역이라 이 시험 하나로 두 대상을 함께 본다 —
+    /// 나눠 두면 병렬 실행 때 서로의 환경 변수를 지워 경쟁한다.
     #[test]
     fn find_runtime_reads_env_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let triple_dir = dir.path().join(Target::LinuxX64.triple());
-        std::fs::create_dir_all(&triple_dir).unwrap();
-        let exe = triple_dir.join("nl-runtime");
-        std::fs::write(&exe, b"x").unwrap();
-        // 이 테스트만 환경 변수를 쓴다 (같은 프로세스의 다른 테스트와 겹치지 않는 이름).
+        for target in [Target::LinuxX64, Target::WindowsX64] {
+            let triple_dir = dir.path().join(target.triple());
+            std::fs::create_dir_all(&triple_dir).unwrap();
+            std::fs::write(triple_dir.join(target.runtime_file_name()), b"MZ").unwrap();
+        }
+
         unsafe { std::env::set_var("NL_RUNTIMES_DIR", dir.path()) };
-        let found = find_runtime(Target::LinuxX64);
+        let linux = find_runtime(Target::LinuxX64);
+        let windows = find_runtime(Target::WindowsX64);
         unsafe { std::env::remove_var("NL_RUNTIMES_DIR") };
-        // 현재 실행 파일 옆에 nl-runtime 이 이미 있으면 그쪽이 먼저다 — 둘 중 하나면 통과.
-        let found = found.expect("런타임을 찾지 못했습니다");
-        assert_eq!(found.file_name().unwrap(), "nl-runtime");
+
+        // 현재 실행 파일 옆에 nl-runtime 이 있으면 그쪽이 먼저다 — 이름만 확인한다.
+        let linux = linux.expect("Linux 런타임을 찾지 못했습니다");
+        assert_eq!(linux.file_name().unwrap(), "nl-runtime");
+
+        // Windows 용은 테스트 바이너리 옆에 있을 리 없으니 triple 폴더에서 찾아야 한다.
+        let windows = windows.expect("Windows 런타임을 찾지 못했습니다");
+        assert_eq!(windows.file_name().unwrap(), "nl-runtime.exe");
+        assert!(windows.starts_with(dir.path()), "{}", windows.display());
+        assert!(
+            windows.parent().unwrap().ends_with("x86_64-pc-windows-msvc"),
+            "크로스 빌드 산출물을 두는 triple 폴더에서 찾아야 합니다: {}",
+            windows.display()
+        );
     }
 }

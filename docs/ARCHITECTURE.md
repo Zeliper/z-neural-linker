@@ -172,6 +172,31 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 - 빌드/배포에 필요한 외부 요소: 대상별 런타임 바이너리, Windows 설치 프로그램 제작기(Inno Setup, Windows 호스트 또는 wine),
   선택적 GPU 런타임. `ToolManager::check()` 가 상태를 보고하고, 없는 것은 **동의 모달**("무엇을 어디서 받아 어디에 놓는지"
   명시) → 승인 시 백그라운드 다운로드(sha256 검증) → 진행률 → 재검사. 거부하면 그 도구가 필요 없는 산출물(zip/tar)로 대체.
+- 계획과 실행은 나뉘어 있다: `nl_bundle::tools::{install_inno_setup_plan, cross_build_plan}` 이 `ToolPlan` 을 만들고
+  (`name`·`url`·`size_hint`·`disk_hint`·`dest`·`steps`·`commands`), `run_tool_plan`/`run_cross_build` 가 실행한다.
+  덕분에 "무엇을 받아 어디에 놓고 얼마나 걸리는지" 를 먼저 보여 주고 승인을 받을 수 있다.
+
+#### Windows 런타임 크로스 빌드 (Linux 에서, 실측됨)
+관리자 권한 없이 Linux 에서 `nl-runtime.exe` 를 만들 수 있다. 빌더의 "Windows 런타임 없음 → 동의 후 준비" 는
+내려받기가 아니라 **이 빌드**다.
+
+```
+cargo install cargo-xwin --locked
+rustup target add x86_64-pc-windows-msvc
+cargo xwin build --release -p nl-runtime --target x86_64-pc-windows-msvc
+```
+
+- `cargo-xwin` 이 Microsoft 의 Windows SDK·CRT 를 `~/.cache/cargo-xwin` 에 내려받는다(실측 1.2 GB).
+  Visual Studio 도 관리자 권한도 필요 없다.
+- 필요한 것: `clang`, `llvm-lib`, `lld-link`. 앞의 둘은 clang 패키지에 들어 있지만 **`lld-link` 는 별도 패키지**다
+  (Fedora `lld`). 관리자 권한이 없으면 `tools::ensure_lld_link` 가 rustup 이 들고 있는 `rust-lld` 를
+  `-flavor link` 로 부르는 얇은 스크립트를 만들어 대신 쓴다 — 같은 LLVM 에서 나온 같은 링커다.
+  주의: rustc 가 링커 이름을 보고 스스로 `-flavor link` 를 붙여 보낼 때가 있어 스크립트는 중복을 걸러야 한다.
+- burn/cubecl(wgpu dx12·vulkan), eframe/accesskit_windows, xcap, enigo, tiny_http, ring 모두 그대로 컴파일된다.
+  `nl-io/build.rs` 는 `CARGO_CFG_TARGET_OS != linux` 면 아무것도 하지 않아 Windows 빌드에 끼어들지 않는다.
+- 실측: 산출물 53.7 MB(PE32+ x86-64, GUI 서브시스템), 처음 빌드 15분 남짓, 디스크 약 3 GB
+  (SDK 캐시 1.2 GB + 대상 target 1.9 GB).
+- 만든 실행 파일을 `runtimes/x86_64-pc-windows-msvc/nl-runtime.exe` 에 두면 `nl_bundle::find_runtime` 이 찾는다.
 
 ### 빌드 (`build.rs`)
 - `BuildSpec { app_name, version, targets, entry_pipeline, gui, models, output_dir }` → `nl_bundle::Bundle::to_zip` → 대상별 런타임에 `nl_bundle::attach` →

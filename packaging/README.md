@@ -17,6 +17,63 @@ packaging/linux/install.sh --uninstall
 Inno Setup 6 로 `packaging/windows/neural-linker.iss` 를 컴파일한다 (`iscc /DAppVersion=0.2.0 neural-linker.iss`).
 사용자 단위(`%LOCALAPPDATA%\Programs\Neural Linker`, UAC 없음)로 설치하며 `.nlproj` 연결(`NeuralLinker.Project`)을 HKCU 에 등록하고, 설치·업데이트 뒤 앱을 다시 띄운다.
 
+## Windows 런타임을 Linux 에서 만들기
+
+배포 앱의 Windows 산출물은 `nl-runtime.exe` 에 번들을 붙여 만든다. 그 `nl-runtime.exe` 자체는
+**Linux 에서 관리자 권한 없이** 크로스 빌드할 수 있다 (2026-09-11 이 저장소에서 실측).
+
+```sh
+cargo install cargo-xwin --locked
+rustup target add x86_64-pc-windows-msvc
+cargo xwin build --release -p nl-runtime --target x86_64-pc-windows-msvc
+# → target/x86_64-pc-windows-msvc/release/nl-runtime.exe
+mkdir -p runtimes/x86_64-pc-windows-msvc
+cp target/x86_64-pc-windows-msvc/release/nl-runtime.exe runtimes/x86_64-pc-windows-msvc/
+```
+
+`cargo-xwin` 이 Microsoft 의 Windows SDK·CRT 를 `~/.cache/cargo-xwin` 에 내려받는다. Visual Studio 는 필요 없다.
+
+| 실측값 | |
+| --- | --- |
+| 산출물 | 53.7 MB, `PE32+ executable for MS Windows 6.00 (GUI), x86-64` |
+| 처음 빌드 | 15분 남짓 (SDK 내려받기 1.2 GB 포함) |
+| 디스크 | 약 3 GB (SDK 캐시 1.2 GB + `target/x86_64-pc-windows-msvc` 1.9 GB) |
+| 확인 | wine 에서 `--version`, 번들 첨부본의 `--headless --run-for 1` 까지 동작 |
+
+### 준비물
+
+`clang` 과 `llvm-lib` 는 clang 패키지에 들어 있지만 **`lld-link` 는 별도 패키지**다.
+
+- 관리자 권한이 있으면: Fedora `sudo dnf install lld`, Debian/Ubuntu `sudo apt install lld`.
+- 없으면 rustup 이 들고 있는 `rust-lld` 로 대신한다 — 같은 LLVM 에서 나온 같은 링커다.
+  `nl_bundle::tools::ensure_lld_link` 가 자동으로 만들어 주고, 손으로 하려면:
+
+```sh
+RL=$(ls ~/.rustup/toolchains/*/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld | head -1)
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/lld-link <<EOF
+#!/bin/sh
+case "\$1" in
+  -flavor) exec $RL "\$@" ;;
+  *)       exec $RL -flavor link "\$@" ;;
+esac
+EOF
+chmod +x ~/.local/bin/lld-link
+```
+
+`case` 로 가르는 이유는 rustc 가 링커 이름을 보고 **스스로 `-flavor link` 를 붙여 보낼 때가 있어서**다.
+그때 또 붙이면 `rust-lld` 가 두 번째 `link` 를 입력 파일로 읽고
+`could not open 'link': No such file or directory` 로 죽는다.
+
+### 빌더에서
+
+`nl_bundle::tools::cross_build_plan(Target::WindowsX64)` 가 위 절차를 `ToolPlan` 으로 돌려준다
+(명령 목록 + 걸리는 시간·디스크 안내). 사용자가 승인하면 `run_cross_build` 가 순서대로 실행하며
+출력을 `ToolProgress::Output` 으로 한 줄씩 흘린다. 거부하면 Windows 산출물 없이 Linux 것만 만든다.
+
+Windows 빌드 기계가 따로 있거나 이 경로가 막히면 GitHub Actions 의 `windows-latest` 러너에서 빌드해
+`runtimes/` 에 내려받는 방법도 있다 — 다만 지금은 크로스 빌드가 되므로 필요하지 않다.
+
 ## 업데이트
 
 업데이트는 두 갈래다. **빌더**(`nl-app`)는 Trust A&C 가 배포하고, **배포 앱**(`nl-runtime` + 첨부 번들)은
