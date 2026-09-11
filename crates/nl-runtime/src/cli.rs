@@ -10,6 +10,7 @@ pub const USAGE: &str = "\
 
 옵션
   --headless            창 없이 파이프라인만 실행합니다 (Ctrl+C 로 종료).
+  --run-for <초>        헤드리스에서 이 시간이 지나면 파이프라인을 정지하고 종료합니다 (스크립트·테스트용).
   --device <장치>       cpu | gpu:<번호> | auto (기본값은 번들 설정).
   --version, -V         버전을 출력합니다.
   --help, -h            이 도움말을 출력합니다.";
@@ -19,6 +20,8 @@ pub struct Options {
     /// 실행할 `.nlapp` 파일. 없으면 자기 실행 파일의 첨부 번들.
     pub bundle_path: Option<PathBuf>,
     pub headless: bool,
+    /// 헤드리스 자동 종료 시간 (초). 없으면 Ctrl+C 까지.
+    pub run_for: Option<f64>,
     /// 지정하지 않으면 번들 매니페스트의 기본 장치.
     pub device: Option<DevicePref>,
 }
@@ -40,6 +43,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Command {
             "--version" | "-V" => return Command::Version,
             "--help" | "-h" => return Command::Help,
             "--headless" => opts.headless = true,
+            "--run-for" => {
+                let Some(v) = it.next() else {
+                    return Command::Error("--run-for 뒤에 초 단위 숫자가 없습니다".into());
+                };
+                match v.parse::<f64>() {
+                    Ok(sec) if sec >= 0.0 => opts.run_for = Some(sec),
+                    _ => return Command::Error(format!("--run-for 값이 잘못됐습니다: {v}")),
+                }
+            }
             "--device" => {
                 let Some(v) = it.next() else {
                     return Command::Error("--device 뒤에 장치가 없습니다 (cpu | gpu:0 | auto)".into());

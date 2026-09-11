@@ -115,7 +115,9 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 
 ### 장치 (`device.rs`)
 - `DevicePref::{Auto, Cpu, Gpu(index)}` (core) → `Device::{Cpu(NdArrayDevice), Gpu(WgpuDevice)}`.
-  `enumerate()` 가 wgpu 어댑터 목록(이름·백엔드·VRAM)과 CPU 정보를 돌려준다. Auto = 첫 이산 GPU → 통합 GPU → CPU.
+  `enumerate()` 가 wgpu 어댑터 목록(이름·백엔드·VRAM)과 CPU 정보를 돌려준다. `probe(pref)` 가 그 장치에서 작은 matmul+backward 를
+  실제로 돌려(별도 스레드·catch_unwind·20초 타임아웃) 동작 여부를 캐시하고, **Auto = probe 를 통과하는 첫 이산 GPU → 통합 GPU → CPU**
+  (예: 오픈소스 NVK 드라이버의 RTX 2060 은 컴퓨트가 죽어 건너뛰고 Intel iGPU 를 고른다). 명시적 선택은 검사 없이 존중.
 - 백엔드 타입: `type Cpu = Autodiff<NdArray<f32>>`, `type Gpu = Autodiff<Wgpu<f32, i32>>`. 제네릭 코드는 `B: AutodiffBackend` 로
   한 번만 쓰고 `dispatch!(device, |B| …)` 매크로가 둘 중 하나로 단형화한다.
 
@@ -145,7 +147,7 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 - `input::{move_to, click, key, type_text}` (enigo). Wayland 에서는 `libei`/`xdo` 폴백. **안전장치**: 시뮬레이션은 사용자가
   파이프라인 실행을 켠 동안만, 그리고 `Esc` 를 길게 누르면 즉시 중단(킬 스위치).
 - `http::{call(method, url, headers, body) -> Response}` (ureq, 타임아웃 필수 — trust-pms 교훈).
-- `stream::{ws_connect, stdin_lines, stdout_json}`.
+- stdin/stdout/파일/HTTP 소스·싱크는 별도 모듈 없이 `runner.rs` 안에 구현되어 있다. WebSocket 은 M1.
 - `resources::snapshot()` — CPU/메모리(sysinfo) + GPU 목록(`nl_engine::enumerate()` 가 진실). 앱 상태바·자원 패널.
 - `runner::Runner` — 파이프라인 틱 루프. `RunnerHandle { events, inputs, stop }`. GUI 위젯 이벤트는 `RunnerInput` 으로 들어가고
   `Sink::GuiWidget` 값은 `RunnerEvent::Widget` 으로 나온다.

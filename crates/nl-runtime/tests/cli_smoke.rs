@@ -56,7 +56,7 @@ fn headless_runs_a_nlapp_file() {
     let file = dir.path().join("스모크.nlapp");
     std::fs::write(&file, demo_zip()).unwrap();
 
-    let out = Command::new(EXE).arg("--headless").arg("--device").arg("cpu").arg(&file).output().unwrap();
+    let out = Command::new(EXE).arg("--headless").arg("--run-for").arg("1").arg("--device").arg("cpu").arg(&file).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "종료 코드 {:?}\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");
@@ -71,7 +71,7 @@ fn attached_bundle_runs_without_arguments() {
     let out_exe = dir.path().join("스모크앱");
     nl_bundle::attach(std::path::Path::new(EXE), &demo_zip(), &out_exe).unwrap();
 
-    let out = Command::new(&out_exe).arg("--headless").output().unwrap();
+    let out = Command::new(&out_exe).arg("--headless").arg("--run-for").arg("1").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "종료 코드 {:?}\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");

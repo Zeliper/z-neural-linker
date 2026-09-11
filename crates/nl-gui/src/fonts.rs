@@ -4,6 +4,8 @@ use egui::{FontData, FontDefinitions, FontFamily};
 use std::sync::Arc;
 
 const CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-VF.ttc",
     "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",

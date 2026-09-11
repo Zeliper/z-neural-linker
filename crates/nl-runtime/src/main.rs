@@ -47,7 +47,7 @@ fn run(opts: Options) -> anyhow::Result<ExitCode> {
     };
     let device = opts.device.unwrap_or(bundle.manifest.default_device);
     if opts.headless {
-        run_headless(bundle, device)?;
+        run_headless(bundle, device, opts.run_for.map(Duration::from_secs_f64))?;
     } else {
         run_gui(bundle, device)?;
     }
@@ -105,7 +105,7 @@ fn run_gui(bundle: Bundle, device: DevicePref) -> anyhow::Result<()> {
     result.map_err(|e| anyhow::anyhow!("창을 열지 못했습니다: {e}"))
 }
 
-fn run_headless(bundle: Bundle, device: DevicePref) -> anyhow::Result<()> {
+fn run_headless(bundle: Bundle, device: DevicePref, run_for: Option<Duration>) -> anyhow::Result<()> {
     let work = WorkDir::create()?;
     app::prepare_workspace(&bundle, work.path())?;
     let Some(pipeline) = app::entry_pipeline(&bundle.project, &bundle.manifest) else {
@@ -120,14 +120,19 @@ fn run_headless(bundle: Bundle, device: DevicePref) -> anyhow::Result<()> {
         pipeline.name,
         device.label()
     );
-    println!("Ctrl+C 로 종료합니다.");
+    match run_for {
+        Some(d) => println!("{:.1}초 뒤 자동 종료합니다 (Ctrl+C 로 먼저 종료 가능).", d.as_secs_f64()),
+        None => println!("Ctrl+C 로 종료합니다."),
+    }
+    let deadline = run_for.map(|d| std::time::Instant::now() + d);
 
     let handle = app::spawn_runner(&bundle.project, &pipeline, work.path(), device)?;
     let mut asked_to_stop = false;
     loop {
-        if signals::interrupted() && !asked_to_stop {
+        let timed_out = deadline.is_some_and(|t| std::time::Instant::now() >= t);
+        if (signals::interrupted() || timed_out) && !asked_to_stop {
             asked_to_stop = true;
-            println!("종료 신호를 받았습니다. 파이프라인을 정지합니다.");
+            println!("{}", if timed_out { "실행 시간이 끝났습니다. 파이프라인을 정지합니다." } else { "종료 신호를 받았습니다. 파이프라인을 정지합니다." });
             handle.stop();
         }
         match handle.events.recv_timeout(Duration::from_millis(200)) {

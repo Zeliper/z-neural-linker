@@ -4,7 +4,8 @@ use crate::ids::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// 화면 영역 (물리 픽셀). `monitor` 는 xcap 모니터 번호.
+/// 화면 영역. `monitor` 는 `nl_io::screen::monitors()` 순서의 번호, `x`/`y` 는 **그 모니터의 왼쪽 위 기준 상대 좌표(물리 픽셀)**.
+/// `width == 0` 이면 모니터 전체.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Region {
     pub monitor: usize,
