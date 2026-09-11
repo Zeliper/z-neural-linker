@@ -212,6 +212,12 @@ impl RuntimeApp {
         self.update.as_mut()
     }
 
+    /// 상단 바 통계를 고정값으로 박는다. 스냅샷이 실제 틱 속도에 흔들리지 않게 한다.
+    #[cfg(test)]
+    pub fn inject_stats(&mut self, hz: f32, tick_ms: f32) {
+        self.stats = Some((hz, tick_ms));
+    }
+
     /// 창을 여는 쪽에서 한 번 부른다 (폰트·테마). 테스트는 부르지 않아도 된다.
     pub fn install_style(&self, ctx: &egui::Context) {
         ctx.set_fonts(nl_gui::font_definitions());
@@ -716,6 +722,122 @@ mod tests {
             "실패를 로그에 남겨야 합니다: {:?}",
             h.state().log_lines()
         );
+    }
+
+    // ── 골든 이미지 스냅샷 ──────────────────────────────────────
+    //
+    // `egui_kittest` 가 wgpu 로 오프스크린 렌더해 `tests/snapshots/` 의 PNG 와 견준다.
+    // 갱신: `UPDATE_SNAPSHOTS=1 cargo test -p nl-runtime`
+    //
+    // 런타임 상단 바는 한국어라 CJK 글꼴 없이 찍으면 두부 글자만 남아 사람이 검토할 수 없다.
+    // 그래서 골든을 만든 것과 **같은 글꼴**(Noto Sans CJK Regular)이 있을 때만 비교하고,
+    // 없으면 건너뛴다 — 다른 글꼴로 찍혀 영문 모를 불일치가 나는 것보다 낫다.
+    // (nl-gui 쪽 스냅샷은 라벨이 ASCII 라 이런 제약이 없다.)
+
+    /// 골든을 만든 글꼴. 배포판마다 경로가 달라 후보를 훑는다.
+    const SNAPSHOT_FONT: &str = "Noto Sans CJK Regular";
+
+    /// 골든과 같은 CJK 글꼴을 얹는다. 없으면 `None`.
+    fn snapshot_fonts() -> Option<egui::FontDefinitions> {
+        let candidates = [
+            "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ];
+        let path = candidates.iter().find(|p| std::path::Path::new(p).is_file())?;
+        let bytes = std::fs::read(path).ok()?;
+        let mut defs = egui::FontDefinitions::default();
+        defs.font_data.insert("cjk".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            defs.families.entry(fam).or_default().push("cjk".into());
+        }
+        Some(defs)
+    }
+
+    /// 건너뛴 이유를 알린다. `NL_SNAPSHOT_REQUIRED=1` 이면 건너뛰지 않고 실패시킨다 —
+    /// CI 는 이 변수를 켜 두어야 렌더 백엔드나 글꼴이 빠진 채 조용히 초록불이 뜨지 않는다.
+    /// (cargo 는 통과한 테스트의 출력을 삼키므로 `eprintln!` 만으로는 눈에 띄지 않는다.)
+    fn skip(reason: &str) -> bool {
+        let message = format!("스냅샷 건너뜀: {reason}");
+        if std::env::var("NL_SNAPSHOT_REQUIRED").is_ok_and(|v| v != "0") {
+            panic!("{message} (NL_SNAPSHOT_REQUIRED 가 켜져 있어 실패로 처리한다)");
+        }
+        eprintln!("{message}");
+        eprintln!("  건너뜀을 실패로 보려면 NL_SNAPSHOT_REQUIRED=1 로 돌린다.");
+        false
+    }
+
+    /// 렌더 백엔드가 없으면 조용히 통과하지 않도록 이유를 찍고 건너뛴다.
+    fn renderer_ready() -> bool {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let probed = std::panic::catch_unwind(|| {
+            let mut h = Harness::builder().with_size(egui::vec2(32.0, 32.0)).build_ui(|ui| {
+                ui.label("probe");
+            });
+            h.run_steps(1);
+            h.render().is_ok()
+        });
+        std::panic::set_hook(hook);
+        match probed {
+            Ok(true) => true,
+            Ok(false) => skip("wgpu 렌더가 이미지를 내지 못했습니다 (어댑터는 있으나 렌더 실패)"),
+            Err(_) => skip(
+                "wgpu 어댑터가 없습니다. Linux 라면 소프트웨어 래스터라이저(mesa 의 lavapipe)를 깔면 돕니다",
+            ),
+        }
+    }
+
+    /// 실행 중 + 통계 + 업데이트 배지가 한 화면에 나온 상태를 굳힌다.
+    #[test]
+    fn runtime_app_snapshot() {
+        if !renderer_ready() {
+            return;
+        }
+        let Some(fonts) = snapshot_fonts() else {
+            skip(&format!(
+                "골든을 만든 글꼴({SNAPSHOT_FONT})이 없습니다. \
+                 Fedora `google-noto-sans-cjk-fonts`, Debian/Ubuntu `fonts-noto-cjk` 를 깔면 돕니다"
+            ));
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut bundle = demo_bundle(true);
+        bundle.manifest.update_url = Some("https://updates.example/demo/latest.json".into());
+
+        let ui = crate::update::UpdateUi::new(&bundle.manifest).expect("주소가 있으면 만들어진다");
+        let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_update_ui(ui);
+
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(720.0, 260.0))
+            .with_step_dt(1.0 / 60.0)
+            .with_max_steps(60)
+            .build_ui_state(|ui, app: &mut RuntimeApp| app.draw(ui), app);
+        h.ctx.set_fonts(fonts);
+        h.run_steps(2);
+
+        // 배지가 뜨도록 새 버전을 알리고, 상단 바 숫자는 고정값으로 박는다.
+        h.state_mut().update_ui_mut().unwrap().inject(nl_update::Event::Available(nl_update::Available {
+            version: semver::Version::new(0, 2, 0),
+            notes: "fixes".into(),
+            asset: nl_update::Asset {
+                url: "https://updates.example/demo/app".into(),
+                sha256: "ab".into(),
+                kind: nl_update::AssetKind::Binary,
+                size: 128,
+            },
+            target: nl_update::target_key(),
+        }));
+        h.run_steps(2);
+        h.state_mut().inject_stats(30.0, 0.4);
+        h.run_steps(1);
+
+        assert!(h.state().is_running(), "실행 중 상태여야 상단 바에 통계가 뜬다");
+        assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 새 버전 0.2.0"));
+
+        let options = egui_kittest::SnapshotOptions::new().threshold(0.7).max_failed_pixels(64);
+        h.try_snapshot_options("runtime-app", &options).unwrap();
     }
 
     #[test]

@@ -41,7 +41,7 @@ eframe = { version = "0.36.1", default-features = false }
 egui = "0.36"
 egui_extras = "0.36"
 egui_plot = "0.37"
-egui_kittest = "0.36"
+egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
 winit = { version = "0.30", default-features = true }
 rfd = "0.17"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
