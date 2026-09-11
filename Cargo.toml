@@ -50,6 +50,9 @@ xcap = "0.9"
 x11rb = { version = "0.14", features = ["randr"] }
 libwayshot = { version = "0.9", default-features = false, features = ["png"] }
 enigo = { version = "0.6", default-features = false }
+# xdg-desktop-portal 호출(GNOME/KDE Wayland 화면 캡처). 순수 Rust — 시스템 개발 라이브러리 불필요.
+# default = ["async-io", "blocking-api"] 그대로 쓴다(블로킹 API, tokio 없음).
+zbus = "5"
 ureq = { version = "3", features = ["json"] }
 tungstenite = "0.30"
 tiny_http = "0.12"

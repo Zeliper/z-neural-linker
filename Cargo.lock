@@ -5299,6 +5299,7 @@ dependencies = [
  "ureq 3.4.1",
  "x11rb 0.14.0",
  "xcap",
+ "zbus",
 ]
 
 [[package]]
