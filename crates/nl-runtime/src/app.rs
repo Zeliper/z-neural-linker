@@ -755,8 +755,8 @@ mod tests {
         Some(defs)
     }
 
-    /// 건너뛴 이유를 알린다. `NL_SNAPSHOT_REQUIRED=1` 이면 건너뛰지 않고 실패시킨다 —
-    /// CI 는 이 변수를 켜 두어야 렌더 백엔드나 글꼴이 빠진 채 조용히 초록불이 뜨지 않는다.
+    /// 갖출 수 있는 전제가 빠졌다 — `NL_SNAPSHOT_REQUIRED=1` 이면 실패시킨다.
+    /// CI 는 이 변수를 켜 두어야 렌더 백엔드가 빠진 채 조용히 초록불이 뜨지 않는다.
     /// (cargo 는 통과한 테스트의 출력을 삼키므로 `eprintln!` 만으로는 눈에 띄지 않는다.)
     fn skip(reason: &str) -> bool {
         let message = format!("스냅샷 건너뜀: {reason}");
@@ -765,6 +765,14 @@ mod tests {
         }
         eprintln!("{message}");
         eprintln!("  건너뜀을 실패로 보려면 NL_SNAPSHOT_REQUIRED=1 로 돌린다.");
+        false
+    }
+
+    /// 기계마다 다를 수밖에 없는 전제가 빠졌다 — 알리기만 하고 실패시키지 않는다.
+    /// 골든을 만든 글꼴이 그렇다. 배포판마다 판본이 달라 CI 에 강제할 수 없고,
+    /// 다른 글꼴로 찍으면 영문 모를 불일치가 난다.
+    fn skip_optional(reason: &str) -> bool {
+        eprintln!("스냅샷 건너뜀(선택 전제): {reason}");
         false
     }
 
@@ -796,7 +804,7 @@ mod tests {
             return;
         }
         let Some(fonts) = snapshot_fonts() else {
-            skip(&format!(
+            skip_optional(&format!(
                 "골든을 만든 글꼴({SNAPSHOT_FONT})이 없습니다. \
                  Fedora `google-noto-sans-cjk-fonts`, Debian/Ubuntu `fonts-noto-cjk` 를 깔면 돕니다"
             ));

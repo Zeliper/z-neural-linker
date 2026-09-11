@@ -213,6 +213,48 @@ cargo xwin build --release -p nl-runtime --target x86_64-pc-windows-msvc
   수렴, GPU 는 `NL_TEST_GPU=1` 일 때), app 의 `egui_kittest` 헤드리스 렌더 테스트(모든 뷰가 패닉 없이 그려짐).
 - `tools/uitest/uitest.sh`: 헤드리스 sway 안에서 실제 클릭·드래그·캡처(trust-pms 와 동일, app_id `neural-linker`).
 
+## CI · 릴리스
+
+워크플로는 `.github/workflows/` 와 `.forgejo/workflows/` 에 **같은 내용으로 두 벌** 있다.
+Forgejo Actions 가 GitHub 문법을 그대로 읽으므로 파일이 같고, 고칠 때 둘을 함께 고쳐야 한다.
+Forgejo 인스턴스는 `app.ini` 에 `[actions] DEFAULT_ACTIONS_URL = github` 이 있어야 액션을 받아 온다.
+
+### `ci.yml` — push·PR
+1. 시스템 의존: `libxkbcommon0`(enigo 런타임), `mesa-vulkan-drivers`(lavapipe — 스냅샷 테스트가 쓰는
+   소프트웨어 wgpu 어댑터), `fonts-noto-cjk`.
+2. `cargo fmt --all -- --check` — **아직 강제하지 않는다**(`continue-on-error`). 워크스페이스 전체 포맷을
+   적용하지 않은 상태라 지금 켜면 온통 빨간불이 된다. 한 번 정리되면 이 플래그를 뺀다.
+3. `cargo clippy --workspace --all-targets -- -D warnings`
+4. `cargo test --workspace` (`NL_SNAPSHOT_REQUIRED=1`)
+5. `cargo build --release -p nl-runtime` — 배포 런타임의 릴리스 빌드가 깨지면 배포가 막힌다.
+
+`NL_SNAPSHOT_REQUIRED=1` 은 **렌더 백엔드가 없어 건너뛰는 것**을 실패로 바꾼다. cargo 가 통과한 테스트의
+출력을 삼켜서, 이 장치가 없으면 스냅샷이 조용히 통과해 버린다. 반면 **글꼴이 없어 건너뛰는 것**은 실패로
+바꾸지 않는다 — 배포판마다 Noto CJK 판본이 달라 강제할 수 없고, 다른 글꼴로 찍으면 영문 모를 불일치가 난다.
+
+### `release.yml` — 태그 `v*`
+한 러너에서 Linux 네이티브와 Windows 크로스(`cargo-xwin`)를 함께 만든다. 러너는 root 라
+`clang lld llvm` 을 패키지로 깐다(개발 기계에서는 rustup 의 `rust-lld` 로 대신한다 — `packaging/README.md`).
+
+산출물:
+
+| 파일 | 쓰임 |
+| --- | --- |
+| `neural-linker-<ver>-linux-x86_64.tar.gz` | 빌더 + 런타임 + `install.sh` + `.desktop`. 풀고 `./install.sh` |
+| `neural-linker-<ver>-windows-x86_64.zip` | 빌더 + 런타임 (설치 프로그램 없이 풀어 씀) |
+| `nl-app`, `nl-app.exe` | 자동 업데이트가 그대로 내려받는 알맹이 |
+| `nl-runtime`, `nl-runtime.exe` | 빌더가 배포판을 만들 때 붙이는 런타임 |
+| `latest.json` | 빌더 자체 업데이트 (`packaging/make-manifest.sh`) |
+| `runtimes/latest.json` | 빌더가 대상별 런타임을 받아 오는 매니페스트 (`packaging/make-runtimes-manifest.py`) |
+
+두 매니페스트 모두 `nl_update::Manifest` 형식이다. 차이는 자산 종류다 — 런타임 매니페스트는 언제나
+`binary` 다(빌더가 받아서 `runtimes/<triple>/` 에 놓기만 하고 실행하지 않는다).
+`MINISIGN_KEY` 시크릿이 있으면 두 매니페스트에 `.minisig` 를 붙인다(비밀번호 없는 키여야 한다).
+
+`latest.json` 에 **Windows 자산은 아직 넣지 않는다.** 자기 자신을 바꿔치울 수 없는 Windows 는
+`kind: installer` 가 맞는데, Inno Setup 이 러너에 없어 설치 프로그램을 만들지 못한다. 그때까지 Windows
+사용자는 zip 을 받아 덮어쓴다.
+
 ## 플랫폼 주의사항 (trust-pms 에서 계승)
 - glow(OpenGL) 백엔드 명시, Wayland `vsync: false`, 한글 폰트 시스템 폴백(`font_definitions`).
 - 모든 파일 쓰기는 원자적(임시 파일 + rename). 자동 저장·복구는 M1.
