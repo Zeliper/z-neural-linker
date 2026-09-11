@@ -17,8 +17,9 @@ fn harness<'a>(project: Project) -> Harness<'a, NlApp> {
         .with_size([1480.0, 900.0])
         .build_eframe(|cc| {
             let mut app = NlApp::new(cc);
-            // 네트워크가 없는 곳에서 업데이트 확인이 계속 다시 그리기를 요청해 하네스가 멎지 않는다.
+            // 네트워크·드라이버를 두드리는 백그라운드 확인은 계속 다시 그리기를 요청해 하네스가 멎지 않는다.
             app.disable_update_check();
+            app.disable_device_probe();
             app.doc = DocState::new(project);
             // 문서를 갈아끼웠으니 선택도 새 문서 기준으로.
             let first = app.doc.project.models.keys().next().copied();
@@ -274,6 +275,7 @@ fn the_consent_modal_stays_inside_a_small_window() {
     let mut h = Harness::builder().with_size(size).build_eframe(|cc| {
         let mut app = NlApp::new(cc);
         app.disable_update_check();
+        app.disable_device_probe();
         app
     });
     h.state_mut().view = View::Build;
@@ -295,12 +297,61 @@ fn the_consent_modal_stays_inside_a_small_window() {
     }
 }
 
+/// 시작 화면은 장치 확인을 기다리지 않는다.
+///
+/// 예전에는 `NlApp::new` 가 `enumerate()` 를, 상태바가 매 프레임 `resolve()` 를 불러
+/// 드라이버가 깨진 GPU 가 있으면 첫 프레임이 10초 넘게 늦었다. 둘 다 백그라운드로 옮겼다.
+#[test]
+fn the_first_frame_does_not_wait_for_device_probing() {
+    // 장치 확인은 일부러 켜 둔 채로 첫 프레임 시간을 잰다 — 그것이 이 테스트가 지키는 것이다.
+    let started = std::time::Instant::now();
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).build_eframe(|cc| {
+        let mut app = NlApp::new(cc);
+        app.disable_update_check();
+        app
+    });
+    h.step();
+    let elapsed = started.elapsed();
+
+    // 넉넉한 상한이다 — 문제였던 경로는 20초 타임아웃까지 갔다.
+    assert!(elapsed.as_secs() < 5, "첫 프레임이 너무 늦다: {elapsed:?}");
+    // 시작 뷰는 모델이어야 한다.
+    assert_eq!(h.state().view, View::Model);
+    h.state_mut().disable_device_probe();
+}
+
+/// `Ctrl+숫자` 가 뷰 바 순서대로 뷰를 바꾼다. `Ctrl+2` 는 데이터 뷰다.
+#[test]
+fn ctrl_digit_switches_views_in_bar_order() {
+    let mut h = harness(sample::xor_project());
+    h.state_mut().view = View::Model;
+    h.run();
+
+    for (i, expected) in View::ALL.iter().enumerate() {
+        let key = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+        ][i];
+        // 다른 뷰에서 출발해야 "안 바뀐 것"과 "원래 그 뷰"를 구별할 수 있다.
+        h.state_mut().view = if *expected == View::Model { View::Resources } else { View::Model };
+        h.key_press_modifiers(egui::Modifiers::COMMAND, key);
+        h.run();
+        assert_eq!(h.state().view, *expected, "Ctrl+{} 가 {expected:?} 로 가지 않는다", i + 1);
+    }
+}
+
 #[test]
 fn the_smallest_window_still_lays_out() {
     // 좁은 창에서도 툴바·뷰 바가 패널을 밀어내지 않아야 한다.
     let mut h = Harness::builder().with_size([960.0, 600.0]).build_eframe(|cc| {
         let mut app = NlApp::new(cc);
         app.disable_update_check();
+        app.disable_device_probe();
         app
     });
     for view in View::ALL {

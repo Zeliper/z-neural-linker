@@ -301,6 +301,14 @@ impl View {
     }
 }
 
+/// 백그라운드 장치 확인이 UI 로 보내는 소식.
+enum DeviceMsg {
+    /// 열거된 장치 목록 (콤보·자원 뷰).
+    List(Vec<DeviceInfo>),
+    /// 이 설정이 실제로 풀린 장치와 사람이 읽을 한 줄 (상태바·툴팁).
+    Resolved { pref: DevicePref, info: DeviceInfo, note: String },
+}
+
 /// 녹화 라벨 스위치로 쓰는 숫자키 0~9.
 const DIGIT_KEYS: [egui::Key; 10] = [
     egui::Key::Num0,
@@ -409,8 +417,20 @@ pub struct NlApp {
     tool_job: Option<Receiver<ToolEvent>>,
     tool_progress: Option<f32>,
     build_job: Option<Receiver<BuildEvent>>,
-    /// 장치 검사(probe) 백그라운드 작업.
-    probe_job: Option<Receiver<String>>,
+    /// 장치 열거·검사 백그라운드 작업. UI 스레드는 이 둘을 절대 직접 부르지 않는다.
+    device_job: Option<Receiver<DeviceMsg>>,
+    /// 백그라운드에 확인을 맡긴 설정. 같은 설정으로 두 번 묻지 않는다.
+    device_asked: Option<DevicePref>,
+    /// 확인이 끝난 (설정, 실제로 풀린 장치). 아직 모르면 `None` 이고 UI 는 "확인 중…" 을 보인다.
+    resolved: Option<(DevicePref, DeviceInfo)>,
+    /// 장치 확인이 한 번이라도 끝났는가 (하네스 마커를 한 번만 찍으려고).
+    devices_ready: bool,
+    /// 백그라운드 장치 확인을 할지. 테스트에서만 끈다.
+    probe_enabled: bool,
+    /// 첫 화면을 다 그렸는가 (하네스 마커를 한 번만 찍으려고).
+    ready_logged: bool,
+    /// 창이 키보드 포커스를 받은 적이 있는가 (하네스 마커를 한 번만 찍으려고).
+    focus_logged: bool,
     /// 진행 중인 화면 녹화.
     pub recording: Option<RecordSession>,
     /// "지금 한 장 캡처" 결과와 진행 중인 캡처 작업.
@@ -488,7 +508,8 @@ impl NlApp {
             canvas: CanvasState::new(),
             views: ViewState::default(),
             view,
-            devices: nl_engine::enumerate(),
+            // 장치 열거는 어댑터를 실제로 여는 일이라 수 초가 걸린다. 백그라운드에서 채운다.
+            devices: Vec::new(),
             shape_cache: None,
             issues_cache: None,
             toasts: Vec::new(),
@@ -517,7 +538,13 @@ impl NlApp {
             tool_job: None,
             tool_progress: None,
             build_job: None,
-            probe_job: None,
+            device_job: None,
+            device_asked: None,
+            resolved: None,
+            devices_ready: false,
+            probe_enabled: true,
+            ready_logged: false,
+            focus_logged: false,
             recording: None,
             shot: ShotPreview::default(),
             shot_job: None,
@@ -550,24 +577,70 @@ impl NlApp {
 
     // ── 장치·모니터 ─────────────────────────────────────────────
 
-    /// 기본 장치가 실제로 도는지 백그라운드에서 한 번 확인한다. UI 스레드는 20초씩 멈출 수 없다.
+    /// 장치를 열거하고 기본 장치가 실제로 도는지까지 **백그라운드에서** 확인한다.
+    ///
+    /// `enumerate()` 는 어댑터를 열고 `resolve(Auto)` 는 장치마다 학습 경로를 한 번 태워 본다.
+    /// 드라이버가 깨진 GPU 는 패닉하거나 20초 타임아웃까지 버티므로, UI 스레드에서 부르면
+    /// 창이 그 시간만큼 통째로 멈춘다. 그동안 UI 는 "확인 중…" 으로 즉시 그려진다.
     fn start_device_probe(&mut self) {
-        if self.probe_job.is_some() {
+        let pref = self.doc.project.settings.default_device;
+        if !self.probe_enabled || self.device_job.is_some() || self.device_asked == Some(pref) {
             return;
         }
-        let pref = self.doc.project.settings.default_device;
+        self.device_asked = Some(pref);
         let (tx, rx) = std::sync::mpsc::channel();
-        let spawned = std::thread::Builder::new().name("nl-probe-ui".into()).spawn(move || {
-            let _ = nl_engine::probe(pref);
-            let _ = tx.send(nl_engine::describe(pref));
+        let spawned = std::thread::Builder::new().name("nl-devices".into()).spawn(move || {
+            let _ = tx.send(DeviceMsg::List(nl_engine::enumerate()));
+            let info = nl_engine::resolve(pref).info;
+            let _ = tx.send(DeviceMsg::Resolved { pref, info, note: nl_engine::describe(pref) });
         });
-        if spawned.is_ok() {
-            self.probe_job = Some(rx);
+        match spawned {
+            Ok(_) => self.device_job = Some(rx),
+            // 스레드를 못 만들면 장치 이름 없이 계속 간다 — 앱을 세우는 것보다 낫다.
+            Err(e) => self.log(format!("장치 확인을 시작하지 못했습니다: {e}")),
         }
     }
 
-    /// 장치 설명: 검사가 끝났으면 결과까지 담긴 한 줄.
+    /// 백그라운드 장치 확인 결과를 받아 넣는다.
+    fn tick_devices(&mut self, ctx: &egui::Context) {
+        let msgs: Vec<DeviceMsg> = match &self.device_job {
+            Some(rx) => rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        let mut resolved_now = false;
+        for msg in msgs {
+            match msg {
+                DeviceMsg::List(list) => self.devices = list,
+                DeviceMsg::Resolved { pref, info, note } => {
+                    self.log(format!("장치 확인: {note}"));
+                    self.resolved = Some((pref, info));
+                    resolved_now = true;
+                }
+            }
+        }
+        if resolved_now {
+            self.device_job = None;
+            if !self.devices_ready {
+                self.devices_ready = true;
+                log::info!("장치 확인 완료");
+                // RUST_LOG 와 무관하게 보이는 하네스 마커.
+                eprintln!("[nl-app] devices ready");
+            }
+            ctx.request_repaint();
+        }
+        if self.device_job.is_some() {
+            ctx.request_repaint_after(REPOLL);
+        } else {
+            // 기본 장치를 바꿨으면 그 장치로 다시 푼다.
+            self.start_device_probe();
+        }
+    }
+
+    /// 장치 설명 한 줄. 아직 열거 전이면 `nl_engine` 을 부르지 않는다 — 그 호출이 어댑터를 연다.
     fn device_note(&self, pref: DevicePref) -> String {
+        if self.devices.is_empty() && pref != DevicePref::Auto {
+            return "장치를 확인하는 중입니다".into();
+        }
         nl_engine::describe(pref)
     }
 
@@ -1785,6 +1858,16 @@ impl NlApp {
         self.updater = Some(u);
     }
 
+    /// 백그라운드 장치 확인을 끄고 진행 중인 확인도 버린다.
+    ///
+    /// 확인이 도는 동안은 결과를 받으려고 계속 다시 그리기를 요청하므로, 헤드리스 하네스가
+    /// "화면이 멎었다" 고 판단하지 못한다. 테스트가 이것을 먼저 부른다.
+    pub fn disable_device_probe(&mut self) {
+        self.probe_enabled = false;
+        self.device_job = None;
+        self.devices_ready = true;
+    }
+
     /// 업데이트 자동 확인을 끄고 진행 중인 확인도 버린다.
     ///
     /// 네트워크가 없는 헤드리스 하네스에서는 확인이 타임아웃까지 다시 그리기를 계속 요청해
@@ -1978,13 +2061,22 @@ impl NlApp {
                 .iter()
                 .find(|d| d.pref == current)
                 .map(|d| d.name.clone())
-                .unwrap_or_else(|| current.label());
+                .unwrap_or_else(|| {
+                    if self.devices.is_empty() {
+                        "확인 중…".to_string()
+                    } else {
+                        current.label()
+                    }
+                });
             let devices = self.devices.clone();
             let mut chosen: Option<nl_core::DevicePref> = None;
             let mut refresh = false;
             egui::ComboBox::from_id_salt("device-picker").selected_text(format!("🖳 {label}")).show_ui(ui, |ui| {
                 if ui.selectable_label(current == nl_core::DevicePref::Auto, "자동 (첫 GPU → CPU)").clicked() {
                     chosen = Some(nl_core::DevicePref::Auto);
+                }
+                if devices.is_empty() {
+                    ui.label(RichText::new("장치를 찾는 중…").color(views::COL_WEAK));
                 }
                 for d in &devices {
                     if ui.selectable_label(current == d.pref, views::device_label(d)).clicked() {
@@ -1997,7 +2089,10 @@ impl NlApp {
                 }
             });
             if refresh {
-                self.devices = nl_engine::enumerate();
+                // 열거도 검사도 백그라운드로 — 목록이 길면 UI 스레드가 그만큼 멈춘다.
+                self.resolved = None;
+                self.device_asked = None;
+                self.start_device_probe();
             }
             if let Some(pref) = chosen {
                 let mut settings = self.doc.project.settings.clone();
@@ -2196,11 +2291,11 @@ impl NlApp {
             ui.label(format!("{file}{star}"));
             ui.separator();
             let pref = self.doc.project.settings.default_device;
-            let resolved = nl_engine::resolve(pref);
-            let dev = if pref == DevicePref::Auto {
-                format!("자동 → {}", resolved.info.name)
-            } else {
-                resolved.info.name.clone()
+            // 확인은 백그라운드에서만 한다 — 여기서 `resolve` 를 부르면 매 프레임 드라이버를 두드린다.
+            let dev = match &self.resolved {
+                Some((p, info)) if *p == pref && pref == DevicePref::Auto => format!("자동 → {}", info.name),
+                Some((p, info)) if *p == pref => info.name.clone(),
+                _ => "확인 중…".to_string(),
             };
             ui.label(format!("장치 {dev}")).on_hover_text(self.device_note(pref));
             ui.separator();
@@ -2226,6 +2321,10 @@ impl NlApp {
                     ("파이프라인 정지", views::COL_WEAK)
                 };
                 ui.label(RichText::new(label).color(color));
+                // 실행기가 초당 한 번 보고하는 실제 틱 속도 — 목표 Hz 와 얼마나 벌어지는지 보인다.
+                if let Some(st) = r.stats.filter(|_| r.is_running()) {
+                    ui.label(RichText::new(st.label()).color(views::COL_WEAK));
+                }
                 if r.errors > 0 {
                     ui.label(RichText::new(format!("오류 {}", r.errors)).color(views::COL_ERROR));
                 }
@@ -2534,13 +2633,7 @@ impl eframe::App for NlApp {
         self.tick_tools(ctx, now);
         self.tick_build(ctx, now);
         self.tick_updater(ctx);
-        if let Some(rx) = &self.probe_job {
-            if let Ok(note) = rx.try_recv() {
-                self.probe_job = None;
-                self.log(format!("장치 검사: {note}"));
-                ctx.request_repaint();
-            }
-        }
+        self.tick_devices(ctx);
         self.doc.tick(now);
         if self.doc.in_burst() {
             // 입력이 멎어도 burst 를 undo 항목으로 확정하려면 한 번 더 깨어나야 한다.
@@ -2607,6 +2700,18 @@ impl eframe::App for NlApp {
         if self.warmup_frames > 0 {
             self.warmup_frames -= 1;
             ctx.request_repaint();
+        } else if !self.ready_logged {
+            // 패널 크기가 자리를 잡은 첫 프레임. 하네스가 `wait-log` 로 이 줄을 기다린다.
+            self.ready_logged = true;
+            log::info!("UI 준비 완료");
+            eprintln!("[nl-app] ready");
+        }
+        // 화면이 그려진 것과 키를 받을 수 있는 것은 다르다. 컴포지터가 포커스를 주기 전에
+        // 보낸 단축키는 그냥 버려지므로, 하네스는 키를 넣기 전에 이 줄을 기다려야 한다.
+        if !self.focus_logged && ctx.input(|i| i.focused) {
+            self.focus_logged = true;
+            log::info!("창 포커스 받음");
+            eprintln!("[nl-app] focused");
         }
     }
 

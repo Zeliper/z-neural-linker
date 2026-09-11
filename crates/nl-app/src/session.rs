@@ -29,6 +29,26 @@ pub struct RunnerSession {
     /// 저장 안 된 프로젝트를 위해 만든 임시 작업 폴더 (있으면 끝날 때 지운다).
     pub temp_dir: Option<PathBuf>,
     pub errors: usize,
+    /// 실행기가 초당 한 번 보고하는 틱 속도. 아직 한 번도 안 왔으면 `None`.
+    pub stats: Option<RunnerStats>,
+}
+
+/// 틱 루프의 실제 속도 (`RunnerEvent::Stats`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunnerStats {
+    /// 시작 이후 누적 틱 수.
+    pub tick: u64,
+    /// 틱 하나당 평균 작업 시간(ms). 잠든 시간은 빼고 잰 값이다.
+    pub tick_ms: f32,
+    /// 실제 틱 속도(Hz).
+    pub hz: f32,
+}
+
+impl RunnerStats {
+    /// 상태바 한 조각: `12.0 Hz · 3.2 ms`.
+    pub fn label(&self) -> String {
+        format!("{:.1} Hz · {:.1} ms", self.hz, self.tick_ms)
+    }
 }
 
 #[derive(Default)]
@@ -63,6 +83,7 @@ impl RunnerSession {
             finished: false,
             temp_dir,
             errors: 0,
+            stats: None,
         })
     }
 
@@ -117,6 +138,15 @@ impl RunnerSession {
                 RunnerEvent::Widget { widget, value } => {
                     let points = max_points(layout, widget);
                     gui.push_value(widget, value, points);
+                }
+                // 이미지 원본은 `Value` 로 오지 않는다 (드롭 정책). 캔버스에 값이 흐르는 것이 보이도록
+                // 크기만 적는다. 축소판을 실제로 그리는 일은 텍스처 수명 관리가 필요해 아직 하지 않는다.
+                RunnerEvent::ValuePreview { node, width, height, .. } => {
+                    self.live.values.insert(node, format!("이미지 {width}×{height}"));
+                    self.live.errors.remove(&node);
+                }
+                RunnerEvent::Stats { tick, tick_ms, hz } => {
+                    self.stats = Some(RunnerStats { tick, tick_ms, hz });
                 }
             }
         }
