@@ -58,6 +58,94 @@ impl BundleManifest {
     }
 }
 
+// ───────────────────────────── 빌드 설정 ─────────────────────────────
+
+/// 배포 산출물을 만들 대상 플랫폼. `nl_bundle::Target` 과 1:1 이지만, nl-core 는 nl-bundle 에
+/// 의존하지 않으므로 여기에 직렬화 가능한 형태로 따로 둔다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum BuildTarget {
+    LinuxX64,
+    WindowsX64,
+}
+
+impl BuildTarget {
+    pub const ALL: [BuildTarget; 2] = [BuildTarget::LinuxX64, BuildTarget::WindowsX64];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BuildTarget::LinuxX64 => "Linux x86_64",
+            BuildTarget::WindowsX64 => "Windows x86_64",
+        }
+    }
+
+    pub fn triple(&self) -> &'static str {
+        match self {
+            BuildTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
+            BuildTarget::WindowsX64 => "x86_64-pc-windows-msvc",
+        }
+    }
+}
+
+/// 빌드 설정. 프로젝트 문서에 남아 다시 열어도 같은 산출물을 만든다.
+/// 편집은 `Op::SetSettings` 로 들어가므로 되돌리기도 다른 편집과 똑같이 동작한다.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BuildSpec {
+    /// 배포 앱 이름. 파일 이름에는 슬러그로 접혀 들어간다.
+    pub app_name: String,
+    pub app_version: String,
+    #[serde(default)]
+    pub targets: Vec<BuildTarget>,
+    /// 시작 시 자동 실행할 파이프라인.
+    #[serde(default)]
+    pub entry_pipeline: Option<PipelineId>,
+    #[serde(default = "yes")]
+    pub autostart: bool,
+    #[serde(default)]
+    pub default_device: DevicePref,
+    /// 번들에 넣을 모델. 가중치가 있는 모델만 뜻이 있다.
+    #[serde(default)]
+    pub models: Vec<ModelId>,
+    /// 산출물 폴더 (프로젝트 폴더 기준 상대 경로 또는 절대 경로). 없으면 `dist`.
+    #[serde(default)]
+    pub output_dir: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// 산출물 폴더 기본 이름.
+pub const DEFAULT_OUTPUT_DIR: &str = "dist";
+
+impl Default for BuildSpec {
+    fn default() -> Self {
+        Self {
+            app_name: "Neural Linker App".into(),
+            app_version: "0.1.0".into(),
+            targets: vec![],
+            entry_pipeline: None,
+            autostart: true,
+            default_device: DevicePref::Auto,
+            models: vec![],
+            output_dir: None,
+        }
+    }
+}
+
+impl BuildSpec {
+    /// 프로젝트에서 기본값을 뽑는다: 앱 이름 = 프로젝트 이름, 진입 파이프라인·모델 = 첫 번째.
+    pub fn from_project(p: &crate::model::Project) -> Self {
+        Self {
+            app_name: p.name.clone(),
+            entry_pipeline: p.pipelines.keys().next().copied(),
+            default_device: p.settings.default_device,
+            models: p.models.values().filter(|m| m.weights.is_some()).map(|m| m.id).collect(),
+            targets: vec![],
+            ..Self::default()
+        }
+    }
+}
+
 /// 꼬리표를 만든다: 번들 뒤에 붙일 바이트.
 pub fn trailer(bundle_len: u64) -> [u8; 14] {
     let mut t = [0u8; 14];

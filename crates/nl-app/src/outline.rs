@@ -28,7 +28,7 @@ struct OutlineOut {
 impl NlApp {
     pub(crate) fn outline(&mut self, ui: &mut egui::Ui, now: f64) {
         let mut out = OutlineOut::default();
-        let selection = self.canvas.selection;
+        let selection = self.sel.primary;
         let rename = self.rename_slot().clone();
         let report = self.shapes();
 
@@ -208,12 +208,32 @@ impl NlApp {
                 }
             });
             for (id, pl) in &self.doc.project.pipelines {
-                let sel = selection == Selection::Pipeline(*id);
-                let r = ui.selectable_label(sel, format!("⇄ {} ({})", pl.name, pl.nodes.len()));
-                if r.clicked() {
-                    out.select = Some(Selection::Pipeline(*id));
+                if rename.as_ref().is_some_and(|(s, _)| *s == Selection::Pipeline(*id)) {
+                    rename_field(ui, &rename, Selection::Pipeline(*id), &mut out);
+                    continue;
                 }
-                r.context_menu(|ui| {
+                let open = matches!(selection, Selection::Pipeline(x) | Selection::PNode(x, _) | Selection::Link(x, _) if x == *id);
+                let header = egui::CollapsingHeader::new(format!("⇄ {} ({})", pl.name, pl.nodes.len()))
+                    .id_salt(("pipeline", id))
+                    .default_open(open);
+                let resp = header.show(ui, |ui| {
+                    if pl.nodes.is_empty() {
+                        ui.label(RichText::new("노드 없음").color(COL_WEAK).size(11.0));
+                    }
+                    for n in pl.nodes.values() {
+                        let sel = selection == Selection::PNode(*id, n.id);
+                        let text = RichText::new(format!("  {}", crate::pcanvas::node_title(n))).size(12.0);
+                        if ui.selectable_label(sel, text).on_hover_text(n.kind.label()).clicked() {
+                            out.select = Some(Selection::PNode(*id, n.id));
+                            out.view = Some(View::Pipeline);
+                        }
+                    }
+                });
+                if resp.header_response.clicked() {
+                    out.select = Some(Selection::Pipeline(*id));
+                    out.view = Some(View::Pipeline);
+                }
+                resp.header_response.context_menu(|ui| {
                     if ui.button("이름 변경").clicked() {
                         out.start_rename = Some((Selection::Pipeline(*id), pl.name.clone()));
                         ui.close();
@@ -224,15 +244,35 @@ impl NlApp {
                         ui.close();
                     }
                 });
-                rename_field(ui, &rename, Selection::Pipeline(*id), &mut out);
             }
 
             // ── GUI ─────────────────────────────────────────────
             ui.add_space(4.0);
             section(ui, "GUI", self.doc.project.gui.widgets.len(), |_ui| {});
             let r = ui.selectable_label(false, format!("🖼 {}", self.doc.project.gui.window.title));
-            if r.on_hover_text("배포 앱 창 — 디자이너는 2차분").clicked() {
+            if r.on_hover_text("배포 앱 창 — 누르면 디자이너로").clicked() {
                 out.view = Some(View::Gui);
+            }
+            for (wid, w) in &self.doc.project.gui.widgets {
+                let sel = selection == Selection::Widget(*wid);
+                let bound = if w.binding.is_some() { " ·" } else { "" };
+                let text = RichText::new(format!("  {}{bound}", w.kind.label())).size(11.5);
+                let r = ui.selectable_label(sel, text);
+                let r = match &w.binding {
+                    Some(b) => r.on_hover_text(binding_note(b)),
+                    None => r,
+                };
+                if r.clicked() {
+                    out.select = Some(Selection::Widget(*wid));
+                    out.view = Some(View::Gui);
+                }
+                r.context_menu(|ui| {
+                    if ui.button("삭제").clicked() {
+                        out.ops.push(Op::DeleteWidget { id: *wid });
+                        out.select = Some(Selection::Project);
+                        ui.close();
+                    }
+                });
             }
 
             // ── 실행 기록 ───────────────────────────────────────
@@ -294,11 +334,11 @@ impl NlApp {
             }
         }
         if let Some(sel) = out.select {
-            self.canvas.set_selection(sel);
+            self.sel.set(sel);
         }
         if let Some((model, node)) = out.focus {
             self.set_view_public(View::Model);
-            self.canvas.set_selection(Selection::Node(model, node));
+            self.sel.set(Selection::Node(model, node));
             self.canvas.pending_focus = Some(node);
         }
         let _ = now;
@@ -349,6 +389,16 @@ impl NlApp {
             self.view = view;
             self.canvas.cancel_interaction();
         }
+    }
+}
+
+/// 위젯 바인딩을 한 줄로 (툴팁).
+fn binding_note(b: &nl_core::Binding) -> String {
+    match b {
+        nl_core::Binding::PipelineInput { node } => format!("파이프라인 입력 → {}", node.short()),
+        nl_core::Binding::PipelineOutput { node } => format!("파이프라인 출력 ← {}", node.short()),
+        nl_core::Binding::ModelOutput { field, .. } => format!("모델 출력 · {field}"),
+        nl_core::Binding::Action { action } => format!("내장 동작 · {action:?}"),
     }
 }
 

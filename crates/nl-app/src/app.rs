@@ -1,9 +1,13 @@
 //! 앱 셸: 문서 상태(op 기반 undo/redo), 패널 UI, 파일 IO, 학습 세션.
 //! 동기화 서버가 없다는 점만 빼면 trust-pms `pms-app::app` 과 같은 구조다.
 
-use crate::canvas::{CanvasAction, CanvasState, Selection};
+use crate::canvas::{CanvasAction, CanvasState, Selection, SelectionState};
+use crate::pcanvas::{PipelineAction, PipelineCanvas};
 use crate::project::{self, Recent};
 use crate::sample;
+use crate::session::{self, RunnerSession};
+use crate::tools::{self, Plan, ToolEvent, ToolState};
+use crate::views::build::{BuildEvent, BuildRequest};
 use crate::views::{self, train::TrainSession, ViewAction, ViewCtx, ViewState};
 use chrono::{DateTime, Local};
 use eframe::egui::{self, Color32, RichText};
@@ -11,18 +15,26 @@ use nl_core::dataset::{DataSource, DatasetSpec, SyntheticKind};
 use nl_core::shape::{self, ShapeReport};
 use nl_core::validate::Where;
 use nl_core::{
-    apply_ops, diff_ops, inverse_ops, DatasetId, Edge, ModelId, Node, NodeId, Op, Port, Project, RunId, RunStatus,
-    Severity,
+    apply_ops, diff_ops, inverse_ops, BuildSpec, BuildTarget, DatasetId, DevicePref, Edge, Link, LinkId, ModelId, Node,
+    NodeId, Op, PNode, PNodeId, Port, Project, RunId, RunStatus, Severity,
 };
 use nl_engine::{DeviceInfo, TrainRequest};
+use nl_gui::{GuiEvent, GuiState};
+use nl_io::runner::RunnerInput;
+use nl_io::MonitorInfo;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 
 const UNDO_LIMIT: usize = 100;
 /// 이 시간(초) 동안 편집이 없으면 하나의 undo 단위(burst)가 끝난 것으로 본다.
 pub const BURST_QUIET: f64 = 1.0;
 /// 도크 로그·활동 기록의 최대 줄 수.
 const LOG_LIMIT: usize = 400;
+/// 백그라운드 작업(도구 설치·빌드) 채널을 다시 볼 간격.
+const REPOLL: std::time::Duration = std::time::Duration::from_millis(80);
+/// 실행 중 Esc 를 이만큼 누르고 있으면 킬 스위치가 동작한다.
+const KILL_HOLD: f64 = 0.5;
 
 // ── 문서 상태 ───────────────────────────────────────────────────────
 
@@ -218,9 +230,9 @@ impl View {
             View::Model => "레이어 그래프 — 우클릭으로 레이어 추가, 포트를 끌어 연결",
             View::Data => "데이터셋과 페이로드 — 스캔·미리보기·인코더 체인",
             View::Train => "학습 설정·손실 플롯·실행 기록",
-            View::Pipeline => "소스 → 모델 → 싱크 파이프라인 (2차분)",
-            View::Gui => "배포 앱의 위젯 디자이너 (2차분)",
-            View::Build => "대상·산출물·도구 상태 (2차분)",
+            View::Pipeline => "소스 → 모델 → 싱크 — 우클릭으로 노드 추가, 시험 실행으로 확인",
+            View::Gui => "배포 앱의 위젯 배치와 파이프라인 바인딩",
+            View::Build => "대상·도구 상태·산출물 — 런타임에 번들을 붙여 배포본을 만든다",
             View::Resources => "CPU·메모리·GPU 사용 현황",
         }
     }
@@ -234,9 +246,9 @@ impl View {
         View::ALL.get(i).copied().unwrap_or(View::Model)
     }
 
-    /// 2차분에서 구현할 자리인가.
-    pub fn is_placeholder(self) -> bool {
-        matches!(self, View::Pipeline | View::Gui | View::Build)
+    /// 노드 캔버스를 쓰는 뷰인가 (전체 보기·다중 선택 단축키가 뜻을 가진다).
+    pub fn uses_canvas(self) -> bool {
+        matches!(self, View::Model | View::Pipeline)
     }
 }
 
@@ -284,6 +296,8 @@ impl PendingAction {
 
 pub struct NlApp {
     pub doc: DocState,
+    /// 앱 전체가 공유하는 선택 상태 (두 캔버스·아웃라인·인스펙터가 같은 것을 본다).
+    pub sel: SelectionState,
     pub canvas: CanvasState,
     pub views: ViewState,
     pub view: View,
@@ -305,6 +319,34 @@ pub struct NlApp {
     close_confirmed: bool,
     recent: Recent,
     pub training: Option<TrainSession>,
+    /// 파이프라인 노드 캔버스.
+    pub pcanvas: PipelineCanvas,
+    /// GUI 디자이너·미리보기가 공유하는 위젯 상태.
+    pub gui_state: GuiState,
+    /// 시험 실행 중인 파이프라인.
+    pub runner: Option<RunnerSession>,
+    /// 마우스·키보드 싱크 무장 (기본 꺼짐).
+    pub arm_input: bool,
+    /// GUI 뷰 미리보기 모드.
+    pub gui_preview: bool,
+    /// 실행 중 Esc 를 누르기 시작한 시각 (킬 스위치).
+    esc_since: Option<f64>,
+    /// 화면 캡처 편집용 모니터 목록 캐시.
+    pub(crate) monitors: Vec<MonitorInfo>,
+    pub(crate) monitors_error: Option<String>,
+    /// 도구 상태 캐시와 그 캐시를 만든 대상 목록.
+    tool_states: Vec<ToolState>,
+    /// 그 목록을 만든 대상들. `None` 이면 아직 검사하지 않았다.
+    tool_targets: Option<Vec<BuildTarget>>,
+    /// 동의를 기다리는 설치 계획.
+    pending_plan: Option<Plan>,
+    /// 계획을 만드는 중(네트워크) / 설치 중 / 빌드 중인 작업 채널.
+    plan_job: Option<Receiver<Result<Plan, String>>>,
+    tool_job: Option<Receiver<ToolEvent>>,
+    tool_progress: Option<f32>,
+    build_job: Option<Receiver<BuildEvent>>,
+    /// 장치 검사(probe) 백그라운드 작업.
+    probe_job: Option<Receiver<String>>,
     /// 아웃라인에서 이름을 고치는 중.
     rename: Option<(Selection, String)>,
     /// 인스펙터 텍스트 버퍼가 어느 (선택, 문서 세대)에 맞춰 채워졌는지.
@@ -368,6 +410,7 @@ impl NlApp {
 
         let mut app = Self {
             doc,
+            sel: SelectionState::default(),
             canvas: CanvasState::new(),
             views: ViewState::default(),
             view,
@@ -385,6 +428,22 @@ impl NlApp {
             close_confirmed: false,
             recent,
             training: None,
+            pcanvas: PipelineCanvas::new(),
+            gui_state: GuiState::default(),
+            runner: None,
+            arm_input: false,
+            gui_preview: false,
+            esc_since: None,
+            monitors: Vec::new(),
+            monitors_error: None,
+            tool_states: Vec::new(),
+            tool_targets: None,
+            pending_plan: None,
+            plan_job: None,
+            tool_job: None,
+            tool_progress: None,
+            build_job: None,
+            probe_job: None,
             rename: None,
             buf_owner: None,
             shape_buf: String::new(),
@@ -392,14 +451,56 @@ impl NlApp {
         };
         // 첫 선택은 첫 모델 — 인스펙터가 빈 채로 뜨지 않는다.
         if let Some(&id) = app.doc.project.models.keys().next() {
-            app.canvas.set_selection(Selection::Model(id));
+            app.sel.set(Selection::Model(id));
         } else {
-            app.canvas.set_selection(Selection::Project);
+            app.sel.set(Selection::Project);
         }
+        app.views.build.manifest_url = cc
+            .storage
+            .and_then(|s| eframe::get_value::<String>(s, "runtime_manifest"))
+            .unwrap_or_default();
+        app.refresh_monitors();
+        app.start_device_probe();
         if let Some(e) = startup_error {
             app.toast(e, 0.0);
         }
         app
+    }
+
+    // ── 장치·모니터 ─────────────────────────────────────────────
+
+    /// 기본 장치가 실제로 도는지 백그라운드에서 한 번 확인한다. UI 스레드는 20초씩 멈출 수 없다.
+    fn start_device_probe(&mut self) {
+        if self.probe_job.is_some() {
+            return;
+        }
+        let pref = self.doc.project.settings.default_device;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("nl-probe-ui".into()).spawn(move || {
+            let _ = nl_engine::probe(pref);
+            let _ = tx.send(nl_engine::describe(pref));
+        });
+        if spawned.is_ok() {
+            self.probe_job = Some(rx);
+        }
+    }
+
+    /// 장치 설명: 검사가 끝났으면 결과까지 담긴 한 줄.
+    fn device_note(&self, pref: DevicePref) -> String {
+        nl_engine::describe(pref)
+    }
+
+    fn refresh_monitors(&mut self) {
+        match nl_io::monitors() {
+            Ok(list) => {
+                self.monitors = list;
+                self.monitors_error = None;
+            }
+            Err(e) => {
+                self.monitors.clear();
+                self.monitors_error = Some(format!("{e:#}"));
+            }
+        }
     }
 
     // ── 알림 · 기록 ─────────────────────────────────────────────
@@ -428,8 +529,8 @@ impl NlApp {
 
     /// 지금 보고 있는 모델. 선택이 가리키는 것, 없으면 첫 모델.
     pub fn active_model(&self) -> Option<ModelId> {
-        self.canvas
-            .selection
+        self.sel
+            .primary
             .model()
             .filter(|m| self.doc.project.models.contains_key(m))
             .or_else(|| self.doc.project.models.keys().next().copied())
@@ -556,17 +657,27 @@ impl NlApp {
 
     /// 문서가 통째로 바뀐 뒤 정리.
     fn after_document_swap(&mut self) {
+        // 남은 실행기가 옛 문서의 노드로 실제 입력을 보내면 안 된다.
+        if let Some(r) = self.runner.take() {
+            r.stop_and_wait();
+        }
+        self.sel = SelectionState::default();
         self.canvas = CanvasState::new();
+        self.pcanvas = PipelineCanvas::new();
+        self.gui_state = GuiState::default();
+        self.gui_preview = false;
         self.views = ViewState::default();
+        self.tool_targets = None;
+        self.tool_states.clear();
         self.shape_cache = None;
         self.issues_cache = None;
         self.rename = None;
         self.buf_owner = None;
         self.training = None;
         if let Some(&id) = self.doc.project.models.keys().next() {
-            self.canvas.set_selection(Selection::Model(id));
+            self.sel.set(Selection::Model(id));
         } else {
-            self.canvas.set_selection(Selection::Project);
+            self.sel.set(Selection::Project);
         }
     }
 
@@ -644,7 +755,7 @@ impl NlApp {
                 let node = Node::new(kind, pos);
                 let id = node.id;
                 self.doc.apply_local(vec![Op::UpsertNode { model, node }]);
-                self.canvas.set_selection(Selection::Node(model, id));
+                self.sel.set(Selection::Node(model, id));
             }
             CanvasAction::MoveNodes(items) => {
                 let ops: Vec<Op> = items
@@ -668,12 +779,12 @@ impl NlApp {
             CanvasAction::DeleteNodes(ids) => {
                 let ops: Vec<Op> = ids.iter().map(|id| Op::DeleteNode { model, id: *id }).collect();
                 self.doc.apply_local(ops);
-                self.canvas.set_selection(Selection::Model(model));
+                self.sel.set(Selection::Model(model));
             }
             CanvasAction::DeleteEdges(ids) => {
                 let ops: Vec<Op> = ids.iter().map(|id| Op::DeleteEdge { model, id: *id }).collect();
                 self.doc.apply_local(ops);
-                self.canvas.set_selection(Selection::Model(model));
+                self.sel.set(Selection::Model(model));
             }
             CanvasAction::DisconnectNode(id) => {
                 let ops: Vec<Op> = graph
@@ -694,7 +805,7 @@ impl NlApp {
                     return;
                 }
                 self.doc.apply_local(ops);
-                self.canvas.select_nodes(model, new_ids, false);
+                self.sel.select_nodes(model, new_ids, false);
             }
         }
     }
@@ -702,14 +813,14 @@ impl NlApp {
     /// 뷰가 돌려준 명령.
     fn apply_view_action(&mut self, action: ViewAction, ctx: &egui::Context, now: f64) {
         match action {
-            ViewAction::Select(sel) => self.canvas.set_selection(sel),
+            ViewAction::Select(sel) => self.sel.set(sel),
             ViewAction::Ops(ops) => self.doc.apply_local(ops),
             ViewAction::Edit(ops) => self.doc.apply_burst(ops, now),
             ViewAction::Toast(msg) => self.toast(msg, now),
             ViewAction::SetView(v) => self.set_view(v),
             ViewAction::Focus(model, node) => {
                 self.set_view(View::Model);
-                self.canvas.set_selection(Selection::Node(model, node));
+                self.sel.set(Selection::Node(model, node));
                 self.canvas.pending_focus = Some(node);
             }
             ViewAction::PickCsv => self.pick_csv(now),
@@ -736,6 +847,36 @@ impl NlApp {
                 self.toast("정지를 요청했습니다", now);
             }
             ViewAction::ApplyRunWeights(id) => self.apply_run_weights(id, now),
+            ViewAction::StartPipeline(pid) => self.start_pipeline(pid, now),
+            ViewAction::StopPipeline => self.stop_pipeline(now),
+            ViewAction::SetArmInput(on) => {
+                self.arm_input = on;
+                if self.runner.as_ref().map(|r| r.is_running()).unwrap_or(false) {
+                    // 무장 상태는 실행기를 만들 때 정해진다 — 켜고 끄려면 다시 시작해야 한다.
+                    self.toast("무장 설정은 다음 시험 실행부터 적용됩니다", now);
+                }
+            }
+            ViewAction::SendManual { node, value } => match &self.runner {
+                Some(r) if r.is_running() => {
+                    if !r.send(RunnerInput::Manual { node, value }) {
+                        self.toast("입력 채널이 닫혔습니다", now);
+                    }
+                }
+                _ => self.toast("파이프라인이 멈춰 있습니다", now),
+            },
+            ViewAction::SetGuiPreview(on) => self.set_gui_preview(on, now),
+            ViewAction::BuildStart => self.start_build(now),
+            ViewAction::ToolPlan(target) => self.request_tool_plan(target, now),
+            ViewAction::RecheckTools => {
+                self.tool_targets = None;
+                self.refresh_tools_if_needed();
+            }
+            ViewAction::OpenPath(p) => {
+                if let Err(e) = tools::open_in_file_manager(&p) {
+                    self.toast(e, now);
+                }
+            }
+            ViewAction::RunArtifact(p) => self.run_artifact(&p, now),
         }
     }
 
@@ -745,6 +886,7 @@ impl NlApp {
         }
         self.view = view;
         self.canvas.cancel_interaction();
+        self.pcanvas.cancel_interaction();
     }
 
     // ── 데이터셋 ────────────────────────────────────────────────
@@ -753,7 +895,7 @@ impl NlApp {
         let spec = views::data::synthetic_dataset(kind, 1000);
         let id = spec.id;
         self.doc.apply_local(vec![Op::UpsertDataset { dataset: spec }]);
-        self.canvas.set_selection(Selection::Dataset(id));
+        self.sel.set(Selection::Dataset(id));
         self.set_view(View::Data);
     }
 
@@ -792,7 +934,7 @@ impl NlApp {
         let spec = DatasetSpec::new(name, source);
         let id = spec.id;
         self.doc.apply_local(vec![Op::UpsertDataset { dataset: spec }]);
-        self.canvas.set_selection(Selection::Dataset(id));
+        self.sel.set(Selection::Dataset(id));
         self.set_view(View::Data);
         self.toast("데이터셋을 추가했습니다 — 스캔으로 내용을 확인하세요", now);
     }
@@ -949,6 +1091,424 @@ impl NlApp {
             weights: Some(weights),
         }]);
         self.toast("가중치를 모델에 적용했습니다", now);
+    }
+
+    // ── 파이프라인 ──────────────────────────────────────────────
+
+    /// 지금 보고 있는 파이프라인.
+    pub fn active_pipeline(&self) -> Option<nl_core::PipelineId> {
+        self.sel
+            .primary
+            .pipeline()
+            .filter(|p| self.doc.project.pipelines.contains_key(p))
+            .or_else(|| self.doc.project.pipelines.keys().next().copied())
+    }
+
+    /// 파이프라인 캔버스가 돌려준 편집을 op 로 적용한다.
+    fn apply_pipeline_action(&mut self, pid: nl_core::PipelineId, action: PipelineAction, now: f64) {
+        let Some(pl) = self.doc.project.pipelines.get(&pid).cloned() else { return };
+        match action {
+            PipelineAction::AddNode { kind, pos } => {
+                let node = PNode::new(kind, pos);
+                let id = node.id;
+                self.doc.apply_local(vec![Op::UpsertPNode { pipeline: pid, node }]);
+                self.sel.set(Selection::PNode(pid, id));
+            }
+            PipelineAction::MoveNodes(items) => {
+                let ops: Vec<Op> = items
+                    .iter()
+                    .filter_map(|(id, pos)| {
+                        let mut n = pl.nodes.get(id)?.clone();
+                        n.pos = *pos;
+                        Some(Op::UpsertPNode { pipeline: pid, node: n })
+                    })
+                    .collect();
+                self.doc.apply_local(ops);
+            }
+            PipelineAction::Link { from, to } => {
+                let link = Link { id: LinkId::new(), from, to };
+                self.doc.apply_local(vec![Op::UpsertLink { pipeline: pid, link }]);
+            }
+            PipelineAction::DeleteNodes(ids) => {
+                let ops: Vec<Op> = ids.iter().map(|id| Op::DeletePNode { pipeline: pid, id: *id }).collect();
+                self.doc.apply_local(ops);
+                self.sel.set(Selection::Pipeline(pid));
+            }
+            PipelineAction::DeleteLinks(ids) => {
+                let ops: Vec<Op> = ids.iter().map(|id| Op::DeleteLink { pipeline: pid, id: *id }).collect();
+                self.doc.apply_local(ops);
+                self.sel.set(Selection::Pipeline(pid));
+            }
+            PipelineAction::DisconnectNode(id) => {
+                let ops: Vec<Op> = pl
+                    .links
+                    .values()
+                    .filter(|l| l.from == id || l.to == id)
+                    .map(|l| Op::DeleteLink { pipeline: pid, id: l.id })
+                    .collect();
+                if ops.is_empty() {
+                    self.toast("연결이 없습니다", now);
+                } else {
+                    self.doc.apply_local(ops);
+                }
+            }
+            PipelineAction::DuplicateNodes(ids) => {
+                let (ops, new_ids) = duplicate_pnode_ops(&pl, pid, &ids);
+                if ops.is_empty() {
+                    return;
+                }
+                self.doc.apply_local(ops);
+                self.sel.select_pnodes(pid, new_ids, false);
+            }
+        }
+    }
+
+    /// 시험 실행. 저장 안 된 프로젝트는 임시 폴더를 기준으로 돌린다(가중치 상대 경로는 못 푼다).
+    fn start_pipeline(&mut self, pid: nl_core::PipelineId, now: f64) {
+        if self.runner.as_ref().map(|r| r.is_running()).unwrap_or(false) {
+            self.toast("이미 실행 중입니다", now);
+            return;
+        }
+        let Some(pl) = self.doc.project.pipelines.get(&pid).cloned() else { return };
+        let (base_dir, temp) = match self.doc.file_path.as_deref() {
+            Some(p) => (project::base_dir(p), None),
+            None => {
+                let d = session::temp_run_dir();
+                let _ = std::fs::create_dir_all(&d);
+                self.toast("저장되지 않은 프로젝트라 임시 폴더에서 돕니다 — 모델 가중치 경로는 풀리지 않습니다", now);
+                (d.clone(), Some(d))
+            }
+        };
+        let device = self.doc.project.settings.default_device;
+        let arm = self.arm_input;
+        if arm {
+            self.log("마우스·키보드 싱크가 무장된 채로 시작합니다 — Esc 를 길게 누르면 즉시 멈춥니다");
+        }
+        match RunnerSession::start(&self.doc.project, &pl, base_dir, device, arm, temp, now) {
+            Ok(s) => {
+                self.runner = Some(s);
+                self.show_dock = true;
+                self.dock_tab = DockTab::Log;
+                self.toast(format!("시험 실행: {}", pl.name), now);
+            }
+            Err(e) => self.toast(format!("실행할 수 없습니다: {e:#}"), now),
+        }
+    }
+
+    fn stop_pipeline(&mut self, now: f64) {
+        let Some(r) = &self.runner else { return };
+        r.stop();
+        self.toast("정지를 요청했습니다", now);
+    }
+
+    /// 매 프레임 실행기 이벤트를 소비한다.
+    fn tick_runner(&mut self, ctx: &egui::Context) {
+        let Some(session) = self.runner.as_mut() else { return };
+        let layout = self.doc.project.gui.clone();
+        let poll = session.poll(&mut self.gui_state, &layout);
+        for line in poll.logs {
+            self.log(line);
+        }
+        if poll.changed {
+            ctx.request_repaint();
+        }
+        if poll.stopped {
+            self.log("시험 실행이 끝났습니다");
+        }
+    }
+
+    /// GUI 미리보기에서 위젯이 낸 이벤트를 바인딩대로 처리한다 (런타임과 같은 규칙).
+    fn handle_widget_event(&mut self, ev: GuiEvent, ctx: &egui::Context, now: f64) {
+        let (id, value) = match ev {
+            GuiEvent::Clicked(id) => (id, nl_engine::Value::Number(1.0)),
+            GuiEvent::Changed(id, v) => (id, v),
+            GuiEvent::Selected(_) | GuiEvent::Moved(..) => return,
+        };
+        let layout = self.doc.project.gui.clone();
+        let binding = match &self.runner {
+            Some(r) if r.is_running() => r.route_widget_event(&layout, id, value),
+            _ => layout.widgets.get(&id).and_then(|w| w.binding.clone()),
+        };
+        match binding {
+            Some(nl_core::Binding::Action { action }) => match action {
+                nl_core::gui::BuiltinAction::StartPipeline => {
+                    if let Some(pid) = self.active_pipeline() {
+                        self.start_pipeline(pid, now);
+                    }
+                }
+                nl_core::gui::BuiltinAction::StopPipeline => self.stop_pipeline(now),
+                nl_core::gui::BuiltinAction::Quit => {
+                    self.toast("배포판에서는 앱이 종료됩니다 (미리보기에서는 무시)", now);
+                }
+            },
+            Some(nl_core::Binding::PipelineInput { .. })
+                if self.runner.as_ref().map(|r| r.is_running()) != Some(true) =>
+            {
+                self.toast("파이프라인이 멈춰 있어 입력을 보내지 않았습니다", now);
+            }
+            _ => {}
+        }
+        let _ = ctx;
+    }
+
+    /// GUI 미리보기 켜기/끄기. 켜면 선택한 파이프라인을 함께 돌린다.
+    fn set_gui_preview(&mut self, on: bool, now: f64) {
+        self.gui_preview = on;
+        if on {
+            match self.active_pipeline() {
+                Some(pid) if !self.runner.as_ref().map(|r| r.is_running()).unwrap_or(false) => {
+                    self.start_pipeline(pid, now)
+                }
+                Some(_) => {}
+                None => self.toast("실행할 파이프라인이 없습니다 — 파이프라인 뷰에서 먼저 만드세요", now),
+            }
+        } else if self.runner.is_some() {
+            self.stop_pipeline(now);
+        }
+    }
+
+    // ── 도구 · 빌드 ─────────────────────────────────────────────
+
+    /// 빌드 설정의 대상이 바뀌었을 때만 도구를 다시 검사한다 (파일 시스템을 매 프레임 훑지 않게).
+    fn refresh_tools_if_needed(&mut self) {
+        let targets = self
+            .doc
+            .project
+            .settings
+            .build
+            .as_ref()
+            .map(|b| b.targets.clone())
+            .unwrap_or_default();
+        if self.tool_targets.as_ref() == Some(&targets) {
+            return;
+        }
+        self.tool_states = tools::check(&targets);
+        self.tool_targets = Some(targets);
+    }
+
+    /// 도구 설치 계획을 백그라운드에서 만든다 (매니페스트를 받아야 해서 네트워크를 탄다).
+    fn request_tool_plan(&mut self, target: BuildTarget, now: f64) {
+        if self.plan_job.is_some() || self.tool_job.is_some() {
+            self.toast("이미 진행 중인 도구 작업이 있습니다", now);
+            return;
+        }
+        let url = tools::manifest_url(Some(self.views.build.manifest_url.as_str()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("nl-tool-plan".into()).spawn(move || {
+            let _ = tx.send(tools::plan_runtime(target, &url));
+        });
+        match spawned {
+            Ok(_) => {
+                self.plan_job = Some(rx);
+                self.views.build.log(format!("{} 설치 방법을 확인하는 중…", target.label()));
+            }
+            Err(e) => self.toast(format!("작업 스레드를 만들지 못했습니다: {e}"), now),
+        }
+    }
+
+    fn tick_tools(&mut self, ctx: &egui::Context, now: f64) {
+        // 계획 만들기 결과.
+        if let Some(rx) = &self.plan_job {
+            match rx.try_recv() {
+                Ok(Ok(plan)) => {
+                    self.plan_job = None;
+                    self.pending_plan = Some(plan);
+                    ctx.request_repaint();
+                }
+                Ok(Err(e)) => {
+                    self.plan_job = None;
+                    self.views.build.log(format!("설치 방법을 찾지 못했습니다: {e}"));
+                    self.toast(format!("설치 방법을 찾지 못했습니다: {e}"), now);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(REPOLL),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.plan_job = None,
+            }
+        }
+        // 설치 진행.
+        let mut finished = false;
+        if let Some(rx) = &self.tool_job {
+            loop {
+                match rx.try_recv() {
+                    Ok(ToolEvent::Log(l)) => self.views.build.log(l),
+                    Ok(ToolEvent::Progress(p)) => self.tool_progress = Some(p),
+                    Ok(ToolEvent::Done(path)) => {
+                        self.views.build.log(format!("준비됨: {}", path.display()));
+                        finished = true;
+                        break;
+                    }
+                    Ok(ToolEvent::Failed(e)) => {
+                        self.views.build.log(format!("실패: {e}"));
+                        self.views.build.error = Some(e);
+                        finished = true;
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(REPOLL);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if finished {
+            self.tool_job = None;
+            self.tool_progress = None;
+            self.tool_targets = None;
+            self.refresh_tools_if_needed();
+            ctx.request_repaint();
+        }
+    }
+
+    /// 설치 동의 모달. 승인 전에는 아무것도 내려받지 않는다.
+    fn tool_modal(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(plan) = self.pending_plan.clone() else { return };
+        let modal = egui::Modal::new(egui::Id::new("tool-consent")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.heading("도구 설치 동의");
+            ui.add_space(6.0);
+            ui.label(RichText::new(plan.tool.label()).strong());
+            ui.add_space(6.0);
+            egui::Grid::new("tool-plan").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("무엇을").color(views::COL_WEAK));
+                ui.label(&plan.what);
+                ui.end_row();
+                ui.label(RichText::new("어디서").color(views::COL_WEAK));
+                ui.label(&plan.from);
+                ui.end_row();
+                ui.label(RichText::new("어디에").color(views::COL_WEAK));
+                ui.label(plan.to.display().to_string());
+                ui.end_row();
+                ui.label(RichText::new("크기").color(views::COL_WEAK));
+                ui.label(if plan.size > 0 { views::fmt_bytes(plan.size) } else { "모름".into() });
+                ui.end_row();
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("승인하고 설치").clicked() {
+                    self.tool_job = Some(tools::spawn(plan.clone()));
+                    self.tool_progress = Some(0.0);
+                    self.views.build.error = None;
+                    self.pending_plan = None;
+                }
+                if ui.button("거부").clicked() {
+                    self.views.build.log("설치를 거부했습니다");
+                    self.pending_plan = None;
+                }
+            });
+        });
+        if self.pending_plan.is_some() && modal.should_close() {
+            self.pending_plan = None;
+        }
+        let _ = now;
+    }
+
+    fn start_build(&mut self, now: f64) {
+        if self.build_job.is_some() {
+            self.toast("이미 빌드 중입니다", now);
+            return;
+        }
+        let Some(path) = self.doc.file_path.clone() else {
+            self.toast("산출물 폴더를 정하려면 프로젝트를 먼저 저장하세요", now);
+            return;
+        };
+        let spec = self
+            .doc
+            .project
+            .settings
+            .build
+            .clone()
+            .unwrap_or_else(|| BuildSpec::from_project(&self.doc.project));
+        let base_dir = project::base_dir(&path);
+        let out_dir = views::build::resolve_out_dir(&base_dir, &spec);
+        let mut runtimes = BTreeMap::new();
+        for t in &spec.targets {
+            match tools::find_runtime(*t) {
+                Some(p) => {
+                    runtimes.insert(*t, p);
+                }
+                None => {
+                    self.toast(format!("{} 런타임 바이너리가 없습니다", t.label()), now);
+                    return;
+                }
+            }
+        }
+        let req = BuildRequest {
+            project: self.doc.project.clone(),
+            spec,
+            base_dir,
+            out_dir,
+            runtimes,
+            built_with: format!("nl-app {}", env!("CARGO_PKG_VERSION")),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("nl-build".into())
+            .spawn(move || views::build::run_build(req, &tx));
+        match spawned {
+            Ok(_) => {
+                self.build_job = Some(rx);
+                self.views.build.running = true;
+                self.views.build.progress = Some(0.0);
+                self.views.build.error = None;
+                self.views.build.artifacts.clear();
+                self.views.build.log.clear();
+                self.views.build.log("빌드를 시작합니다");
+            }
+            Err(e) => self.toast(format!("빌드 스레드를 만들지 못했습니다: {e}"), now),
+        }
+    }
+
+    fn tick_build(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(rx) = &self.build_job else { return };
+        let mut done = false;
+        let mut toast: Option<String> = None;
+        loop {
+            match rx.try_recv() {
+                Ok(BuildEvent::Log(l)) => self.views.build.log(l),
+                Ok(BuildEvent::Progress(p)) => self.views.build.progress = Some(p),
+                Ok(BuildEvent::Artifact(a)) => self.views.build.artifacts.push(a),
+                Ok(BuildEvent::Done) => {
+                    toast = Some(format!("빌드 완료 — 산출물 {}개", self.views.build.artifacts.len()));
+                    done = true;
+                    break;
+                }
+                Ok(BuildEvent::Failed(e)) => {
+                    self.views.build.log(format!("실패: {e}"));
+                    self.views.build.error = Some(e.clone());
+                    toast = Some(format!("빌드 실패: {e}"));
+                    done = true;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(REPOLL);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if done {
+            self.build_job = None;
+            self.views.build.running = false;
+            self.views.build.progress = None;
+            ctx.request_repaint();
+        }
+        if let Some(t) = toast {
+            self.toast(t, now);
+        }
+    }
+
+    /// 만든 tar.gz 를 임시 폴더에 풀어 실행한다 (Linux 호스트).
+    fn run_artifact(&mut self, archive: &Path, now: f64) {
+        match extract_and_run(archive) {
+            Ok(exe) => self.toast(format!("실행: {}", exe.display()), now),
+            Err(e) => self.toast(format!("실행하지 못했습니다: {e}"), now),
+        }
     }
 
     // ── 패널 ────────────────────────────────────────────────────
@@ -1110,12 +1670,10 @@ impl NlApp {
     fn view_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             for (i, view) in View::ALL.iter().enumerate() {
-                let text = if view.is_placeholder() {
-                    RichText::new(view.label()).color(views::COL_WEAK)
-                } else {
-                    RichText::new(view.label())
-                };
-                if ui.selectable_label(self.view == *view, text).on_hover_text(format!("Ctrl+{}", i + 1)).clicked() {
+                let resp = ui
+                    .selectable_label(self.view == *view, view.label())
+                    .on_hover_text(format!("Ctrl+{}  ·  {}", i + 1, view.hint()));
+                if resp.clicked() {
                     self.set_view(*view);
                 }
             }
@@ -1197,11 +1755,11 @@ impl NlApp {
             self.set_view(View::Model);
             match node {
                 Some(n) => {
-                    self.canvas.set_selection(Selection::Node(model, n));
+                    self.sel.set(Selection::Node(model, n));
                     self.canvas.pending_focus = Some(n);
                 }
                 None => {
-                    self.canvas.set_selection(Selection::Model(model));
+                    self.sel.set(Selection::Model(model));
                     self.canvas.request_fit();
                 }
             }
@@ -1221,8 +1779,13 @@ impl NlApp {
             ui.label(format!("{file}{star}"));
             ui.separator();
             let pref = self.doc.project.settings.default_device;
-            let dev = self.devices.iter().find(|d| d.pref == pref).map(|d| d.name.clone()).unwrap_or_else(|| pref.label());
-            ui.label(format!("장치 {dev}"));
+            let resolved = nl_engine::resolve(pref);
+            let dev = if pref == DevicePref::Auto {
+                format!("자동 → {}", resolved.info.name)
+            } else {
+                resolved.info.name.clone()
+            };
+            ui.label(format!("장치 {dev}")).on_hover_text(self.device_note(pref));
             ui.separator();
             if self.view == View::Model {
                 ui.label(format!("표시 {}/{} 노드", self.canvas.visible_nodes, self.canvas.total_nodes))
@@ -1233,10 +1796,25 @@ impl NlApp {
                     self.active_model().and_then(|m| self.doc.project.models.get(&m)).map(|m| m.graph.nodes.len()).unwrap_or(0);
                 ui.label(format!("레이어 {layers}"));
             }
-            let n = self.canvas.selection_count();
+            let n = self.sel.count();
             if n > 1 {
                 ui.separator();
                 ui.label(format!("{n}개 선택"));
+            }
+            if let Some(r) = &self.runner {
+                ui.separator();
+                let (label, color) = if r.is_running() {
+                    ("파이프라인 실행 중", views::COL_SELECT)
+                } else {
+                    ("파이프라인 정지", views::COL_WEAK)
+                };
+                ui.label(RichText::new(label).color(color));
+                if r.errors > 0 {
+                    ui.label(RichText::new(format!("오류 {}", r.errors)).color(views::COL_ERROR));
+                }
+                if self.arm_input {
+                    ui.label(RichText::new("⚠ 입력 무장").color(views::COL_WARN));
+                }
             }
             if let Some(t) = &self.training {
                 ui.separator();
@@ -1262,7 +1840,9 @@ impl NlApp {
     // ── 키 ──────────────────────────────────────────────────────
 
     fn handle_keys(&mut self, ctx: &egui::Context, now: f64) {
-        if ctx.egui_wants_keyboard_input() || self.pending_action.is_some() {
+        // 킬 스위치는 무엇보다 먼저 본다 — 텍스트 칸에 포커스가 있어도, 모달이 떠 있어도 멈춰야 한다.
+        self.tick_kill_switch(ctx, now);
+        if ctx.egui_wants_keyboard_input() || self.pending_action.is_some() || self.pending_plan.is_some() {
             return;
         }
         let k = ctx.input(|i| Keys {
@@ -1317,42 +1897,133 @@ impl NlApp {
         if k.escape && !ctx.any_popup_open() {
             if self.canvas.interaction_active() {
                 self.canvas.cancel_interaction();
+            } else if self.pcanvas.interaction_active() {
+                self.pcanvas.cancel_interaction();
             } else if self.rename.is_some() {
                 self.rename = None;
             }
         }
-        // 캔버스 전용 단축키.
-        if self.view != View::Model {
+        // 뷰별 편집 단축키.
+        match self.view {
+            View::Model => {
+                if k.fit {
+                    self.canvas.request_fit();
+                }
+                let Some(model) = self.active_model() else { return };
+                if k.select_all {
+                    let ids: Vec<NodeId> = self
+                        .doc
+                        .project
+                        .models
+                        .get(&model)
+                        .map(|m| m.graph.nodes.keys().copied().collect())
+                        .unwrap_or_default();
+                    self.sel.select_nodes(model, ids, false);
+                }
+                if k.duplicate {
+                    let ids = self.sel.node_list();
+                    if !ids.is_empty() {
+                        self.apply_canvas_action(model, CanvasAction::DuplicateNodes(ids), now);
+                    }
+                }
+                if k.del {
+                    self.delete_selection(model, now);
+                }
+            }
+            View::Pipeline => {
+                if k.fit {
+                    self.pcanvas.request_fit();
+                }
+                let Some(pid) = self.active_pipeline() else { return };
+                if k.select_all {
+                    let ids: Vec<PNodeId> = self
+                        .doc
+                        .project
+                        .pipelines
+                        .get(&pid)
+                        .map(|p| p.nodes.keys().copied().collect())
+                        .unwrap_or_default();
+                    self.sel.select_pnodes(pid, ids, false);
+                }
+                if k.duplicate {
+                    let ids = self.sel.pnode_list();
+                    if !ids.is_empty() {
+                        self.apply_pipeline_action(pid, PipelineAction::DuplicateNodes(ids), now);
+                    }
+                }
+                if k.del {
+                    self.delete_pipeline_selection(pid, now);
+                }
+            }
+            View::Gui => {
+                if self.gui_preview {
+                    return;
+                }
+                if let Selection::Widget(id) = self.sel.primary {
+                    if k.del {
+                        self.doc.apply_local(vec![Op::DeleteWidget { id }]);
+                        self.sel.set(Selection::Project);
+                    }
+                    if k.duplicate {
+                        if let Some(w) = self.doc.project.gui.widgets.get(&id) {
+                            let mut copy = w.clone();
+                            copy.id = nl_core::WidgetId::new();
+                            copy.rect[0] += views::gui::SNAP * 2.0;
+                            copy.rect[1] += views::gui::SNAP * 2.0;
+                            let new_id = copy.id;
+                            self.doc.apply_local(vec![Op::UpsertWidget { widget: copy }]);
+                            self.sel.set(Selection::Widget(new_id));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 실행 중 Esc 를 길게 누르면 즉시 멈춘다. 실제 마우스·키보드를 움직이는 동안의 마지막 안전장치다.
+    fn tick_kill_switch(&mut self, ctx: &egui::Context, now: f64) {
+        let running = self.runner.as_ref().map(|r| r.is_running()).unwrap_or(false);
+        let down = ctx.input(|i| i.key_down(egui::Key::Escape));
+        if !running || !down {
+            self.esc_since = None;
             return;
         }
-        if k.fit {
-            self.canvas.request_fit();
-        }
-        let Some(model) = self.active_model() else { return };
-        if k.select_all {
-            let ids: Vec<NodeId> =
-                self.doc.project.models.get(&model).map(|m| m.graph.nodes.keys().copied().collect()).unwrap_or_default();
-            self.canvas.select_nodes(model, ids, false);
-        }
-        if k.duplicate {
-            let ids = self.canvas.selected_nodes();
-            if !ids.is_empty() {
-                self.apply_canvas_action(model, CanvasAction::DuplicateNodes(ids), now);
+        let since = *self.esc_since.get_or_insert(now);
+        // 누르고 있는 동안 계속 깨어 있어야 시간을 잴 수 있다.
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        if now - since >= KILL_HOLD {
+            self.esc_since = None;
+            if let Some(r) = &self.runner {
+                r.stop();
             }
+            self.toast("킬 스위치 — 파이프라인을 멈췄습니다", now);
         }
-        if k.del {
-            self.delete_selection(model, now);
+    }
+
+    fn delete_pipeline_selection(&mut self, pid: nl_core::PipelineId, now: f64) {
+        match self.sel.primary {
+            Selection::Link(p, id) => {
+                self.doc.apply_local(vec![Op::DeleteLink { pipeline: p, id }]);
+                self.sel.set(Selection::Pipeline(p));
+            }
+            _ => {
+                let ids = self.sel.pnode_list();
+                if !ids.is_empty() {
+                    self.apply_pipeline_action(pid, PipelineAction::DeleteNodes(ids), now);
+                }
+            }
         }
     }
 
     fn delete_selection(&mut self, model: ModelId, now: f64) {
-        match self.canvas.selection {
+        match self.sel.primary {
             Selection::Edge(m, id) => {
                 self.doc.apply_local(vec![Op::DeleteEdge { model: m, id }]);
-                self.canvas.set_selection(Selection::Model(m));
+                self.sel.set(Selection::Model(m));
             }
             _ => {
-                let ids = self.canvas.selected_nodes();
+                let ids = self.sel.node_list();
                 if !ids.is_empty() {
                     self.apply_canvas_action(model, CanvasAction::DeleteNodes(ids), now);
                 }
@@ -1392,7 +2063,7 @@ impl NlApp {
 
     /// 인스펙터 텍스트 버퍼를 지금 선택에 맞춰 다시 채울지 (`true` 면 채워야 한다).
     pub(crate) fn buffers_stale(&mut self) -> bool {
-        let key = (self.canvas.selection, self.doc.external_edits);
+        let key = (self.sel.primary, self.doc.external_edits);
         if self.buf_owner == Some(key) {
             false
         } else {
@@ -1429,6 +2100,16 @@ impl eframe::App for NlApp {
         let now = ctx.input(|i| i.time);
 
         self.tick_training(ctx, now);
+        self.tick_runner(ctx);
+        self.tick_tools(ctx, now);
+        self.tick_build(ctx, now);
+        if let Some(rx) = &self.probe_job {
+            if let Ok(note) = rx.try_recv() {
+                self.probe_job = None;
+                self.log(format!("장치 검사: {note}"));
+                ctx.request_repaint();
+            }
+        }
         self.doc.tick(now);
         if self.doc.in_burst() {
             // 입력이 멎어도 burst 를 undo 항목으로 확정하려면 한 번 더 깨어나야 한다.
@@ -1468,12 +2149,14 @@ impl eframe::App for NlApp {
                 .size_range(180.0..=400.0)
                 .show(root, |ui| self.outline(ui, now));
         }
+        let mut inspector_actions: Vec<ViewAction> = Vec::new();
         if self.show_inspector {
-            egui::Panel::right("inspector")
+            inspector_actions = egui::Panel::right("inspector")
                 .resizable(true)
-                .default_size(300.0)
-                .size_range(240.0..=460.0)
-                .show(root, |ui| self.inspector(ui, now));
+                .default_size(320.0)
+                .size_range(240.0..=520.0)
+                .show(root, |ui| self.inspector(ui, now))
+                .inner;
         }
 
         let report = self.shapes();
@@ -1481,11 +2164,12 @@ impl eframe::App for NlApp {
             .frame(egui::Frame::NONE.fill(root.visuals().panel_fill))
             .show(root, |ui| self.central(ui, &report, now))
             .inner;
-        for action in actions {
+        for action in inspector_actions.into_iter().chain(actions) {
             self.apply_view_action(action, ctx, now);
         }
 
         self.unsaved_modal(ctx, now);
+        self.tool_modal(ctx, now);
         self.draw_toasts(ctx, now);
 
         if self.warmup_frames > 0 {
@@ -1502,6 +2186,7 @@ impl eframe::App for NlApp {
         eframe::set_value(storage, "show_inspector", &self.show_inspector);
         eframe::set_value(storage, "show_dock", &self.show_dock);
         eframe::set_value(storage, "view", &self.view.index());
+        eframe::set_value(storage, "runtime_manifest", &self.views.build.manifest_url);
     }
 }
 
@@ -1515,13 +2200,15 @@ impl NlApp {
                 let model_out = {
                     let ctx = ViewCtx {
                         project: &self.doc.project,
-                        selection: self.canvas.selection,
+                        selection: self.sel.primary,
                         devices: &self.devices,
                         base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
                         training: self.training.as_ref(),
+                        monitors: &self.monitors,
+                        monitors_error: self.monitors_error.as_deref(),
                         now,
                     };
-                    views::model::show(ui, &ctx, &mut self.canvas, report)
+                    views::model::show(ui, &ctx, &mut self.canvas, report, &mut self.sel)
                 };
                 out.extend(model_out.actions);
                 if let Some(model) = self.active_model() {
@@ -1533,10 +2220,12 @@ impl NlApp {
             View::Data => {
                 let ctx = ViewCtx {
                     project: &self.doc.project,
-                    selection: self.canvas.selection,
+                    selection: self.sel.primary,
                     devices: &self.devices,
                     base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
                     training: self.training.as_ref(),
+                    monitors: &self.monitors,
+                    monitors_error: self.monitors_error.as_deref(),
                     now,
                 };
                 out.extend(views::data::show(ui, &ctx, &mut self.views.data));
@@ -1544,10 +2233,12 @@ impl NlApp {
             View::Train => {
                 let ctx = ViewCtx {
                     project: &self.doc.project,
-                    selection: self.canvas.selection,
+                    selection: self.sel.primary,
                     devices: &self.devices,
                     base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
                     training: self.training.as_ref(),
+                    monitors: &self.monitors,
+                    monitors_error: self.monitors_error.as_deref(),
                     now,
                 };
                 out.extend(views::train::show(ui, &ctx, &mut self.views.train));
@@ -1555,21 +2246,78 @@ impl NlApp {
             View::Resources => {
                 let ctx = ViewCtx {
                     project: &self.doc.project,
-                    selection: self.canvas.selection,
+                    selection: self.sel.primary,
                     devices: &self.devices,
                     base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
                     training: self.training.as_ref(),
+                    monitors: &self.monitors,
+                    monitors_error: self.monitors_error.as_deref(),
                     now,
                 };
                 out.extend(views::resources::show(ui, &ctx, &mut self.views.resources));
             }
-            View::Pipeline => views::placeholder(
-                ui,
-                "파이프라인",
-                "소스 → 모델 → 싱크 노드 캔버스. 화면 캡처·HTTP·stdio 를 모델에 잇습니다.",
-            ),
-            View::Gui => views::placeholder(ui, "GUI 디자이너", "배포 앱의 위젯을 배치하고 파이프라인에 바인딩합니다."),
-            View::Build => views::placeholder(ui, "빌드", "런타임 바이너리에 번들을 붙여 배포 산출물을 만듭니다."),
+            View::Pipeline => {
+                let live_running = self.runner.as_ref().map(|r| r.is_running()).unwrap_or(false);
+                let run_state = if live_running {
+                    views::pipeline::RunState::Running
+                } else {
+                    views::pipeline::RunState::Idle
+                };
+                let empty = crate::pcanvas::LiveView::default();
+                let pipe_out = {
+                    let live = self.runner.as_ref().map(|r| &r.live).unwrap_or(&empty);
+                    let ctx = ViewCtx {
+                        project: &self.doc.project,
+                        selection: self.sel.primary,
+                        devices: &self.devices,
+                        base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
+                        training: self.training.as_ref(),
+                        monitors: &self.monitors,
+                        monitors_error: self.monitors_error.as_deref(),
+                        now,
+                    };
+                    views::pipeline::show(ui, &ctx, &mut self.pcanvas, live, run_state, self.arm_input, &mut self.sel)
+                };
+                out.extend(pipe_out.actions);
+                if let Some(pid) = self.active_pipeline() {
+                    for a in pipe_out.canvas {
+                        self.apply_pipeline_action(pid, a, now);
+                    }
+                }
+            }
+            View::Gui => {
+                let gui_out = {
+                    let ctx = ViewCtx {
+                        project: &self.doc.project,
+                        selection: self.sel.primary,
+                        devices: &self.devices,
+                        base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
+                        training: self.training.as_ref(),
+                        monitors: &self.monitors,
+                        monitors_error: self.monitors_error.as_deref(),
+                        now,
+                    };
+                    views::gui::show(ui, &ctx, &mut self.views.gui, &mut self.gui_state, self.gui_preview)
+                };
+                out.extend(gui_out.actions);
+                for ev in gui_out.events {
+                    self.handle_widget_event(ev, ui.ctx(), now);
+                }
+            }
+            View::Build => {
+                self.refresh_tools_if_needed();
+                let ctx = ViewCtx {
+                    project: &self.doc.project,
+                    selection: self.sel.primary,
+                    devices: &self.devices,
+                    base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
+                    training: self.training.as_ref(),
+                    monitors: &self.monitors,
+                    monitors_error: self.monitors_error.as_deref(),
+                    now,
+                };
+                out.extend(views::build::show(ui, &ctx, &mut self.views.build, &self.tool_states));
+            }
         }
         out
     }
@@ -1598,6 +2346,78 @@ pub fn duplicate_ops(graph: &nl_core::Graph, model: ModelId, ids: &[NodeId]) -> 
         }
     }
     (ops, new_ids)
+}
+
+/// 파이프라인 노드를 복제하는 op 묶음과 새 id. 복제 집합 안쪽 링크도 함께 복사한다.
+pub fn duplicate_pnode_ops(
+    pl: &nl_core::Pipeline,
+    pid: nl_core::PipelineId,
+    ids: &[PNodeId],
+) -> (Vec<Op>, Vec<PNodeId>) {
+    let offset = crate::pcanvas::duplicate_offset();
+    let mut map: BTreeMap<PNodeId, PNodeId> = BTreeMap::new();
+    let mut ops = Vec::new();
+    let mut new_ids = Vec::new();
+    for id in ids {
+        let Some(src) = pl.nodes.get(id) else { continue };
+        let mut node = src.clone();
+        node.id = PNodeId::new();
+        node.pos = [src.pos[0] + offset.x, src.pos[1] + offset.y];
+        map.insert(*id, node.id);
+        new_ids.push(node.id);
+        ops.push(Op::UpsertPNode { pipeline: pid, node });
+    }
+    for l in pl.links.values() {
+        if let (Some(&from), Some(&to)) = (map.get(&l.from), map.get(&l.to)) {
+            ops.push(Op::UpsertLink { pipeline: pid, link: Link { id: LinkId::new(), from, to } });
+        }
+    }
+    (ops, new_ids)
+}
+
+/// 배포 아카이브(tar.gz)를 임시 폴더에 풀어 실행 파일을 띄운다. 돌려주는 값은 실행한 경로.
+fn extract_and_run(archive: &Path) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("nl-app-try-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = std::fs::File::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let gz = flate2::read::GzDecoder::new(file);
+    tar::Archive::new(gz).unpack(&dir).map_err(|e| format!("압축을 풀지 못했습니다: {e}"))?;
+    // `<slug>/<slug>` 규칙 (nl-bundle templates).
+    let exe = find_executable(&dir).ok_or_else(|| "아카이브에서 실행 파일을 찾지 못했습니다".to_string())?;
+    std::process::Command::new(&exe)
+        .current_dir(exe.parent().unwrap_or(&dir))
+        .spawn()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    Ok(exe)
+}
+
+/// 풀린 폴더에서 확장자 없는 실행 파일 하나를 찾는다.
+fn find_executable(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = find_executable(&p) {
+                return Some(f);
+            }
+        } else if is_executable(&p) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.extension().is_none()
+        && std::fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false)
 }
 
 /// 파일 이름으로 쓸 수 없는 글자를 바꾼다.
@@ -1689,9 +2509,9 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_views_are_exactly_the_second_phase_ones() {
-        let ph: Vec<View> = View::ALL.iter().copied().filter(|v| v.is_placeholder()).collect();
-        assert_eq!(ph, vec![View::Pipeline, View::Gui, View::Build]);
+    fn canvas_views_are_the_two_node_editors() {
+        let c: Vec<View> = View::ALL.iter().copied().filter(|v| v.uses_canvas()).collect();
+        assert_eq!(c, vec![View::Model, View::Pipeline]);
     }
 
     #[test]
@@ -1859,6 +2679,115 @@ mod tests {
         let g = Graph::default();
         let (ops, ids) = duplicate_ops(&g, ModelId::from_u128(1), &[NodeId::from_u128(9)]);
         assert!(ops.is_empty() && ids.is_empty());
+    }
+
+    #[test]
+    fn pipeline_node_edits_undo_in_one_step() {
+        let mut doc = doc_with_sample();
+        let pid = *doc.project.pipelines.keys().next().unwrap();
+        let before = doc.project.clone();
+        let node = PNode::new(nl_core::PNodeKind::Sink { sink: nl_core::Sink::Log }, [10.0, 20.0]);
+        let id = node.id;
+        doc.apply_local(vec![Op::UpsertPNode { pipeline: pid, node }]);
+        assert!(doc.project.pipelines[&pid].nodes.contains_key(&id));
+        doc.undo();
+        assert_eq!(doc.project, before);
+        doc.redo();
+        assert!(doc.project.pipelines[&pid].nodes.contains_key(&id));
+    }
+
+    #[test]
+    fn deleting_a_pipeline_node_restores_its_links_on_undo() {
+        let mut doc = doc_with_sample();
+        let pid = *doc.project.pipelines.keys().next().unwrap();
+        let pl = doc.project.pipelines[&pid].clone();
+        // 링크가 둘 붙어 있는 가운데 노드를 고른다.
+        let victim = pl
+            .nodes
+            .keys()
+            .copied()
+            .find(|id| pl.links.values().filter(|l| l.from == *id || l.to == *id).count() == 2)
+            .expect("가운데 노드");
+        let before = doc.project.clone();
+        doc.apply_local(vec![Op::DeletePNode { pipeline: pid, id: victim }]);
+        assert!(doc.project.pipelines[&pid].links.len() < pl.links.len());
+        doc.undo();
+        assert_eq!(doc.project, before);
+    }
+
+    #[test]
+    fn duplicating_pipeline_nodes_copies_inner_links_only() {
+        let doc = doc_with_sample();
+        let pid = *doc.project.pipelines.keys().next().unwrap();
+        let pl = doc.project.pipelines[&pid].clone();
+        // Manual → 모델 → 로그 사슬에서 앞의 둘만 복제한다.
+        let chain: Vec<PNodeId> = {
+            let first = pl.nodes.values().find(|n| n.kind.is_source() && n.name == "입력").unwrap().id;
+            let second = pl.links.values().find(|l| l.from == first).unwrap().to;
+            vec![first, second]
+        };
+        let (ops, ids) = duplicate_pnode_ops(&pl, pid, &chain);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ops.iter().filter(|o| matches!(o, Op::UpsertPNode { .. })).count(), 2);
+        assert_eq!(
+            ops.iter().filter(|o| matches!(o, Op::UpsertLink { .. })).count(),
+            1,
+            "복제 집합 밖으로 나가는 링크는 복사하지 않는다"
+        );
+        // 새 노드는 원본과 다른 id 이고 위치가 어긋나 있다.
+        let mut p = doc.project.clone();
+        apply_ops(&mut p, &ops);
+        for (old, new) in chain.iter().zip(&ids) {
+            assert_ne!(old, new);
+            assert_ne!(p.pipelines[&pid].nodes[new].pos, p.pipelines[&pid].nodes[old].pos);
+        }
+    }
+
+    #[test]
+    fn widget_edits_go_through_ops_and_undo() {
+        let mut doc = doc_with_sample();
+        let id = *doc.project.gui.widgets.keys().next().unwrap();
+        let before = doc.project.clone();
+        let mut w = doc.project.gui.widgets[&id].clone();
+        w.rect = [1.0, 2.0, 30.0, 40.0];
+        doc.apply_local(vec![Op::UpsertWidget { widget: w }]);
+        assert_eq!(doc.project.gui.widgets[&id].rect, [1.0, 2.0, 30.0, 40.0]);
+        doc.undo();
+        assert_eq!(doc.project, before);
+        // 삭제도 되돌아온다.
+        doc.apply_local(vec![Op::DeleteWidget { id }]);
+        assert!(!doc.project.gui.widgets.contains_key(&id));
+        doc.undo();
+        assert_eq!(doc.project, before);
+    }
+
+    #[test]
+    fn build_spec_lives_in_settings_and_round_trips() {
+        let mut doc = doc_with_sample();
+        let before = doc.project.clone();
+        let mut settings = doc.project.settings.clone();
+        let spec = settings.build.clone().expect("샘플에 빌드 설정이 있다");
+        settings.build = Some(BuildSpec { app_version: "9.9.9".into(), ..spec });
+        doc.apply_local(vec![Op::SetSettings { settings }]);
+        assert_eq!(doc.project.settings.build.as_ref().unwrap().app_version, "9.9.9");
+
+        // 파일로 나갔다 들어와도 그대로.
+        let json = nl_core::ProjectFile::new(doc.project.clone()).to_json();
+        let back = nl_core::ProjectFile::from_json(&json).unwrap();
+        assert_eq!(back.project.settings.build, doc.project.settings.build);
+
+        doc.undo();
+        assert_eq!(doc.project, before);
+    }
+
+    /// 옛 문서(빌드 설정이 없던 시절)도 그대로 열려야 한다.
+    #[test]
+    fn documents_without_a_build_spec_still_load() {
+        let json = r#"{"format_version":1,"project":{"id":"00000000-0000-0000-0000-000000000001",
+            "name":"x","created":"2026-01-01T00:00:00Z","settings":{"default_device":{"type":"Cpu"}}}}"#;
+        let f = nl_core::ProjectFile::from_json(json).unwrap();
+        assert_eq!(f.project.settings.build, None);
+        assert_eq!(f.project.settings.default_device, DevicePref::Cpu);
     }
 
     #[test]

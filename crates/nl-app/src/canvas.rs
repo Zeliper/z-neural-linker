@@ -55,6 +55,12 @@ pub enum Selection {
     Dataset(DatasetId),
     Payload(PayloadId),
     Pipeline(PipelineId),
+    /// 파이프라인 노드.
+    PNode(PipelineId, PNodeId),
+    /// 파이프라인 링크.
+    Link(PipelineId, LinkId),
+    /// GUI 위젯.
+    Widget(WidgetId),
     Run(RunId),
 }
 
@@ -64,6 +70,156 @@ impl Selection {
         match self {
             Selection::Model(m) | Selection::Node(m, _) | Selection::Edge(m, _) => Some(*m),
             _ => None,
+        }
+    }
+
+    /// 이 선택이 가리키는 파이프라인 (노드·링크 선택이면 그 부모 파이프라인).
+    pub fn pipeline(&self) -> Option<PipelineId> {
+        match self {
+            Selection::Pipeline(p) | Selection::PNode(p, _) | Selection::Link(p, _) => Some(*p),
+            _ => None,
+        }
+    }
+}
+
+/// 앱 전체가 공유하는 선택 상태. 두 캔버스(레이어·파이프라인)가 이것을 빌려 쓰므로
+/// "지금 무엇이 선택돼 있나" 의 진실이 하나뿐이다.
+#[derive(Default)]
+pub struct SelectionState {
+    /// 인스펙터가 보여 주는 주 선택.
+    pub primary: Selection,
+    /// 레이어 그래프의 다중 선택.
+    pub nodes: BTreeSet<NodeId>,
+    /// 파이프라인의 다중 선택.
+    pub pnodes: BTreeSet<PNodeId>,
+}
+
+impl SelectionState {
+    pub fn set(&mut self, sel: Selection) {
+        self.primary = sel;
+        self.nodes.clear();
+        self.pnodes.clear();
+        match sel {
+            Selection::Node(_, id) => {
+                self.nodes.insert(id);
+            }
+            Selection::PNode(_, id) => {
+                self.pnodes.insert(id);
+            }
+            _ => {}
+        }
+    }
+
+    // ── 레이어 노드 ──
+
+    pub fn is_node_selected(&self, id: NodeId) -> bool {
+        self.nodes.contains(&id) || matches!(self.primary, Selection::Node(_, n) if n == id)
+    }
+
+    pub fn node_list(&self) -> Vec<NodeId> {
+        if self.nodes.is_empty() {
+            match self.primary {
+                Selection::Node(_, id) => vec![id],
+                _ => vec![],
+            }
+        } else {
+            self.nodes.iter().copied().collect()
+        }
+    }
+
+    pub fn toggle_node(&mut self, model: ModelId, id: NodeId) {
+        if self.nodes.remove(&id) {
+            if matches!(self.primary, Selection::Node(_, n) if n == id) {
+                self.primary = match self.nodes.iter().next() {
+                    Some(&first) => Selection::Node(model, first),
+                    None => Selection::Model(model),
+                };
+            }
+        } else {
+            self.nodes.insert(id);
+            self.primary = Selection::Node(model, id);
+        }
+    }
+
+    pub fn select_nodes(&mut self, model: ModelId, ids: impl IntoIterator<Item = NodeId>, additive: bool) {
+        if !additive {
+            self.nodes.clear();
+        }
+        self.nodes.extend(ids);
+        self.primary = match self.nodes.iter().next() {
+            Some(&first) => Selection::Node(model, first),
+            None => Selection::Model(model),
+        };
+    }
+
+    /// 문서에서 사라진 노드·엣지를 선택에서 지운다.
+    pub fn prune_graph(&mut self, graph: &Graph) {
+        self.nodes.retain(|id| graph.nodes.contains_key(id));
+        match self.primary {
+            Selection::Node(m, id) if !graph.nodes.contains_key(&id) => self.primary = Selection::Model(m),
+            Selection::Edge(m, id) if !graph.edges.contains_key(&id) => self.primary = Selection::Model(m),
+            _ => {}
+        }
+    }
+
+    // ── 파이프라인 노드 ──
+
+    pub fn is_pnode_selected(&self, id: PNodeId) -> bool {
+        self.pnodes.contains(&id) || matches!(self.primary, Selection::PNode(_, n) if n == id)
+    }
+
+    pub fn pnode_list(&self) -> Vec<PNodeId> {
+        if self.pnodes.is_empty() {
+            match self.primary {
+                Selection::PNode(_, id) => vec![id],
+                _ => vec![],
+            }
+        } else {
+            self.pnodes.iter().copied().collect()
+        }
+    }
+
+    pub fn toggle_pnode(&mut self, pid: PipelineId, id: PNodeId) {
+        if self.pnodes.remove(&id) {
+            if matches!(self.primary, Selection::PNode(_, n) if n == id) {
+                self.primary = match self.pnodes.iter().next() {
+                    Some(&first) => Selection::PNode(pid, first),
+                    None => Selection::Pipeline(pid),
+                };
+            }
+        } else {
+            self.pnodes.insert(id);
+            self.primary = Selection::PNode(pid, id);
+        }
+    }
+
+    pub fn select_pnodes(&mut self, pid: PipelineId, ids: impl IntoIterator<Item = PNodeId>, additive: bool) {
+        if !additive {
+            self.pnodes.clear();
+        }
+        self.pnodes.extend(ids);
+        self.primary = match self.pnodes.iter().next() {
+            Some(&first) => Selection::PNode(pid, first),
+            None => Selection::Pipeline(pid),
+        };
+    }
+
+    pub fn prune_pipeline(&mut self, pl: &nl_core::Pipeline) {
+        self.pnodes.retain(|id| pl.nodes.contains_key(id));
+        match self.primary {
+            Selection::PNode(p, id) if !pl.nodes.contains_key(&id) => self.primary = Selection::Pipeline(p),
+            Selection::Link(p, id) if !pl.links.contains_key(&id) => self.primary = Selection::Pipeline(p),
+            _ => {}
+        }
+    }
+
+    /// 선택된 개수 (상태바).
+    pub fn count(&self) -> usize {
+        match self.primary {
+            Selection::Node(..) => self.node_list().len(),
+            Selection::PNode(..) => self.pnode_list().len(),
+            Selection::None => 0,
+            _ => 1,
         }
     }
 }
@@ -163,9 +319,6 @@ impl Default for Camera {
 
 pub struct CanvasState {
     pub camera: Camera,
-    pub selection: Selection,
-    /// 다중 선택된 노드. 단일 선택이면 비어 있다.
-    pub multi: BTreeSet<NodeId>,
     /// 외부(아웃라인·문제 목록)에서 이 노드로 화면을 옮겨 달라는 요청.
     pub pending_focus: Option<NodeId>,
     pub visible_nodes: usize,
@@ -194,8 +347,6 @@ impl CanvasState {
     pub fn new() -> Self {
         Self {
             camera: Camera::default(),
-            selection: Selection::None,
-            multi: BTreeSet::new(),
             pending_focus: None,
             visible_nodes: 0,
             total_nodes: 0,
@@ -233,70 +384,6 @@ impl CanvasState {
         self.box_select = None;
     }
 
-    pub fn set_selection(&mut self, sel: Selection) {
-        self.selection = sel;
-        self.multi.clear();
-        if let Selection::Node(_, id) = sel {
-            self.multi.insert(id);
-        }
-    }
-
-    pub fn is_node_selected(&self, id: NodeId) -> bool {
-        self.multi.contains(&id) || matches!(self.selection, Selection::Node(_, n) if n == id)
-    }
-
-    /// 선택된 노드 전부 (주 선택 포함).
-    pub fn selected_nodes(&self) -> Vec<NodeId> {
-        if self.multi.is_empty() {
-            match self.selection {
-                Selection::Node(_, id) => vec![id],
-                _ => vec![],
-            }
-        } else {
-            self.multi.iter().copied().collect()
-        }
-    }
-
-    pub fn selection_count(&self) -> usize {
-        self.selected_nodes().len()
-    }
-
-    pub fn toggle_node(&mut self, model: ModelId, id: NodeId) {
-        if self.multi.contains(&id) {
-            self.multi.remove(&id);
-            if matches!(self.selection, Selection::Node(_, n) if n == id) {
-                self.selection = match self.multi.iter().next() {
-                    Some(&first) => Selection::Node(model, first),
-                    None => Selection::Model(model),
-                };
-            }
-        } else {
-            self.multi.insert(id);
-            self.selection = Selection::Node(model, id);
-        }
-    }
-
-    pub fn select_nodes(&mut self, model: ModelId, ids: impl IntoIterator<Item = NodeId>, additive: bool) {
-        if !additive {
-            self.multi.clear();
-        }
-        self.multi.extend(ids);
-        self.selection = match self.multi.iter().next() {
-            Some(&first) => Selection::Node(model, first),
-            None => Selection::Model(model),
-        };
-    }
-
-    /// 문서에서 사라진 노드가 선택에 남아 있으면 유령을 지운다.
-    pub fn prune(&mut self, graph: &Graph) {
-        self.multi.retain(|id| graph.nodes.contains_key(id));
-        match self.selection {
-            Selection::Node(m, id) if !graph.nodes.contains_key(&id) => self.selection = Selection::Model(m),
-            Selection::Edge(m, id) if !graph.edges.contains_key(&id) => self.selection = Selection::Model(m),
-            _ => {}
-        }
-    }
-
     // ── 카메라 ──────────────────────────────────────────────────
 
     fn fit(&mut self, graph: &Graph, viewport: Rect) {
@@ -320,7 +407,15 @@ impl CanvasState {
     // ── 프레임 ──────────────────────────────────────────────────
 
     /// 캔버스 한 프레임. 문서는 읽기만 하고 편집 의도는 `CanvasAction` 으로 돌려준다.
-    pub fn show(&mut self, ui: &mut egui::Ui, model: ModelId, graph: &Graph, report: &ShapeReport) -> Vec<CanvasAction> {
+    /// 선택 상태는 앱이 소유하는 [`SelectionState`] 를 빌려 쓴다.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        model: ModelId,
+        graph: &Graph,
+        report: &ShapeReport,
+        sel: &mut SelectionState,
+    ) -> Vec<CanvasAction> {
         let mut actions: Vec<CanvasAction> = Vec::new();
 
         // 모델이 바뀌었으면 드래그·카메라를 새로 잡는다 (다른 그래프의 노드 id 로 유령이 남지 않게).
@@ -338,7 +433,7 @@ impl CanvasState {
         if self.link_drag.map(|d| !graph.nodes.contains_key(&d.from)).unwrap_or(false) {
             self.link_drag = None;
         }
-        self.prune(graph);
+        sel.prune_graph(graph);
 
         let viewport = ui.available_rect_before_wrap();
         let prev_viewport = self.last_viewport;
@@ -362,7 +457,7 @@ impl CanvasState {
         }
         if let Some(id) = self.pending_focus.take() {
             self.center_on(graph, id, viewport);
-            self.set_selection(Selection::Node(model, id));
+            sel.set(Selection::Node(model, id));
             ui.ctx().request_repaint();
         }
 
@@ -409,7 +504,7 @@ impl CanvasState {
         // 드래그로 임시로 옮겨진 위치 (커밋 전). 선택 집합을 미리 복사해 클로저가 `self` 를 빌지 않게 한다
         // — 그래야 아래에서 `self.visible_nodes` 같은 필드를 계속 쓸 수 있다.
         let node_drag = self.node_drag;
-        let dragging: BTreeSet<NodeId> = self.selected_nodes().into_iter().collect();
+        let dragging: BTreeSet<NodeId> = sel.node_list().into_iter().collect();
         let drag_offset = |id: NodeId| -> Vec2 {
             match node_drag {
                 // 선택 전체를 함께 끌고 있다.
@@ -446,7 +541,7 @@ impl CanvasState {
             let p0 = self.camera.to_screen(viewport, output_port_pos(fw));
             let p3 = self.camera.to_screen(viewport, input_port_pos(tw, edge.to.slot, slots));
             let (p1, p2) = control_points(p0, p3);
-            let selected = self.selection == Selection::Edge(model, eid);
+            let selected = sel.primary == Selection::Edge(model, eid);
             let bad = report.errors.contains_key(&edge.to.node) || report.errors.contains_key(&edge.from);
             let (color, width) = if selected {
                 (COL_SELECT, 2.6)
@@ -493,13 +588,13 @@ impl CanvasState {
 
             if resp.clicked() {
                 if mods.shift || mods.command {
-                    self.toggle_node(model, id);
+                    sel.toggle_node(model, id);
                 } else {
-                    self.set_selection(Selection::Node(model, id));
+                    sel.set(Selection::Node(model, id));
                 }
             }
-            if resp.secondary_clicked() && !self.is_node_selected(id) {
-                self.set_selection(Selection::Node(model, id));
+            if resp.secondary_clicked() && !sel.is_node_selected(id) {
+                sel.set(Selection::Node(model, id));
             }
             if resp.drag_started_by(egui::PointerButton::Primary) {
                 let origin = press_origin.or_else(|| resp.interact_pointer_pos()).unwrap_or_else(|| sr.center());
@@ -516,8 +611,8 @@ impl CanvasState {
                         }
                     }
                     _ => {
-                        if !self.is_node_selected(id) {
-                            self.set_selection(Selection::Node(model, id));
+                        if !sel.is_node_selected(id) {
+                            sel.set(Selection::Node(model, id));
                         }
                         self.node_drag = Some(NodeDrag { id, delta: Vec2::ZERO });
                     }
@@ -556,7 +651,7 @@ impl CanvasState {
             }
 
             let err = report.errors.get(&id);
-            let style = NodeStyle { selected: self.is_node_selected(id), hovered, error: err.is_some(), zone };
+            let style = NodeStyle { selected: sel.is_node_selected(id), hovered, error: err.is_some(), zone };
             draw_node(&painter, node, sr, style, zoom, report, graph);
 
             // 오류 노드는 사유를 툴팁으로 (검증 도크의 문구와 같은 출처).
@@ -566,7 +661,7 @@ impl CanvasState {
             };
             // 컨텍스트 메뉴는 노드 응답에 붙인다 — 선택 전체에 적용할지는 이 노드가 선택에 든 지로 정한다.
             let group: Vec<NodeId> =
-                if self.selection_count() > 1 && self.is_node_selected(id) { self.selected_nodes() } else { vec![id] };
+                if sel.count() > 1 && sel.is_node_selected(id) { sel.node_list() } else { vec![id] };
             resp.context_menu(|ui| node_menu(ui, id, &group, &mut actions));
         }
 
@@ -584,7 +679,7 @@ impl CanvasState {
                 let picked: Vec<NodeId> =
                     visible.iter().filter(|(_, sr)| sr.intersects(r)).map(|(id, _)| *id).collect();
                 if !picked.is_empty() || !b.additive {
-                    self.select_nodes(model, picked, b.additive);
+                    sel.select_nodes(model, picked, b.additive);
                 }
             }
         }
@@ -645,7 +740,7 @@ impl CanvasState {
                 self.node_drag = None;
                 if d.delta.length() > 0.5 {
                     let group: Vec<NodeId> =
-                        if self.is_node_selected(d.id) { self.selected_nodes() } else { vec![d.id] };
+                        if sel.is_node_selected(d.id) { sel.node_list() } else { vec![d.id] };
                     let items: Vec<(NodeId, [f32; 2])> = group
                         .iter()
                         .filter_map(|&gid| {
@@ -663,8 +758,8 @@ impl CanvasState {
         // ── 배경 클릭: 엣지 선택 / 선택 해제 ────────────────────
         if bg.clicked() && !(mods.shift || mods.command) {
             match hovered_edge {
-                Some(e) => self.set_selection(Selection::Edge(model, e)),
-                None => self.set_selection(Selection::Model(model)),
+                Some(e) => sel.set(Selection::Edge(model, e)),
+                None => sel.set(Selection::Model(model)),
             }
         }
         if bg.secondary_clicked() {
@@ -1185,18 +1280,45 @@ mod tests {
     fn selection_helpers_keep_multi_and_primary_in_sync() {
         let model = ModelId::from_u128(1);
         let (g, ids) = graph_with(vec![LayerKind::Flatten, LayerKind::Flatten]);
-        let mut c = CanvasState::new();
-        c.set_selection(Selection::Node(model, ids[0]));
-        assert_eq!(c.selected_nodes(), vec![ids[0]]);
-        c.toggle_node(model, ids[1]);
-        assert_eq!(c.selection_count(), 2);
-        c.toggle_node(model, ids[1]);
-        assert_eq!(c.selected_nodes(), vec![ids[0]]);
+        let mut sel = SelectionState::default();
+        sel.set(Selection::Node(model, ids[0]));
+        assert_eq!(sel.node_list(), vec![ids[0]]);
+        sel.toggle_node(model, ids[1]);
+        assert_eq!(sel.count(), 2);
+        sel.toggle_node(model, ids[1]);
+        assert_eq!(sel.node_list(), vec![ids[0]]);
         // 문서에서 사라지면 선택도 정리된다.
         let mut g2 = g.clone();
         g2.remove_node(ids[0]);
-        c.prune(&g2);
-        assert_eq!(c.selection, Selection::Model(model));
-        assert!(c.selected_nodes().is_empty());
+        sel.prune_graph(&g2);
+        assert_eq!(sel.primary, Selection::Model(model));
+        assert!(sel.node_list().is_empty());
+    }
+
+    #[test]
+    fn selection_state_keeps_the_two_canvases_apart() {
+        let model = ModelId::from_u128(1);
+        let pid = PipelineId::from_u128(2);
+        let node = NodeId::from_u128(3);
+        let pnode = PNodeId::from_u128(4);
+        let mut sel = SelectionState::default();
+        sel.set(Selection::Node(model, node));
+        assert!(sel.is_node_selected(node) && !sel.is_pnode_selected(pnode));
+        // 파이프라인 노드를 고르면 레이어 다중 선택은 비워진다 — 진실은 하나다.
+        sel.set(Selection::PNode(pid, pnode));
+        assert!(sel.is_pnode_selected(pnode));
+        assert!(sel.node_list().is_empty());
+        sel.select_pnodes(pid, [pnode, PNodeId::from_u128(5)], false);
+        assert_eq!(sel.count(), 2);
+    }
+
+    #[test]
+    fn count_is_one_for_single_objects_and_zero_for_nothing() {
+        let mut sel = SelectionState::default();
+        assert_eq!(sel.count(), 0);
+        sel.set(Selection::Dataset(DatasetId::from_u128(1)));
+        assert_eq!(sel.count(), 1);
+        sel.set(Selection::Widget(WidgetId::from_u128(1)));
+        assert_eq!(sel.count(), 1);
     }
 }

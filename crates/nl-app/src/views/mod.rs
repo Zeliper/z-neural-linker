@@ -2,8 +2,11 @@
 //! 편집 의도는 `ViewAction` 으로 돌려주면 `app.rs` 가 `DocState` 를 통해 적용한다.
 //! (undo 경로를 한 곳으로 모으기 위한 규칙 — trust-pms `views/mod.rs` 계승)
 
+pub mod build;
 pub mod data;
+pub mod gui;
 pub mod model;
+pub mod pipeline;
 pub mod resources;
 pub mod train;
 
@@ -11,9 +14,10 @@ use crate::app::View;
 use crate::canvas::Selection;
 use eframe::egui::{self, Color32};
 use nl_core::dataset::{DataSource, SyntheticKind};
-use nl_core::{DatasetId, ModelId, NodeId, Op, Project, RunId};
-use nl_engine::DeviceInfo;
-use std::path::Path;
+use nl_core::{BuildTarget, DatasetId, ModelId, NodeId, Op, PNodeId, PipelineId, Project, RunId};
+use nl_engine::{DeviceInfo, Value};
+use nl_io::MonitorInfo;
+use std::path::{Path, PathBuf};
 
 // ── 공통 색 ─────────────────────────────────────────────────────────
 
@@ -36,6 +40,10 @@ pub struct ViewCtx<'a> {
     pub base_dir: Option<&'a Path>,
     /// 진행 중인 학습.
     pub training: Option<&'a train::TrainSession>,
+    /// `nl_io::monitors()` 결과 캐시 (화면 캡처 소스 편집용).
+    pub monitors: &'a [MonitorInfo],
+    /// 모니터 목록을 못 읽었을 때의 이유.
+    pub monitors_error: Option<&'a str>,
     /// 앱 시계(초) — 같은 프레임 안에서 모두 같은 값을 쓴다.
     pub now: f64,
 }
@@ -47,6 +55,14 @@ impl ViewCtx<'_> {
     /// 지금 편집 중인 모델 (선택이 가리키는 것, 없으면 첫 모델).
     pub fn active_model(&self) -> Option<ModelId> {
         self.selection.model().filter(|m| self.project.models.contains_key(m)).or_else(|| self.project.models.keys().next().copied())
+    }
+
+    /// 지금 편집 중인 파이프라인 (같은 규칙).
+    pub fn active_pipeline(&self) -> Option<PipelineId> {
+        self.selection
+            .pipeline()
+            .filter(|p| self.project.pipelines.contains_key(p))
+            .or_else(|| self.project.pipelines.keys().next().copied())
     }
 }
 
@@ -77,6 +93,23 @@ pub enum ViewAction {
     StopTrain,
     /// 이 실행의 체크포인트를 모델의 가중치로 삼는다.
     ApplyRunWeights(RunId),
+    // 파이프라인
+    StartPipeline(PipelineId),
+    StopPipeline,
+    /// 마우스·키보드 싱크 무장 스위치.
+    SetArmInput(bool),
+    /// `Source::Manual` 노드에 값 보내기.
+    SendManual { node: PNodeId, value: Value },
+    // GUI
+    SetGuiPreview(bool),
+    // 빌드
+    BuildStart,
+    /// 도구 설치 계획을 만든다 (네트워크를 타므로 앱이 스레드에서 처리).
+    ToolPlan(BuildTarget),
+    RecheckTools,
+    OpenPath(PathBuf),
+    /// 만든 배포 아카이브를 풀어 실행한다.
+    RunArtifact(PathBuf),
 }
 
 /// 뷰가 프레임 사이에 들고 있는 UI 상태 (문서가 아닌 것). 앱이 소유한다.
@@ -85,20 +118,9 @@ pub struct ViewState {
     pub data: data::DataState,
     pub train: train::TrainViewState,
     pub resources: resources::ResourceState,
-}
-
-// ── 아직 없는 뷰 ────────────────────────────────────────────────────
-
-/// 2차분에서 구현할 뷰의 자리. 뷰 전환·단축키·저장 상태는 이미 동작한다.
-pub fn placeholder(ui: &mut egui::Ui, title: &str, note: &str) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.3);
-        ui.label(egui::RichText::new(title).size(20.0).strong());
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new(note).color(COL_WEAK));
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("M0 2차분에서 구현").color(COL_WARN).size(12.0));
-    });
+    pub pipeline: pipeline::PipelineViewState,
+    pub gui: gui::GuiViewState,
+    pub build: build::BuildViewState,
 }
 
 // ── 표기 헬퍼 ───────────────────────────────────────────────────────

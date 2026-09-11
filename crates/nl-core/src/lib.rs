@@ -13,7 +13,7 @@ pub mod shape;
 pub mod train;
 pub mod validate;
 
-pub use bundle::{BundleManifest, BUNDLE_TRAILER_MAGIC};
+pub use bundle::{BuildSpec, BuildTarget, BundleManifest, BUNDLE_TRAILER_MAGIC};
 pub use dataset::{DataSource, DatasetSpec, Split};
 pub use gui::{Binding, GuiLayout, Widget, WidgetKind, WindowSpec};
 pub use ids::*;

@@ -5,30 +5,131 @@
 
 use crate::app::NlApp;
 use crate::canvas::Selection;
-use crate::views::{self, parse_shape_text, shape_text, COL_ERROR, COL_OK, COL_WARN, COL_WEAK};
+use crate::pcanvas::LiveView;
+use crate::views::{self, parse_shape_text, shape_text, ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_WARN, COL_WEAK};
 use eframe::egui::{self, DragValue, RichText};
 use nl_core::dataset::{DataSource, Split, SyntheticKind};
 use nl_core::train::{Loss, Metric, Optimizer};
 use nl_core::{Act, DevicePref, LayerKind, Op, PayloadId};
 
 impl NlApp {
-    pub(crate) fn inspector(&mut self, ui: &mut egui::Ui, now: f64) {
-        let selection = self.canvas.selection;
-        egui::ScrollArea::vertical().id_salt("inspector-scroll").show(ui, |ui| match selection {
-            Selection::None => {
-                ui.label(RichText::new("선택된 항목이 없습니다").color(COL_WEAK));
-                ui.add_space(6.0);
-                ui.label(RichText::new("좌측 아웃라인이나 캔버스에서 대상을 고르세요.").color(COL_WEAK).size(11.5));
-            }
-            Selection::Project => self.inspect_project(ui, now),
-            Selection::Model(id) => self.inspect_model(ui, id, now),
-            Selection::Node(m, n) => self.inspect_node(ui, m, n, now),
-            Selection::Edge(m, e) => self.inspect_edge(ui, m, e),
-            Selection::Dataset(id) => self.inspect_dataset(ui, id, now),
-            Selection::Payload(id) => self.inspect_payload(ui, id, now),
-            Selection::Pipeline(id) => self.inspect_pipeline(ui, id, now),
-            Selection::Run(id) => self.inspect_run(ui, id, now),
-        });
+    /// 선택된 대상의 인스펙터. 새 뷰(파이프라인·GUI)의 편집은 `ViewAction` 으로 올려보낸다.
+    pub(crate) fn inspector(&mut self, ui: &mut egui::Ui, now: f64) -> Vec<ViewAction> {
+        let selection = self.sel.primary;
+        egui::ScrollArea::vertical()
+            .id_salt("inspector-scroll")
+            .show(ui, |ui| -> Vec<ViewAction> {
+                match selection {
+                    Selection::None => {
+                        ui.label(RichText::new("선택된 항목이 없습니다").color(COL_WEAK));
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("좌측 아웃라인이나 캔버스에서 대상을 고르세요.").color(COL_WEAK).size(11.5),
+                        );
+                        Vec::new()
+                    }
+                    Selection::Project => {
+                        self.inspect_project(ui, now);
+                        Vec::new()
+                    }
+                    Selection::Model(id) => {
+                        self.inspect_model(ui, id, now);
+                        Vec::new()
+                    }
+                    Selection::Node(m, n) => {
+                        self.inspect_node(ui, m, n, now);
+                        Vec::new()
+                    }
+                    Selection::Edge(m, e) => {
+                        self.inspect_edge(ui, m, e);
+                        Vec::new()
+                    }
+                    Selection::Dataset(id) => {
+                        self.inspect_dataset(ui, id, now);
+                        Vec::new()
+                    }
+                    Selection::Payload(id) => {
+                        self.inspect_payload(ui, id, now);
+                        Vec::new()
+                    }
+                    Selection::Pipeline(id) => {
+                        self.inspect_pipeline(ui, id, now);
+                        Vec::new()
+                    }
+                    Selection::Run(id) => {
+                        self.inspect_run(ui, id, now);
+                        Vec::new()
+                    }
+                    Selection::PNode(p, n) => self.inspect_pnode(ui, p, n, now),
+                    Selection::Link(p, l) => self.inspect_plink(ui, p, l, now),
+                    Selection::Widget(id) => self.inspect_gui_widget(ui, id, now),
+                }
+            })
+            .inner
+    }
+
+    /// 새 뷰들이 쓰는 읽기 전용 컨텍스트. 필드 단위로 빌려서 `&mut self.views` 와 겹치지 않는다.
+    fn inspector_ctx(&self, live_now: f64) -> ViewCtx<'_> {
+        ViewCtx {
+            project: &self.doc.project,
+            selection: self.sel.primary,
+            devices: &self.devices,
+            base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
+            training: self.training.as_ref(),
+            monitors: &self.monitors,
+            monitors_error: self.monitors_error.as_deref(),
+            now: live_now,
+        }
+    }
+
+    fn inspect_pnode(
+        &mut self,
+        ui: &mut egui::Ui,
+        pid: nl_core::PipelineId,
+        nid: nl_core::PNodeId,
+        now: f64,
+    ) -> Vec<ViewAction> {
+        let empty = LiveView::default();
+        let live: &LiveView = match &self.runner {
+            Some(r) => &r.live,
+            None => &empty,
+        };
+        let ctx = ViewCtx {
+            project: &self.doc.project,
+            selection: self.sel.primary,
+            devices: &self.devices,
+            base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
+            training: self.training.as_ref(),
+            monitors: &self.monitors,
+            monitors_error: self.monitors_error.as_deref(),
+            now,
+        };
+        views::pipeline::inspect_node(ui, &ctx, &mut self.views.pipeline, pid, nid, live)
+    }
+
+    fn inspect_plink(
+        &mut self,
+        ui: &mut egui::Ui,
+        pid: nl_core::PipelineId,
+        lid: nl_core::LinkId,
+        now: f64,
+    ) -> Vec<ViewAction> {
+        let ctx = self.inspector_ctx(now);
+        views::pipeline::inspect_link(ui, &ctx, pid, lid)
+    }
+
+    fn inspect_gui_widget(&mut self, ui: &mut egui::Ui, id: nl_core::WidgetId, now: f64) -> Vec<ViewAction> {
+        let ctx = ViewCtx {
+            project: &self.doc.project,
+            selection: self.sel.primary,
+            devices: &self.devices,
+            base_dir: self.doc.file_path.as_deref().and_then(|p| p.parent()),
+            training: self.training.as_ref(),
+            monitors: &self.monitors,
+            monitors_error: self.monitors_error.as_deref(),
+            now,
+        };
+        views::gui::inspect_widget(ui, &ctx, id, &self.gui_state)
     }
 
     // ── 프로젝트 ────────────────────────────────────────────────
@@ -566,7 +667,11 @@ impl NlApp {
         views::kv(ui, "노드", pl.nodes.len().to_string());
         views::kv(ui, "연결", pl.links.len().to_string());
         ui.add_space(6.0);
-        ui.label(RichText::new("노드 편집기는 M0 2차분에서 구현합니다.").color(COL_WARN).size(11.5));
+        ui.label(
+            RichText::new("노드를 고르면 종류별 설정이 여기에 나옵니다. 캔버스 빈 곳 우클릭으로 추가합니다.")
+                .color(COL_WEAK)
+                .size(11.0),
+        );
         if changed {
             doc.note_edited(now);
         }

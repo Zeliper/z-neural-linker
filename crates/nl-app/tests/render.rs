@@ -19,7 +19,7 @@ fn harness<'a>(project: Project) -> Harness<'a, NlApp> {
             app.doc = DocState::new(project);
             // 문서를 갈아끼웠으니 선택도 새 문서 기준으로.
             let first = app.doc.project.models.keys().next().copied();
-            app.canvas.set_selection(match first {
+            app.sel.set(match first {
                 Some(id) => Selection::Model(id),
                 None => Selection::Project,
             });
@@ -47,13 +47,27 @@ fn sweep(project: Project, label: &str) {
         v.extend(p.datasets.keys().map(|id| Selection::Dataset(*id)));
         v.extend(p.payloads.keys().map(|id| Selection::Payload(*id)));
         v.extend(p.runs.keys().map(|id| Selection::Run(*id)));
+        for (pid, pl) in &p.pipelines {
+            v.push(Selection::Pipeline(*pid));
+            if let Some(nid) = pl.nodes.keys().next() {
+                v.push(Selection::PNode(*pid, *nid));
+            }
+            if let Some(lid) = pl.links.keys().next() {
+                v.push(Selection::Link(*pid, *lid));
+            }
+            // 종류별 노드를 하나씩 — 인스펙터의 모든 분기를 지난다.
+            for n in pl.nodes.values() {
+                v.push(Selection::PNode(*pid, n.id));
+            }
+        }
+        v.extend(p.gui.widgets.keys().map(|id| Selection::Widget(*id)));
         v
     };
 
     for view in View::ALL {
         for sel in &ids {
             h.state_mut().view = view;
-            h.state_mut().canvas.set_selection(*sel);
+            h.state_mut().sel.set(*sel);
             h.run();
             // 뷰 바는 어느 뷰에서나 일곱 개 라벨을 그린다 — 접근성 트리에 없으면 화면이 비었다는 뜻.
             assert!(
@@ -111,6 +125,72 @@ fn every_view_renders_with_a_broken_graph() {
     // 아무 데도 연결되지 않은 노드 → MissingInput.
     g.add_node(Node::new(LayerKind::Flatten, [600.0, 400.0]));
     sweep(p, "깨진 그래프");
+}
+
+/// 파이프라인 노드의 모든 변형이 인스펙터에서 패닉 없이 그려지는지.
+/// (`Source` 8종 · `Logic` 5종 · `Sink` 7종 + 모델)
+#[test]
+fn every_pipeline_node_kind_renders_in_the_inspector() {
+    use nl_app::pcanvas::{logic_palette, sink_palette, source_palette};
+    use nl_core::pipeline::{PNode, PNodeKind};
+
+    let mut p = sample::xor_project();
+    let mid = *p.models.keys().next().unwrap();
+    let pid = *p.pipelines.keys().next().unwrap();
+    let pl = p.pipelines.get_mut(&pid).unwrap();
+    let mut kinds: Vec<PNodeKind> = source_palette().into_iter().map(|s| PNodeKind::Source { source: s }).collect();
+    kinds.extend(logic_palette().into_iter().map(|l| PNodeKind::Logic { logic: l }));
+    kinds.extend(sink_palette().into_iter().map(|s| PNodeKind::Sink { sink: s }));
+    kinds.push(PNodeKind::Model { model: mid, payload: None });
+    let mut ids = Vec::new();
+    for (i, kind) in kinds.into_iter().enumerate() {
+        let n = PNode::new(kind, [i as f32 * 120.0, 500.0]);
+        ids.push(n.id);
+        pl.nodes.insert(n.id, n);
+    }
+
+    let mut h = harness(p);
+    h.state_mut().view = View::Pipeline;
+    for id in ids {
+        h.state_mut().sel.set(Selection::PNode(pid, id));
+        h.run();
+    }
+}
+
+/// GUI 디자이너: 모든 위젯 종류 + 바인딩 종류가 그려지는지.
+#[test]
+fn every_widget_kind_renders_in_the_designer() {
+    use nl_core::gui::{Binding, BuiltinAction};
+    use nl_core::{Widget, WidgetKind};
+
+    let mut p = sample::xor_project();
+    let pid = *p.pipelines.keys().next().unwrap();
+    let first_node = *p.pipelines[&pid].nodes.keys().next().unwrap();
+    let bindings = [
+        None,
+        Some(Binding::Action { action: BuiltinAction::Quit }),
+        Some(Binding::PipelineInput { node: first_node }),
+        Some(Binding::PipelineOutput { node: first_node }),
+    ];
+    let mut ids = Vec::new();
+    for (i, kind) in WidgetKind::palette().into_iter().enumerate() {
+        let mut w = Widget::new(kind, [10.0, 10.0 + i as f32 * 30.0, 120.0, 24.0]);
+        w.binding = bindings[i % bindings.len()].clone();
+        ids.push(w.id);
+        p.gui.add(w);
+    }
+
+    let mut h = harness(p);
+    h.state_mut().view = View::Gui;
+    for id in ids {
+        h.state_mut().sel.set(Selection::Widget(id));
+        h.run();
+    }
+    // 미리보기(Run 모드)도 같은 레이아웃으로 그려진다.
+    h.state_mut().gui_preview = true;
+    h.run();
+    h.state_mut().gui_preview = false;
+    h.run();
 }
 
 #[test]
