@@ -23,3 +23,5 @@ pub use runner::RunnerInput;
 pub use screen::{Backend, Capturer};
 /// 화면 녹화 → `DataSource::Recorded` 폴더. `FrameSource` 로 다른 프레임 공급원을 끼울 수 있다.
 pub use record::{FrameSource, Recorder, RecorderHandle};
+/// `RunnerEvent::ValuePreview` 썸네일의 최장변 상한. 미리보기 위젯 크기를 잡을 때 쓴다.
+pub use runner::PREVIEW_MAX_SIDE;

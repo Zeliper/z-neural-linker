@@ -122,6 +122,10 @@ pub fn describe_event(ev: &RunnerEvent) -> String {
         RunnerEvent::Widget { widget, value } => {
             format!("위젯 [{}] {}", widget.short(), nl_gui::format_value(Some(value)))
         }
+        RunnerEvent::ValuePreview { node, width, height, .. } => {
+            format!("미리보기 [{}] {width}×{height}", node.short())
+        }
+        RunnerEvent::Stats { tick, tick_ms, hz } => format!("틱 {tick} · {hz:.1}Hz · 틱당 {tick_ms:.1}ms"),
     }
 }
 
@@ -140,6 +144,8 @@ pub struct RuntimeApp {
     errors: usize,
     show_logs: bool,
     base_dir: PathBuf,
+    /// 마지막 `RunnerEvent::Stats` 의 (실제 Hz, 틱당 ms). 상단 바에 띄운다.
+    stats: Option<(f32, f32)>,
     /// 자동 업데이트. 번들에 주소가 없거나 `--no-update` 면 `None`.
     update: Option<UpdateUi>,
 }
@@ -161,6 +167,7 @@ impl RuntimeApp {
             errors: 0,
             show_logs: false,
             base_dir,
+            stats: None,
             update: None,
         };
         app.log(format!("{} {}", app.manifest.app_name, app.manifest.app_version));
@@ -274,6 +281,7 @@ impl RuntimeApp {
         }
         if stopped {
             self.runner = None;
+            self.stats = None;
         } else {
             ctx.request_repaint_after(REPAINT);
         }
@@ -291,11 +299,16 @@ impl RuntimeApp {
                     self.gui.push_value(*widget, value.clone(), points);
                 }
                 RunnerEvent::Value { node, value } => self.apply_node_value(*node, value),
+                RunnerEvent::Stats { hz, tick_ms, .. } => self.stats = Some((*hz, *tick_ms)),
                 _ => {}
             }
             match ev {
-                // 값 이벤트는 초당 수십 번 오므로 로그를 채우지 않는다.
-                RunnerEvent::Value { .. } | RunnerEvent::Widget { .. } => {}
+                // 값·미리보기는 초당 수십 번, 통계는 초당 한 번 온다 — 200줄짜리 로그를 채우지 않는다.
+                // 통계는 로그 대신 상단 바 상태에 띄운다.
+                RunnerEvent::Value { .. }
+                | RunnerEvent::Widget { .. }
+                | RunnerEvent::ValuePreview { .. }
+                | RunnerEvent::Stats { .. } => {}
                 other => {
                     let line = describe_event(&other);
                     self.log(line);
@@ -489,7 +502,10 @@ impl RuntimeApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let running = self.is_running();
         let status = if running {
-            "실행 중".to_string()
+            match self.stats {
+                Some((hz, tick_ms)) => format!("실행 중 · {hz:.0}Hz · 틱당 {tick_ms:.1}ms"),
+                None => "실행 중".to_string(),
+            }
         } else if self.error_count() > 0 {
             format!("정지 · 오류 {}건", self.error_count())
         } else {
