@@ -1,0 +1,30 @@
+[package]
+name = "nl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neural Linker 명령줄 도구 — 헤드리스 검사·학습·추론·실행·녹화·빌드"
+
+[[bin]]
+name = "nl"
+path = "src/main.rs"
+
+[dependencies]
+nl-core = { path = "../nl-core" }
+nl-engine = { path = "../nl-engine" }
+nl-io = { path = "../nl-io" }
+nl-bundle = { path = "../nl-bundle" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+log.workspace = true
+env_logger.workspace = true
+crossbeam-channel.workspace = true
+sha2.workspace = true
+# `nl infer --image` 가 이미지를 읽는다
+image.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
