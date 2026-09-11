@@ -7,6 +7,7 @@ description = ".nlapp 번들 읽기/쓰기 · 런타임 바이너리 첨부 · �
 
 [dependencies]
 nl-core = { path = "../nl-core" }
+nl-update = { path = "../nl-update" }
 serde_json.workspace = true
 anyhow.workspace = true
 zip.workspace = true
@@ -14,6 +15,7 @@ tar.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 sha1.workspace = true
+semver.workspace = true
 image.workspace = true
 ureq.workspace = true
 crossbeam-channel.workspace = true

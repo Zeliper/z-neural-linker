@@ -12,6 +12,8 @@ pub const USAGE: &str = "\
   --headless            창 없이 파이프라인만 실행합니다 (Ctrl+C 로 종료).
   --run-for <초>        헤드리스에서 이 시간이 지나면 파이프라인을 정지하고 종료합니다 (스크립트·테스트용).
   --device <장치>       cpu | gpu:<번호> | auto (기본값은 번들 설정).
+  --no-update           시작할 때 새 버전을 확인하지 않습니다.
+                        (매니페스트 주소는 NL_UPDATE_URL 환경 변수로 덮어쓸 수 있습니다.)
   --version, -V         버전을 출력합니다.
   --help, -h            이 도움말을 출력합니다.";
 
@@ -24,6 +26,8 @@ pub struct Options {
     pub run_for: Option<f64>,
     /// 지정하지 않으면 번들 매니페스트의 기본 장치.
     pub device: Option<DevicePref>,
+    /// 시작할 때 업데이트를 확인하지 않는다.
+    pub no_update: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +47,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Command {
             "--version" | "-V" => return Command::Version,
             "--help" | "-h" => return Command::Help,
             "--headless" => opts.headless = true,
+            "--no-update" => opts.no_update = true,
             "--run-for" => {
                 let Some(v) = it.next() else {
                     return Command::Error("--run-for 뒤에 초 단위 숫자가 없습니다".into());
@@ -124,6 +129,23 @@ mod tests {
         assert_eq!(o.device, Some(DevicePref::Cpu));
         assert!(o.bundle_path.is_none());
         assert!(!o.headless);
+    }
+
+    #[test]
+    fn no_update_turns_off_the_check() {
+        let Command::Run(o) = parse_str(&["--no-update"]) else { panic!("Run 이어야 합니다") };
+        assert!(o.no_update);
+        assert!(!o.headless, "다른 옵션과 섞이지 않는다");
+
+        let Command::Run(o) = parse_str(&["--headless", "--no-update", "앱.nlapp"]) else {
+            panic!("Run 이어야 합니다")
+        };
+        assert!(o.no_update);
+        assert!(o.headless);
+        assert_eq!(o.bundle_path, Some(PathBuf::from("앱.nlapp")));
+
+        let Command::Run(o) = parse_str(&[]) else { panic!("Run 이어야 합니다") };
+        assert!(!o.no_update, "기본은 확인한다");
     }
 
     #[test]

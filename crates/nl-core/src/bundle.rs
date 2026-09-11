@@ -34,6 +34,16 @@ pub struct BundleManifest {
     /// 파이프라인을 자동으로 시작할지 (false 면 GUI 의 시작 버튼/액션으로).
     #[serde(default)]
     pub autostart: bool,
+    /// 배포 앱의 업데이트 매니페스트(`latest.json`) 주소. 없으면 자동 업데이트를 끈다.
+    /// 실행할 때 `NL_UPDATE_URL` 환경 변수가 우선한다.
+    #[serde(default)]
+    pub update_url: Option<String>,
+    /// 매니페스트 서명 검증에 쓸 minisign 공개키. 없으면 검증을 건너뛴다(경고 로그).
+    #[serde(default)]
+    pub update_public_key: Option<String>,
+    /// 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,6 +64,9 @@ impl BundleManifest {
             models: vec![],
             default_device: DevicePref::Auto,
             autostart: true,
+            update_url: None,
+            update_public_key: None,
+            auto_update: false,
         }
     }
 }
@@ -171,6 +184,34 @@ pub fn find_attached(exe: &[u8]) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_fields_round_trip() {
+        let mut m = BundleManifest::new("내 앱", "1.2.3");
+        assert_eq!(m.update_url, None, "기본은 자동 업데이트 없음");
+        assert_eq!(m.update_public_key, None);
+        assert!(!m.auto_update, "자동 다운로드는 명시해야 켜진다");
+
+        m.update_url = Some("https://updates.example/app/latest.json".into());
+        m.update_public_key = Some("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3".into());
+        m.auto_update = true;
+
+        let json = serde_json::to_string(&m).unwrap();
+        let back: BundleManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    /// 업데이트 필드가 없던 옛 번들도 그대로 열려야 한다.
+    #[test]
+    fn older_manifests_without_update_fields_still_load() {
+        let json = r#"{"format":1,"app_name":"옛 앱","app_version":"0.1.0"}"#;
+        let m: BundleManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.app_name, "옛 앱");
+        assert_eq!(m.update_url, None);
+        assert_eq!(m.update_public_key, None);
+        assert!(!m.auto_update);
+        assert!(!m.autostart, "serde(default) 라 false 다");
+    }
 
     #[test]
     fn trailer_round_trips() {

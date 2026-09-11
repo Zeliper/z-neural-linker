@@ -5,6 +5,7 @@ use nl_core::gui::{Binding, BuiltinAction};
 use nl_core::{BundleManifest, DevicePref, GuiLayout, PNodeId, Pipeline, Project, WidgetId, WidgetKind};
 use nl_engine::{DeviceInfo, Value};
 use nl_gui::{GuiEvent, GuiState, RenderMode};
+use crate::update::UpdateUi;
 use nl_io::runner::RunnerInput;
 use nl_io::{Runner, RunnerEvent, RunnerHandle};
 use std::collections::VecDeque;
@@ -139,6 +140,8 @@ pub struct RuntimeApp {
     errors: usize,
     show_logs: bool,
     base_dir: PathBuf,
+    /// 자동 업데이트. 번들에 주소가 없거나 `--no-update` 면 `None`.
+    update: Option<UpdateUi>,
 }
 
 impl RuntimeApp {
@@ -158,12 +161,48 @@ impl RuntimeApp {
             errors: 0,
             show_logs: false,
             base_dir,
+            update: None,
         };
         app.log(format!("{} {}", app.manifest.app_name, app.manifest.app_version));
         if app.manifest.autostart {
             app.start();
         }
         app
+    }
+
+    /// 자동 업데이트를 켠다. 번들 매니페스트에 주소가 있어야 실제로 붙는다.
+    pub fn with_updates(mut self, enabled: bool) -> Self {
+        if !enabled {
+            log::info!("자동 업데이트를 껐습니다 (--no-update)");
+            return self;
+        }
+        match UpdateUi::new(&self.manifest) {
+            Some(mut ui) => {
+                let url = ui.manifest_url().to_string();
+                ui.start_check();
+                self.update = Some(ui);
+                self.log(format!("업데이트를 확인합니다: {url}"));
+            }
+            None => log::info!("번들에 업데이트 주소가 없어 자동 업데이트를 쓰지 않습니다"),
+        }
+        self
+    }
+
+    /// 이미 만들어 둔 업데이트 상태를 붙인다. 확인을 시작하지 않으므로 테스트가 네트워크 없이 쓴다.
+    #[cfg(test)]
+    pub fn with_update_ui(mut self, ui: UpdateUi) -> Self {
+        self.update = Some(ui);
+        self
+    }
+
+    #[cfg(test)]
+    pub fn update_ui(&self) -> Option<&UpdateUi> {
+        self.update.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn update_ui_mut(&mut self) -> Option<&mut UpdateUi> {
+        self.update.as_mut()
     }
 
     /// 창을 여는 쪽에서 한 번 부른다 (폰트·테마). 테스트는 부르지 않아도 된다.
@@ -327,12 +366,124 @@ impl RuntimeApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_runner(&ctx);
+        self.poll_update(&ctx);
         egui::Panel::top("nl_runtime_bar").show(ui, |ui| self.top_bar(ui));
         let events = egui::CentralPanel::default()
             .show(ui, |ui| nl_gui::render_layout(ui, &self.layout, &mut self.gui, RenderMode::Run))
             .inner;
         self.handle_gui_events(events, &ctx);
         self.log_window(&ctx);
+        self.update_window(&ctx);
+    }
+
+    /// 업데이트 이벤트를 소비하고, 자동 다운로드 조건을 보고, 적용이 끝났으면 앱을 닫는다.
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        let running = self.is_running();
+        let Some(update) = &mut self.update else { return };
+
+        let events = update.poll();
+        update.maybe_auto_download(running);
+        let busy = update.is_busy();
+
+        let mut close = false;
+        let mut lines = Vec::new();
+        for ev in &events {
+            if matches!(ev, nl_update::Event::Applied(_)) {
+                close = true;
+            }
+            if let Some(line) = crate::update::describe(ev) {
+                lines.push(line);
+            }
+        }
+        for line in lines {
+            self.log(line);
+        }
+        if busy {
+            ctx.request_repaint_after(REPAINT);
+        }
+        if close {
+            // 새 프로세스가 이미 예약돼 있다. 옛 프로세스는 비켜 준다.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// 업데이트 창. 릴리스 노트·진행률·"지금 적용" 버튼.
+    fn update_window(&mut self, ctx: &egui::Context) {
+        let Some(update) = &self.update else { return };
+        if !update.show {
+            return;
+        }
+        let state = update.state().clone();
+        let mut open = true;
+        let mut download = false;
+        let mut apply = false;
+        let mut recheck = false;
+
+        egui::Window::new("업데이트").open(&mut open).default_size([420.0, 240.0]).show(ctx, |ui| {
+            match &state {
+                nl_update::State::Available(a) => {
+                    ui.heading(format!("새 버전 {}", a.version));
+                    ui.label(format!("지금 버전 {}", self.manifest.app_version));
+                    if !a.notes.is_empty() {
+                        ui.separator();
+                        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                            ui.label(&a.notes);
+                        });
+                    }
+                    ui.separator();
+                    download = ui.button("내려받기").clicked();
+                }
+                nl_update::State::Downloading { received, total } => {
+                    ui.label("내려받는 중…");
+                    let progress = nl_update::Progress { received: *received, total: *total };
+                    match progress.fraction() {
+                        Some(f) => {
+                            ui.add(egui::ProgressBar::new(f).show_percentage());
+                        }
+                        None => {
+                            ui.label(format!("{received} 바이트"));
+                        }
+                    }
+                }
+                nl_update::State::Downloaded { .. } => {
+                    ui.label("내려받았습니다.");
+                    ui.label("적용하면 앱이 종료되고 새 버전이 다시 시작됩니다.");
+                    ui.separator();
+                    apply = ui.button("지금 적용").clicked();
+                }
+                nl_update::State::Applying => {
+                    ui.spinner();
+                    ui.label("적용 중…");
+                }
+                nl_update::State::Applied(a) => {
+                    ui.label(a.message());
+                }
+                nl_update::State::Failed(e) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                    ui.separator();
+                    recheck = ui.button("다시 확인").clicked();
+                }
+                nl_update::State::Idle | nl_update::State::Checking | nl_update::State::UpToDate => {
+                    ui.label(state.message());
+                }
+            }
+        });
+
+        if let Some(update) = &mut self.update {
+            update.show = open;
+            if download {
+                update.start_download();
+            }
+            if apply {
+                update.apply();
+            }
+            if recheck {
+                update.recheck();
+            }
+        }
+        if apply {
+            self.log("업데이트를 적용합니다");
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -348,6 +499,8 @@ impl RuntimeApp {
         let mut start = false;
         let mut stop = false;
         let mut toggle_logs = false;
+        let mut toggle_update = false;
+        let badge = self.update.as_ref().and_then(|u| u.badge());
         let mut device = self.device;
         {
             let devices = &self.devices;
@@ -370,6 +523,10 @@ impl RuntimeApp {
                 ui.label(&status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     toggle_logs = ui.button("⚙").on_hover_text("로그 창").clicked();
+                    if let Some(badge) = &badge {
+                        toggle_update =
+                            ui.button(badge).on_hover_text("업데이트 창을 엽니다").clicked();
+                    }
                 });
             });
         }
@@ -387,6 +544,11 @@ impl RuntimeApp {
         }
         if toggle_logs {
             self.show_logs = !self.show_logs;
+        }
+        if toggle_update {
+            if let Some(update) = &mut self.update {
+                update.show = !update.show;
+            }
         }
     }
 
@@ -477,6 +639,84 @@ mod tests {
             "자동 시작 로그가 없습니다: {:?}",
             app.log_lines()
         );
+    }
+
+    /// 업데이트 상태를 주입하고 한 프레임 그린다 — 배지와 창이 패닉 없이 뜨는지 본다.
+    #[test]
+    fn update_badge_and_window_render() {
+        use crate::update::UpdateUi;
+        use nl_update::{Asset, AssetKind, Available, Event, Progress};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut bundle = demo_bundle(false);
+        bundle.manifest.update_url = Some("https://updates.example/demo/latest.json".into());
+
+        let ui = UpdateUi::new(&bundle.manifest).expect("주소가 있으면 만들어진다");
+        let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_update_ui(ui);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 560.0))
+            .with_step_dt(1.0 / 60.0)
+            .with_max_steps(60)
+            .build_ui_state(|ui, app: &mut RuntimeApp| app.draw(ui), app);
+
+        // 아직 알릴 것이 없다.
+        h.run_steps(2);
+        assert!(h.state().update_ui().unwrap().badge().is_none());
+
+        let available = Available {
+            version: semver::Version::new(0, 2, 0),
+            notes: "고친 것이 많습니다".into(),
+            asset: Asset {
+                url: "https://updates.example/demo/app".into(),
+                sha256: "ab".into(),
+                kind: AssetKind::Binary,
+                size: 128,
+            },
+            target: nl_update::target_key(),
+        };
+
+        // 새 버전 → 배지가 뜨고 창이 열린다.
+        h.state_mut().update_ui_mut().unwrap().inject(Event::Available(available));
+        h.state_mut().update_ui_mut().unwrap().show = true;
+        h.run_steps(2);
+        assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 새 버전 0.2.0"));
+
+        // 진행률 → 진행 막대.
+        h.state_mut().update_ui_mut().unwrap().inject(Event::Progress(Progress { received: 64, total: Some(128) }));
+        h.run_steps(2);
+        assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 내려받는 중"));
+
+        // 다 받음 → "지금 적용" 버튼. 실제로 누르지는 않는다.
+        h.state_mut().update_ui_mut().unwrap().inject(Event::Downloaded(dir.path().join("app")));
+        h.run_steps(2);
+        assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 적용 준비됨"));
+
+        // 실패 → 배지는 사라지고 창에 오류가 남는다.
+        h.state_mut().update_ui_mut().unwrap().inject(Event::Failed("연결 실패".into()));
+        h.run_steps(2);
+        assert!(h.state().update_ui().unwrap().badge().is_none());
+        assert!(
+            h.state().log_lines().iter().any(|l| l.contains("연결 실패")),
+            "실패를 로그에 남겨야 합니다: {:?}",
+            h.state().log_lines()
+        );
+    }
+
+    #[test]
+    fn no_update_url_means_no_update_ui() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = demo_bundle(false);
+        let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_updates(true);
+        assert!(app.update_ui().is_none(), "번들에 주소가 없으면 붙지 않는다");
+    }
+
+    #[test]
+    fn updates_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bundle = demo_bundle(false);
+        bundle.manifest.update_url = Some("https://updates.example/demo/latest.json".into());
+        let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_updates(false);
+        assert!(app.update_ui().is_none(), "--no-update 면 확인조차 하지 않는다");
     }
 
     #[test]
