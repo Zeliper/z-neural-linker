@@ -1,0 +1,170 @@
+# 태그 `v*` 에 Linux 네이티브와 Windows 크로스 빌드를 한 러너에서 만든다.
+# Forgejo Actions 는 GitHub 문법을 그대로 읽으므로 `.forgejo/workflows/release.yml` 에 같은 파일이 있다.
+#
+# 산출물
+#   neural-linker-<ver>-linux-x86_64.tar.gz   빌더 + 런타임 + install.sh + .desktop
+#   neural-linker-<ver>-windows-x86_64.zip    빌더 + 런타임
+#   nl-app, nl-app.exe                        자동 업데이트가 그대로 내려받는 알맹이
+#   nl-runtime, nl-runtime.exe                빌더가 배포판을 만들 때 쓰는 런타임
+#   latest.json                               빌더 자체 업데이트 매니페스트
+#   runtimes/latest.json                      빌더가 대상별 런타임을 받아 오는 매니페스트
+#   *.minisig                                 MINISIGN_KEY 시크릿이 있을 때만
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # 태그 없이 손으로 돌려 볼 수 있게 (릴리스 첨부는 건너뛴다).
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  WINDOWS_TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 시스템 의존 설치
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon0 \
+            clang lld llvm \
+            minisign
+        # clang·lld·llvm: cargo-xwin 이 clang-cl·lld-link·llvm-lib 로 MSVC 대상을 링크한다.
+        #   러너는 root 라 배포판 패키지를 그대로 쓴다 (개발 기계에서는 rustup 의 rust-lld 로 대신할 수 있다 —
+        #   packaging/README.md "준비물" 참고).
+        # libxkbcommon0: enigo 가 링크하는 런타임 라이브러리. 개발 패키지는 필요 없다.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: cargo-xwin 설치
+        run: cargo install cargo-xwin --locked
+
+      - name: 버전 확인
+        id: version
+        run: |
+          # 태그(v0.2.0)가 있으면 그것을, 손으로 돌렸으면 워크스페이스 버전을 쓴다.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "버전: $VERSION"
+
+      - name: Linux 빌드
+        run: cargo build --release -p nl-app -p nl-runtime
+
+      - name: Windows 크로스 빌드
+        run: cargo xwin build --release -p nl-app -p nl-runtime --target "$WINDOWS_TARGET"
+
+      - name: 아카이브 만들기
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          LIN=target/release
+          WIN="target/$WINDOWS_TARGET/release"
+          OUT=dist
+          mkdir -p "$OUT"
+
+          # ── Linux: install.sh 가 기대하는 배치 그대로 담는다 ──
+          STAGE="$OUT/neural-linker"
+          mkdir -p "$STAGE"
+          cp "$LIN/nl-app" "$LIN/nl-runtime" "$STAGE/"
+          cp packaging/linux/install.sh packaging/linux/neural-linker.desktop \
+             packaging/linux/neural-linker-mime.xml "$STAGE/"
+          # install.sh 는 인자로 바이너리 경로를 받는다. 풀어 놓은 자리에서 바로 되도록 기본값을 옆으로 맞춘다.
+          tar -czf "$OUT/neural-linker-$VERSION-linux-x86_64.tar.gz" -C "$OUT" neural-linker
+          rm -rf "$STAGE"
+
+          # ── Windows: 설치 프로그램 없이 풀어 쓰는 zip ──
+          STAGE="$OUT/win"
+          mkdir -p "$STAGE"
+          cp "$WIN/nl-app.exe" "$WIN/nl-runtime.exe" "$STAGE/"
+          (cd "$STAGE" && zip -q -r "../neural-linker-$VERSION-windows-x86_64.zip" .)
+          rm -rf "$STAGE"
+
+          # ── 자동 업데이트가 그대로 내려받는 알맹이 ──
+          cp "$LIN/nl-app" "$OUT/nl-app"
+          cp "$LIN/nl-runtime" "$OUT/nl-runtime"
+          cp "$WIN/nl-app.exe" "$OUT/nl-app.exe"
+          cp "$WIN/nl-runtime.exe" "$OUT/nl-runtime.exe"
+
+          ls -la "$OUT"
+
+      - name: 매니페스트 만들기
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BASE_URL: ${{ vars.UPDATE_BASE_URL || 'https://updates.trustanc.dev/neural-linker' }}
+        run: |
+          set -euo pipefail
+          OUT=dist
+          APP_BASE="$BASE_URL/$VERSION"
+
+          # ── 빌더 자체 업데이트 (latest.json) ──
+          # make-manifest.sh 는 파일 이름으로 대상을 정한다: *.exe → windows-x86_64(installer), 그 밖 → linux-x86_64(binary).
+          # Windows 쪽은 Inno Setup 설치 프로그램이라야 kind=installer 가 맞는데 러너에 Inno Setup 이 없다.
+          # 그래서 지금은 Linux 자산만 넣는다 — Windows 사용자는 zip 을 받아 덮어쓴다.
+          (cd packaging && NOTES="${VERSION} 릴리스" ./make-manifest.sh "$VERSION" "$APP_BASE" "../$OUT/nl-app")
+          mv packaging/latest.json "$OUT/latest.json"
+
+          # ── 빌더가 받아 오는 대상별 런타임 (runtimes/latest.json) ──
+          # 형식은 nl_bundle::manifest::write_manifest 와 같다 (nl_update::Manifest).
+          python3 packaging/make-runtimes-manifest.py \
+            "$VERSION" "$BASE_URL/$VERSION/runtimes" "$OUT/runtimes/latest.json" \
+            "linux-x86_64=$OUT/nl-runtime" \
+            "windows-x86_64=$OUT/nl-runtime.exe"
+
+      - name: 매니페스트 서명 (MINISIGN_KEY 가 있을 때만)
+        if: env.MINISIGN_KEY != ''
+        run: |
+          set -euo pipefail
+          # 비밀번호 없는 키(minisign -G -W)여야 한다. 비밀번호가 걸린 키는 대화형 입력을 요구한다.
+          printf '%s\n' "$MINISIGN_KEY" > /tmp/minisign.key
+          chmod 600 /tmp/minisign.key
+          for f in dist/latest.json dist/runtimes/latest.json; do
+            minisign -Sm "$f" -s /tmp/minisign.key < /dev/null
+            echo "서명: $f.minisig"
+          done
+          rm -f /tmp/minisign.key
+
+      - name: 산출물 보관
+        uses: actions/upload-artifact@v4
+        with:
+          name: neural-linker-${{ steps.version.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: 릴리스에 첨부
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/nl-app
+            dist/nl-app.exe
+            dist/nl-runtime
+            dist/nl-runtime.exe
+            dist/latest.json
+            dist/latest.json.minisig
+            dist/runtimes/latest.json
+            dist/runtimes/latest.json.minisig
+          fail_on_unmatched_files: false
