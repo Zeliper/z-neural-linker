@@ -155,7 +155,11 @@ fn run_headless(
         u.start_check();
     }
 
-    let handle = app::spawn_runner(&bundle.project, &pipeline, work.path(), device)?;
+    if bundle.manifest.arm_input {
+        println!("{}", app::ARM_INPUT_NOTICE);
+    }
+    let handle =
+        app::spawn_runner(&bundle.project, &pipeline, work.path(), device, bundle.manifest.arm_input)?;
     let mut asked_to_stop = false;
     loop {
         drain_update(&mut update);

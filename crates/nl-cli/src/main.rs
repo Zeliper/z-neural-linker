@@ -154,6 +154,9 @@ enum Command {
         /// Windows 설치 프로그램에 적을 배포자.
         #[arg(long, default_value = "Neural Linker")]
         publisher: String,
+        /// 배포 앱이 마우스·키보드를 실제로 조작하도록 허용한다. 기본은 금지.
+        #[arg(long)]
+        arm_input: bool,
     },
     /// XOR 샘플 프로젝트를 만든다.
     Sample {
@@ -210,7 +213,7 @@ fn dispatch() -> Result<i32> {
             };
             record::run(record::Args { out: &out, monitor, x, y, width, height, fps, seconds, allowed })
         }
-        Command::Build { project, target, out, name, version, pipeline, runtime, icon, publisher } => {
+        Command::Build { project, target, out, name, version, pipeline, runtime, icon, publisher, arm_input } => {
             build::run(build::Args {
                 project: &project,
                 target: &target,
@@ -221,6 +224,7 @@ fn dispatch() -> Result<i32> {
                 runtime: runtime.as_deref(),
                 icon: icon.as_deref(),
                 publisher: &publisher,
+                arm_input,
             })
         }
         Command::Sample { out } => make_sample(&out),

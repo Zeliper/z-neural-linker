@@ -9,6 +9,12 @@
 //! 4. 값을 낸 노드(소스·모델·로직)는 [`RunnerEvent::Value`] 로도 알린다. 싱크는 값을 소비만 하므로 제외한다.
 //! 5. `tick_hz` 로 정해진 주기가 될 때까지 잔다. 잠은 10ms 씩 끊어 자므로 [`RunnerHandle::stop`] 은 곧바로 먹는다.
 //!
+//! ## 기동 순서
+//! 소스(HTTP 서버·WebSocket·stdin)를 **모델보다 먼저** 연다. `Session::load` 는 GPU 초기화 때문에 몇 초가
+//! 걸릴 수 있는데, 그 사이 포트가 닫혀 있으면 클라이언트는 "연결 거부" 를 본다. 먼저 열어 두면 포트는
+//! 살아 있고, 아직 답할 수 없는 요청은 큐에 쌓지 않고 곧바로 503([`MODEL_LOADING`])으로 돌려보낸다.
+//! 모델이 다 올라오면 `요청 받기 시작` 로그와 함께 200 응답으로 넘어간다.
+//!
 //! ## 드롭 정책
 //! 이벤트 채널은 unbounded 라서 소비자가 느려도 막히지 않지만, 그만큼 이미지가 쌓이면 메모리를 먹는다.
 //! 그래서 [`Value::Image`] 는 [`RunnerEvent::Value`] 로 아예 보내지 않고 `Sink::GuiWidget` 이 있을 때만
@@ -189,6 +195,9 @@ pub const MAX_HTTP_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 pub const HTTP_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// 수신 스레드가 `stop` 을 확인하는 주기. `stop()` 응답 지연의 상한이다.
 const HTTP_SERVER_POLL: Duration = Duration::from_millis(50);
+/// 모델이 준비되기 전에 온 요청에 돌려주는 503 본문. 영문 `model loading` 을 함께 넣어 두어
+/// 클라이언트가 문자열로도 구분할 수 있게 한다 (상태 코드 503 이 본래 계약이다).
+pub const MODEL_LOADING: &str = "모델을 올리는 중입니다 (model loading). 잠시 뒤 다시 시도하세요";
 
 /// 수신 스레드 → 틱 루프. 값과 아직 응답하지 않은 요청을 함께 넘긴다.
 struct HttpIncoming {
@@ -213,6 +222,9 @@ struct HttpServerState {
     pending: VecDeque<(Instant, tiny_http::Request)>,
     /// 수신 스레드를 깨우기 위해 공유한다.
     server: Arc<tiny_http::Server>,
+    /// 모델이 다 올라왔는가. 꺼져 있는 동안 들어온 요청은 **큐에 넣지 않고** 곧바로 503 으로 돌려보낸다.
+    /// 서버를 모델보다 먼저 여는 대신, 아직 답할 수 없는 요청을 물고 있지 않으려는 것이다.
+    ready: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -257,12 +269,13 @@ fn start_http_server(bind: &str, path: &str) -> Result<HttpServerState, String> 
         .map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
     let (tx, rx) = crossbeam_channel::unbounded();
     let stop = Arc::new(AtomicBool::new(false));
-    let (s2, srv2, want) = (stop.clone(), server.clone(), normalize_path(path));
+    let ready = Arc::new(AtomicBool::new(false));
+    let (s2, r2, srv2, want) = (stop.clone(), ready.clone(), server.clone(), normalize_path(path));
     let handle = std::thread::Builder::new()
         .name("nl-http-server".into())
-        .spawn(move || http_server_loop(&srv2, &want, &tx, &s2))
+        .spawn(move || http_server_loop(&srv2, &want, &tx, &s2, &r2))
         .map_err(|e| format!("HTTP 수신 스레드 생성 실패: {e}"))?;
-    Ok(HttpServerState { rx, pending: VecDeque::new(), server, stop, handle: Some(handle) })
+    Ok(HttpServerState { rx, pending: VecDeque::new(), server, ready, stop, handle: Some(handle) })
 }
 
 /// 경로 비교를 위해 앞에 `/` 를 붙이고 뒤쪽 `/` 는 뗀다. 빈 값은 `/`.
@@ -280,6 +293,7 @@ fn http_server_loop(
     want_path: &str,
     tx: &Sender<HttpIncoming>,
     stop: &AtomicBool,
+    ready: &AtomicBool,
 ) {
     while !stop.load(Ordering::SeqCst) {
         let mut request = match server.recv_timeout(HTTP_SERVER_POLL) {
@@ -296,6 +310,12 @@ fn http_server_loop(
         };
         if got_path != want_path {
             let _ = respond_json(request, 404, &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {want_path})"));
+            continue;
+        }
+
+        // 모델이 아직 안 올라왔다. 물고 있지 말고 곧바로 돌려보낸다 — 클라이언트가 재시도하면 된다.
+        if !ready.load(Ordering::SeqCst) {
+            let _ = respond_json(request, 503, MODEL_LOADING);
             continue;
         }
 
@@ -628,32 +648,6 @@ fn run_loop(
     let labels: HashMap<PNodeId, String> = order.iter().map(|id| (*id, node_label(&pipeline, *id))).collect();
     let mut sessions: HashMap<PNodeId, Result<Session, String>> = HashMap::new();
 
-    // ── 준비: 모델 세션 로드. 실패해도 루프는 돈다(그 노드를 지날 때 오류 이벤트).
-    for id in &order {
-        let node = &pipeline.nodes[id];
-        let PNodeKind::Model { model, .. } = &node.kind else { continue };
-        let Some(def) = project.models.get(model) else {
-            let _ = etx.send(RunnerEvent::Error {
-                node: Some(*id),
-                message: format!("프로젝트에 없는 모델 {}", model.short()),
-            });
-            sessions.insert(*id, Err(format!("프로젝트에 없는 모델 {}", model.short())));
-            continue;
-        };
-        let weights = def.weights.as_ref().map(|w| base_dir.join(w));
-        match Session::load(def, weights.as_deref(), device) {
-            Ok(s) => {
-                let _ = etx.send(RunnerEvent::Log(format!("모델 '{}' 준비 완료 ({})", def.name, s.device_name())));
-                sessions.insert(*id, Ok(s));
-            }
-            Err(e) => {
-                let message = format!("모델 '{}' 을 올리지 못했다: {e:#}", def.name);
-                let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: message.clone() });
-                sessions.insert(*id, Err(message));
-            }
-        }
-    }
-
     // ── 준비: stdin 읽기 스레드 (StdinJson 소스가 있을 때만).
     let stdin_nodes: Vec<PNodeId> = order
         .iter()
@@ -749,6 +743,48 @@ fn run_loop(
                 }
             }
         }
+    }
+
+    // ── 준비: 모델 세션 로드. **소스를 먼저 연 다음**에 한다.
+    //
+    // `Session::load` 는 GPU 초기화 때문에 몇 초가 걸릴 수 있다. 이걸 먼저 하면 그동안 HTTP 서버가
+    // 닫혀 있어 클라이언트가 "연결 거부" 를 본다. 소스를 먼저 열어 두면 포트는 살아 있고,
+    // 아직 답할 수 없는 요청은 큐에 넣지 않고 503(`MODEL_LOADING`)으로 곧바로 돌려보낸다.
+    // 실패해도 루프는 돈다(그 노드를 지날 때 오류 이벤트).
+    let model_load_started = Instant::now();
+    for id in &order {
+        let node = &pipeline.nodes[id];
+        let PNodeKind::Model { model, .. } = &node.kind else { continue };
+        let Some(def) = project.models.get(model) else {
+            let _ = etx.send(RunnerEvent::Error {
+                node: Some(*id),
+                message: format!("프로젝트에 없는 모델 {}", model.short()),
+            });
+            sessions.insert(*id, Err(format!("프로젝트에 없는 모델 {}", model.short())));
+            continue;
+        };
+        let weights = def.weights.as_ref().map(|w| base_dir.join(w));
+        match Session::load(def, weights.as_deref(), device) {
+            Ok(s) => {
+                let _ = etx.send(RunnerEvent::Log(format!("모델 '{}' 준비 완료 ({})", def.name, s.device_name())));
+                sessions.insert(*id, Ok(s));
+            }
+            Err(e) => {
+                let message = format!("모델 '{}' 을 올리지 못했다: {e:#}", def.name);
+                let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: message.clone() });
+                sessions.insert(*id, Err(message));
+            }
+        }
+    }
+    // 이제부터 요청을 받는다.
+    if !servers.is_empty() {
+        for srv in servers.values() {
+            srv.ready.store(true, Ordering::SeqCst);
+        }
+        let _ = etx.send(RunnerEvent::Log(format!(
+            "요청 받기 시작 (모델 준비에 {:.2}초)",
+            model_load_started.elapsed().as_secs_f64()
+        )));
     }
 
     // ── 준비: 입력 시뮬레이터.
@@ -2396,6 +2432,71 @@ mod tests {
             }
         }
         assert!(refused, "stop 뒤에도 {addr} 이 연결을 받는다");
+    }
+
+    /// 모델을 올리는 동안에도 포트는 살아 있고, 그 사이 요청은 503 으로 곧바로 돌아온다.
+    /// 모델이 준비되면 같은 요청이 200 이 된다.
+    #[test]
+    fn the_server_opens_before_the_model_and_answers_503_until_ready() {
+        // 프로젝트에 없는 모델을 가리켜 `Session::load` 가 확실히 실패하게 한다.
+        // (실패든 성공이든 "로딩이 끝나면 ready" 라는 전이는 같다.)
+        let addr = free_addr();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("http503"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+
+        // 준비가 끝났다는 로그가 오기 전까지는 503 만 나온다.
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
+                .is_some(),
+            "준비 완료 로그가 오지 않았다"
+        );
+
+        let url = format!("http://{addr}/infer");
+        let res = crate::http::call("POST", &url, &BTreeMap::new(), Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 200, "준비 뒤에는 200 이어야 한다. 본문: {}", res.body);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// `ready` 가 꺼져 있으면 요청을 큐에 넣지 않고 503 으로 돌려보낸다.
+    /// 수신 스레드만 따로 띄워 게이트 자체를 확인한다 (모델 로딩 시간에 기대지 않는다).
+    #[test]
+    fn requests_before_ready_get_503_and_are_not_queued() {
+        let addr = free_addr();
+        let mut srv = start_http_server(&addr, "/infer").expect("서버를 열지 못했다");
+        assert!(!srv.ready.load(Ordering::SeqCst), "처음에는 준비 전이다");
+
+        let url = format!("http://{addr}/infer");
+        let res = crate::http::call("POST", &url, &BTreeMap::new(), Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 503);
+        let body = res.json().expect("503 본문이 JSON 이 아니다");
+        assert_eq!(body["status"], serde_json::json!(503));
+        assert!(body["error"].as_str().unwrap().contains("model loading"), "본문: {}", res.body);
+        // 큐에 남지 않았다 — 준비되면 낡은 요청이 되살아나지 않는다.
+        assert!(srv.rx.try_recv().is_err(), "503 으로 돌려보낸 요청이 큐에 들어갔다");
+
+        // 준비되면 같은 경로가 수신 채널로 넘어온다.
+        srv.ready.store(true, Ordering::SeqCst);
+        let (tx, rx) = crossbeam_channel::bounded::<u16>(1);
+        let url2 = url.clone();
+        std::thread::spawn(move || {
+            let r = crate::http::call("POST", &url2, &BTreeMap::new(), Some("2"), Duration::from_secs(5));
+            let _ = tx.send(r.map(|x| x.status).unwrap_or(0));
+        });
+        let inc = srv.rx.recv_timeout(Duration::from_secs(5)).expect("준비 뒤 요청이 오지 않았다");
+        // 본문 "2" 는 JSON 으로 읽히므로 Json(2) 이다 (텍스트보다 JSON 을 먼저 시도한다).
+        assert_eq!(inc.value, Value::Json(serde_json::json!(2)));
+        respond_json(inc.request, 200, "2").unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 200);
+
+        srv.shutdown();
     }
 
     #[test]
