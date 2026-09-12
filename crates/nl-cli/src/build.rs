@@ -260,7 +260,7 @@ mod tests {
     fn manifest_paths_match_what_the_runtime_expects() {
         let dir = std::env::temp_dir().join(format!("nl-cli-bundle-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("runs")).unwrap();
-        let mut project = crate::sample::xor_project();
+        let mut project = nl_core::sample::xor_project();
         let model_id = *project.models.keys().next().unwrap();
         std::fs::write(dir.join("runs/w.safetensors"), b"fake-weights").unwrap();
         project.models.get_mut(&model_id).unwrap().weights = Some("runs/w.safetensors".into());
@@ -300,7 +300,7 @@ mod tests {
     fn models_without_weights_are_reported_and_left_out() {
         let dir = std::env::temp_dir().join(format!("nl-cli-bundle2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let project = crate::sample::xor_project();
+        let project = nl_core::sample::xor_project();
         let (bundle, missing) = make_bundle(&project, &dir, "앱", "1.0.0", None, false).unwrap();
         assert_eq!(missing.len(), 1, "{missing:?}");
         assert!(bundle.manifest.models.is_empty());

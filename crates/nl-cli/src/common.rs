@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn find_by_name_id_and_prefix() {
-        let p = crate::sample::xor_project();
+        let p = nl_core::sample::xor_project();
         let m = p.models.values().next().unwrap();
         assert_eq!(find_model(&p, &m.name).unwrap().id, m.id);
         let full = m.id.0.simple().to_string();

@@ -8,6 +8,7 @@ pub mod ids;
 pub mod model;
 pub mod ops;
 pub mod payload;
+pub mod sample;
 pub mod pipeline;
 pub mod shape;
 pub mod train;
@@ -23,6 +24,7 @@ pub use model::{
 };
 pub use ops::{apply_op, apply_ops, diff_ops, inverse_ops, Op};
 pub use payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
+pub use sample::{api_pipeline, new_project, quadrants_cnn_project, xor_project, SampleFactory, API_BIND, API_PATH, SAMPLES};
 pub use pipeline::{Link, Logic, PNode, PNodeKind, Pipeline, Sink, Source, InputAction, Region};
 pub use shape::{infer, Dim, GraphError, Shape, ShapeReport};
 pub use train::{DevicePref, EpochMetrics, Loss, LrSchedule, Metric, Optimizer, RunRecord, RunStatus, TrainConfig};
