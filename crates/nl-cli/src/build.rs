@@ -27,6 +27,8 @@ pub struct Args<'a> {
     pub runtime: Option<&'a Path>,
     pub icon: Option<&'a Path>,
     pub publisher: &'a str,
+    /// 배포 앱이 실제 마우스·키보드 입력을 보내도 되는지. 기본 금지.
+    pub arm_input: bool,
 }
 
 pub fn run(args: Args<'_>) -> Result<i32> {
@@ -63,7 +65,7 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         None => default_icon.is_file().then_some(default_icon),
     };
 
-    let (bundle, missing) = make_bundle(&l.project, &l.base_dir, &app_name, &version, entry)?;
+    let (bundle, missing) = make_bundle(&l.project, &l.base_dir, &app_name, &version, entry, args.arm_input)?;
     println!("{} {} {}", bold("번들"), app_name, version);
     println!("  {} {}개", dim("모델"), bundle.manifest.models.len());
     for m in &missing {
@@ -79,6 +81,9 @@ pub fn run(args: Args<'_>) -> Result<i32> {
     }
     if let Some(i) = &icon {
         println!("  {} {}", dim("아이콘"), i.display());
+    }
+    if args.arm_input {
+        println!("  {}", yellow("입력 무장 — 이 앱은 마우스·키보드를 실제로 조작한다"));
     }
 
     let zip = bundle.to_zip().context("번들 zip 을 만들지 못했다")?;
@@ -182,11 +187,13 @@ fn make_bundle(
     app_name: &str,
     version: &str,
     entry: Option<nl_core::PipelineId>,
+    arm_input: bool,
 ) -> Result<(Bundle, Vec<String>)> {
     let mut manifest = BundleManifest::new(app_name, version);
     manifest.built_with = format!("nl-cli {}", env!("CARGO_PKG_VERSION"));
     manifest.entry_pipeline = entry;
     manifest.default_device = project.settings.default_device;
+    manifest.arm_input = arm_input;
 
     // 프로젝트 사본의 가중치 경로를 번들 규약에 맞춰 다시 쓴다.
     let mut packed = project.clone();
@@ -258,7 +265,7 @@ mod tests {
         std::fs::write(dir.join("runs/w.safetensors"), b"fake-weights").unwrap();
         project.models.get_mut(&model_id).unwrap().weights = Some("runs/w.safetensors".into());
 
-        let (bundle, missing) = make_bundle(&project, &dir, "앱", "1.0.0", None).unwrap();
+        let (bundle, missing) = make_bundle(&project, &dir, "앱", "1.0.0", None, false).unwrap();
         assert!(missing.is_empty(), "{missing:?}");
         assert_eq!(bundle.manifest.models.len(), 1);
 
@@ -294,7 +301,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nl-cli-bundle2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let project = crate::sample::xor_project();
-        let (bundle, missing) = make_bundle(&project, &dir, "앱", "1.0.0", None).unwrap();
+        let (bundle, missing) = make_bundle(&project, &dir, "앱", "1.0.0", None, false).unwrap();
         assert_eq!(missing.len(), 1, "{missing:?}");
         assert!(bundle.manifest.models.is_empty());
         assert!(bundle.weights.is_empty());

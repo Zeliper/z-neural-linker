@@ -103,12 +103,20 @@ pub fn spawn_runner(
     pipeline: &Pipeline,
     base_dir: &Path,
     device: DevicePref,
+    arm_input: bool,
 ) -> anyhow::Result<RunnerHandle> {
-    // 배포 런타임은 사용자가 만든 앱이므로 마우스/키보드 싱크를 실제로 동작시킨다(빌더의 시험 실행은 기본 비무장).
+    // 마우스/키보드 싱크는 **번들이 명시적으로 허용했을 때만** 실제 입력을 보낸다
+    // (`BundleManifest::arm_input`, 기본 꺼짐). 받은 사람이 모르는 사이 커서가 움직이면 안 된다.
     let mut runner = Runner::new(project.clone(), pipeline.clone(), base_dir.to_path_buf(), device);
-    runner.arm_input = true;
+    runner.arm_input = arm_input;
     runner.start()
 }
+
+/// 상단 바 배지. 이 앱이 실제 마우스·키보드 입력을 보낼 수 있다는 표시.
+pub const ARM_INPUT_BADGE: &str = "⚠ 입력 무장";
+/// 무장 상태를 처음 알릴 때 쓰는 문장. 헤드리스와 GUI 가 같은 말을 쓴다.
+pub const ARM_INPUT_NOTICE: &str =
+    "이 앱은 마우스·키보드를 실제로 조작합니다 (빌드할 때 입력 무장을 켰습니다).";
 
 /// 헤드리스·GUI 로그가 같은 문장을 쓰도록 이벤트를 한 줄로 만든다.
 pub fn describe_event(ev: &RunnerEvent) -> String {
@@ -148,6 +156,8 @@ pub struct RuntimeApp {
     stats: Option<(f32, f32)>,
     /// 자동 업데이트. 번들에 주소가 없거나 `--no-update` 면 `None`.
     update: Option<UpdateUi>,
+    /// 입력 무장 안내를 이미 로그에 남겼는가 (시작/정지를 반복해도 한 번만).
+    warned_arm_input: bool,
 }
 
 impl RuntimeApp {
@@ -169,6 +179,7 @@ impl RuntimeApp {
             base_dir,
             stats: None,
             update: None,
+            warned_arm_input: false,
         };
         app.log(format!("{} {}", app.manifest.app_name, app.manifest.app_version));
         if app.manifest.autostart {
@@ -257,11 +268,17 @@ impl RuntimeApp {
             return;
         };
         let name = pipeline.name.clone();
-        match spawn_runner(&self.project, &pipeline, &self.base_dir, self.device) {
+        let arm = self.manifest.arm_input;
+        match spawn_runner(&self.project, &pipeline, &self.base_dir, self.device, arm) {
             Ok(handle) => {
                 self.runner = Some(handle);
                 self.errors = 0;
                 self.log(format!("파이프라인 시작: {name} ({})", self.device.label()));
+                // 무장은 처음 시작할 때 한 번만 알린다 (시작/정지를 반복해도 로그가 불어나지 않게).
+                if arm && !self.warned_arm_input {
+                    self.warned_arm_input = true;
+                    self.log(ARM_INPUT_NOTICE);
+                }
             }
             Err(e) => {
                 self.errors += 1;
@@ -507,6 +524,7 @@ impl RuntimeApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let running = self.is_running();
+        let armed = self.manifest.arm_input;
         let status = if running {
             match self.stats {
                 Some((hz, tick_ms)) => format!("실행 중 · {hz:.0}Hz · 틱당 {tick_ms:.1}ms"),
@@ -543,6 +561,11 @@ impl RuntimeApp {
                     });
                 ui.separator();
                 ui.label(&status);
+                if armed {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(0xE0, 0xA0, 0x30), ARM_INPUT_BADGE)
+                        .on_hover_text(ARM_INPUT_NOTICE);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     toggle_logs = ui.button("⚙").on_hover_text("로그 창").clicked();
                     if let Some(badge) = &badge {

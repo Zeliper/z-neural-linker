@@ -44,6 +44,12 @@ pub struct BundleManifest {
     /// 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
     #[serde(default)]
     pub auto_update: bool,
+    /// 배포 앱이 마우스·키보드 싱크로 **실제 입력을 보내도 되는지**. 기본은 꺼짐.
+    ///
+    /// 꺼져 있으면 `Sink::MouseKeyboard` 는 로그만 남긴다. 받은 사람이 모르는 사이 커서가 움직이는 일이
+    /// 없도록 빌더에서 명시적으로 켜야 한다 (`nl build --arm-input`, 빌드 뷰 체크박스).
+    #[serde(default)]
+    pub arm_input: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,6 +73,7 @@ impl BundleManifest {
             update_url: None,
             update_public_key: None,
             auto_update: false,
+            arm_input: false,
         }
     }
 }
@@ -138,6 +145,10 @@ pub struct BuildSpec {
     /// 배포 앱이 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
     #[serde(default)]
     pub auto_update: bool,
+    /// 배포 앱이 마우스·키보드 싱크로 실제 입력을 보내도 되는지. 기본은 꺼짐.
+    /// 그대로 `BundleManifest::arm_input` 으로 들어간다.
+    #[serde(default)]
+    pub arm_input: bool,
 }
 
 fn yes() -> bool {
@@ -163,6 +174,7 @@ impl Default for BuildSpec {
             update_url: None,
             update_public_key: None,
             auto_update: false,
+            arm_input: false,
         }
     }
 }
@@ -206,6 +218,42 @@ pub fn find_attached(exe: &[u8]) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arm_input_defaults_to_off_and_round_trips() {
+        let m = BundleManifest::new("내 앱", "1.2.3");
+        assert!(!m.arm_input, "기본은 입력 금지 — 받은 사람이 모르는 사이 커서가 움직이면 안 된다");
+
+        // 켜서 왕복.
+        let mut armed = m.clone();
+        armed.arm_input = true;
+        let back: BundleManifest = serde_json::from_str(&serde_json::to_string(&armed).unwrap()).unwrap();
+        assert_eq!(back, armed);
+        assert!(back.arm_input);
+
+        // 필드가 없는 옛 매니페스트는 꺼진 것으로 읽힌다.
+        let old = r#"{"format":1,"app_name":"옛 앱","app_version":"0.1.0"}"#;
+        let parsed: BundleManifest = serde_json::from_str(old).unwrap();
+        assert!(!parsed.arm_input, "옛 번들은 무장 없이 읽혀야 한다");
+    }
+
+    #[test]
+    fn build_spec_arm_input_defaults_to_off_and_round_trips() {
+        let spec = BuildSpec::default();
+        assert!(!spec.arm_input);
+        assert!(!BuildSpec::from_project(&crate::model::Project::new("p")).arm_input);
+
+        let mut armed = spec.clone();
+        armed.arm_input = true;
+        let back: BuildSpec = serde_json::from_str(&serde_json::to_string(&armed).unwrap()).unwrap();
+        assert_eq!(back, armed);
+        assert!(back.arm_input);
+
+        // 옛 프로젝트 파일에 필드가 없어도 읽힌다.
+        let old = r#"{"app_name":"앱","app_version":"0.1.0"}"#;
+        let parsed: BuildSpec = serde_json::from_str(old).unwrap();
+        assert!(!parsed.arm_input);
+    }
 
     #[test]
     fn update_fields_round_trip() {
