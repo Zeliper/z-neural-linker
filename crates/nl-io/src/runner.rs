@@ -9,6 +9,32 @@
 //! 4. 값을 낸 노드(소스·모델·로직)는 [`RunnerEvent::Value`] 로도 알린다. 싱크는 값을 소비만 하므로 제외한다.
 //! 5. `tick_hz` 로 정해진 주기가 될 때까지 잔다. 잠은 10ms 씩 끊어 자므로 [`RunnerHandle::stop`] 은 곧바로 먹는다.
 //!
+//! ## HTTP 서버로 보내는 값
+//! [`Source::HttpServer`] 는 `Content-Type` 을 보고 본문을 값으로 바꾼다.
+//!
+//! | Content-Type | 값 |
+//! |---|---|
+//! | `image/png`·`jpeg`·`webp`·`bmp` | [`Value::Image`] (디코드) |
+//! | `multipart/form-data` | 첫 파일 파트를 같은 규칙으로 |
+//! | 그 밖(텍스트·JSON) | [`Value::Json`] 이거나 [`Value::Text`] |
+//! | 본문 없음 | 쿼리스트링을 JSON 객체로 |
+//!
+//! `application/octet-stream` 은 무엇인지 알 수 없어 받지 않는다(400). 이미지를 보낼 때는 형식을 정확히 적는다.
+//!
+//! ```sh
+//! # 이진 이미지 하나
+//! curl --data-binary @a.png -H 'Content-Type: image/png' http://127.0.0.1:8799/infer
+//!
+//! # 폼 업로드 (첫 파일 파트를 쓴다)
+//! curl -F 'file=@a.png' http://127.0.0.1:8799/infer
+//!
+//! # 숫자 벡터
+//! curl -d '[0.8,-0.8]' http://127.0.0.1:8799/infer
+//! ```
+//!
+//! 되돌아오는 쪽도 값에 맞춘다. [`Sink::HttpReply`] 에 이미지가 그대로 오면 `image/png` 로, 로직을 거쳐
+//! 숫자가 됐으면 `application/json` 으로 답한다.
+//!
 //! ## 기동 순서
 //! 소스(HTTP 서버·WebSocket·stdin)를 **모델보다 먼저** 연다. `Session::load` 는 GPU 초기화 때문에 몇 초가
 //! 걸릴 수 있는데, 그 사이 포트가 닫혀 있으면 클라이언트는 "연결 거부" 를 본다. 먼저 열어 두면 포트는
@@ -262,6 +288,28 @@ fn respond_json(request: tiny_http::Request, status: u16, body: &str) -> Result<
     request.respond(response).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
 }
 
+/// 이미지 값을 PNG 로 답한다.
+fn respond_png(request: tiny_http::Request, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    let png = encode_png(width, height, rgba)?;
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..])
+        .map_err(|_| "Content-Type 헤더를 만들지 못했다".to_string())?;
+    let response = tiny_http::Response::from_data(png).with_status_code(200).with_header(header);
+    request.respond(response).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
+}
+
+/// RGBA8 → PNG 바이트.
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expect = width as usize * height as usize * 4;
+    if rgba.len() != expect {
+        return Err(format!("이미지 크기가 맞지 않는다: {width}x{height} 인데 {} 바이트", rgba.len()));
+    }
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| "RGBA 버퍼를 이미지로 만들지 못했다".to_string())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| format!("PNG 인코딩 실패: {e}"))?;
+    Ok(out.into_inner())
+}
+
 /// 서버 소켓을 열고 수신 스레드를 띄운다.
 fn start_http_server(bind: &str, path: &str) -> Result<HttpServerState, String> {
     let server = tiny_http::Server::http(bind)
@@ -343,20 +391,163 @@ fn http_server_loop(
             let _ = respond_json(request, 413, &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"));
             continue;
         }
-        let body = match String::from_utf8(buf) {
-            Ok(b) => b,
-            Err(_) => {
-                let _ = respond_json(request, 400, "본문이 UTF-8 이 아니다 (이 파이프라인은 텍스트·JSON 만 받는다)");
+        let content_type = header_value(&request, "content-type").unwrap_or_default();
+        let value = match body_to_value(&content_type, buf, &query) {
+            Ok(v) => v,
+            Err(msg) => {
+                let _ = respond_json(request, 400, &msg);
                 continue;
             }
         };
-
-        // 본문이 있으면 그것을, 없으면 쿼리스트링을 값으로 삼는다.
-        let value = if body.trim().is_empty() { query_to_value(&query) } else { text_to_value(&body) };
         if tx.send(HttpIncoming { value, request }).is_err() {
             // 틱 루프가 사라졌다. 더 받아도 답할 사람이 없다.
             break;
         }
+    }
+}
+
+/// 요청 헤더 하나를 소문자 이름으로 찾는다.
+fn header_value(request: &tiny_http::Request, name: &str) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_owned())
+}
+
+/// `image/png; charset=x` → `image/png`.
+fn mime_of(content_type: &str) -> String {
+    content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
+}
+
+/// `image` 크레이트로 디코드할 수 있는 MIME 인가.
+///
+/// 실제로 읽히는지는 디코더가 정한다 — 여기서는 "이진 이미지로 받겠다" 는 뜻만 가린다.
+/// (빌드된 feature 에 따라 png·jpeg 만 열릴 수 있다. webp·bmp 는 feature 가 없으면 디코드에서 400 이 난다.)
+fn is_image_mime(mime: &str) -> bool {
+    matches!(mime, "image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/bmp")
+}
+
+/// 요청 본문 → 파이프라인 값.
+///
+/// - `image/*` → [`image`] 로 디코드한 [`Value::Image`]
+/// - `multipart/form-data` → **첫 파일 파트**를 같은 규칙으로
+/// - 그 밖에는 UTF-8 텍스트로 읽어 JSON 이면 [`Value::Json`], 아니면 [`Value::Text`]
+/// - 본문이 비면 쿼리스트링을 JSON 객체로
+///
+/// `application/octet-stream` 은 무엇인지 알 수 없으므로 받지 않는다. 이미지를 보낼 때는
+/// `Content-Type` 을 정확히 적어야 한다.
+fn body_to_value(content_type: &str, body: Vec<u8>, query: &str) -> Result<Value, String> {
+    let mime = mime_of(content_type);
+
+    if is_image_mime(&mime) {
+        return decode_image(&body, &mime);
+    }
+
+    if mime == "multipart/form-data" {
+        let boundary = multipart_boundary(content_type)
+            .ok_or_else(|| "multipart/form-data 인데 boundary 가 없다".to_string())?;
+        let part = first_file_part(&body, &boundary)
+            .ok_or_else(|| "multipart 본문에서 파일 파트를 찾지 못했다 (filename 이 있는 파트가 필요하다)".to_string())?;
+        let part_mime = mime_of(&part.content_type);
+        if is_image_mime(&part_mime) || part.content_type.is_empty() {
+            // 파트에 Content-Type 이 없으면 확장자를 믿지 말고 내용으로 판단한다.
+            return decode_image(&part.body, if part_mime.is_empty() { "(추측)" } else { &part_mime });
+        }
+        return Err(format!("multipart 파일 파트의 형식을 다룰 수 없다: {}", part.content_type));
+    }
+
+    if mime == "application/octet-stream" {
+        return Err(
+            "application/octet-stream 은 받지 않는다. 이미지면 Content-Type 을 image/png 처럼 정확히 적어라".into(),
+        );
+    }
+
+    let text = String::from_utf8(body)
+        .map_err(|_| "본문이 UTF-8 이 아니다 (이미지면 Content-Type 을 image/png 처럼 적어라)".to_string())?;
+    Ok(if text.trim().is_empty() { query_to_value(query) } else { text_to_value(&text) })
+}
+
+/// 이진 이미지 → [`Value::Image`]. 형식은 내용으로 판단한다(헤더는 참고만).
+fn decode_image(bytes: &[u8], mime: &str) -> Result<Value, String> {
+    if bytes.is_empty() {
+        return Err(format!("{mime} 인데 본문이 비어 있다"));
+    }
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| format!("이미지를 읽지 못했다 ({mime}): {e}"))?;
+    let rgba = img.to_rgba8();
+    Ok(Value::Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
+}
+
+/// `multipart/form-data; boundary=----abc` → `----abc`. 따옴표는 벗긴다.
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    for part in content_type.split(';').skip(1) {
+        let (k, v) = part.split_once('=')?;
+        if k.trim().eq_ignore_ascii_case("boundary") {
+            return Some(v.trim().trim_matches('"').to_owned());
+        }
+    }
+    None
+}
+
+/// multipart 파트 하나 (필요한 것만).
+struct MultipartPart {
+    content_type: String,
+    body: Vec<u8>,
+}
+
+/// `filename=` 이 있는 **첫 파트**를 꺼낸다.
+///
+/// RFC 7578 의 전부를 다루지는 않는다 — 파일 하나를 올리는 흔한 형태만 본다.
+/// 파트 경계는 `--<boundary>` 이고, 머리와 몸은 빈 줄(CRLF CRLF)로 갈린다.
+fn first_file_part(body: &[u8], boundary: &str) -> Option<MultipartPart> {
+    let sep = format!("--{boundary}").into_bytes();
+    let mut start = find(body, &sep)?;
+    loop {
+        // 경계 뒤의 CRLF 를 지나면 파트 머리가 시작된다.
+        let after = start + sep.len();
+        if body[after..].starts_with(b"--") {
+            return None; // 마지막 경계.
+        }
+        let head_start = after + crlf_len(&body[after..]);
+        let head_end = find(&body[head_start..], b"\r\n\r\n")? + head_start;
+        let head = String::from_utf8_lossy(&body[head_start..head_end]).into_owned();
+        let part_body_start = head_end + 4;
+        let next = find(&body[part_body_start..], &sep).map(|i| i + part_body_start)?;
+        // 다음 경계 바로 앞의 CRLF 는 구분자라 본문이 아니다.
+        let part_body_end = next.saturating_sub(2);
+
+        let has_filename = head.to_ascii_lowercase().contains("filename=");
+        if has_filename {
+            let content_type = head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_owned())
+                .unwrap_or_default();
+            return Some(MultipartPart {
+                content_type,
+                body: body[part_body_start..part_body_end.max(part_body_start)].to_vec(),
+            });
+        }
+        start = next;
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn crlf_len(s: &[u8]) -> usize {
+    if s.starts_with(b"\r\n") {
+        2
+    } else if s.starts_with(b"\n") {
+        1
+    } else {
+        0
     }
 }
 
@@ -1527,7 +1718,12 @@ fn eval_sink(
                     "답할 HTTP 요청이 없다 (이미 시간 초과로 닫혔거나, HTTP 서버에서 온 값이 아니다)".into()
                 );
             };
-            respond_json(request, 200, &value_to_json(v).to_string())
+            // 이미지가 응답까지 그대로 왔으면 PNG 로 돌려준다 (JSON 에 픽셀을 실을 수는 없다).
+            // 중간에 로직을 거쳐 숫자가 됐으면 여느 값처럼 JSON 이다.
+            match v {
+                Value::Image { width, height, rgba } => respond_png(request, *width, *height, rgba),
+                other => respond_json(request, 200, &value_to_json(other).to_string()),
+            }
         }
 
         Sink::GuiWidget { widget } => {
@@ -2497,6 +2693,204 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 200);
 
         srv.shutdown();
+    }
+
+    // ── 이진 본문 ──
+
+    /// 작은 PNG 한 장을 바이트로.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x * 20) as u8, (y * 20) as u8, 0x40, 255])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn image_content_types_decode_to_image_values() {
+        let png = png_bytes(6, 4);
+        match body_to_value("image/png", png.clone(), "").unwrap() {
+            Value::Image { width, height, rgba } => {
+                assert_eq!((width, height), (6, 4));
+                assert_eq!(rgba.len(), 6 * 4 * 4);
+            }
+            other => panic!("이미지가 아니다: {other:?}"),
+        }
+        // 매개변수가 붙어도 형식만 본다.
+        assert!(matches!(
+            body_to_value("image/png; charset=binary", png.clone(), "").unwrap(),
+            Value::Image { .. }
+        ));
+        // 헤더가 jpeg 라고 해도 내용으로 판단한다 (PNG 가 들어오면 PNG 로 읽힌다).
+        assert!(matches!(body_to_value("image/jpeg", png, "").unwrap(), Value::Image { .. }));
+    }
+
+    #[test]
+    fn a_broken_image_is_a_clear_error() {
+        let err = body_to_value("image/png", b"not-a-png".to_vec(), "").unwrap_err();
+        assert!(err.contains("이미지를 읽지 못했다"), "{err}");
+        let empty = body_to_value("image/png", Vec::new(), "").unwrap_err();
+        assert!(empty.contains("비어 있다"), "{empty}");
+    }
+
+    #[test]
+    fn octet_stream_is_refused_with_advice() {
+        let err = body_to_value("application/octet-stream", vec![1, 2, 3], "").unwrap_err();
+        assert!(err.contains("image/png"), "형식을 적으라는 안내가 없다: {err}");
+    }
+
+    #[test]
+    fn non_utf8_text_bodies_point_at_the_content_type() {
+        let err = body_to_value("text/plain", vec![0xff, 0xfe, 0x00], "").unwrap_err();
+        assert!(err.contains("UTF-8"), "{err}");
+        assert!(err.contains("image/png"), "이미지 안내가 없다: {err}");
+    }
+
+    #[test]
+    fn text_and_query_bodies_still_work() {
+        assert_eq!(body_to_value("application/json", b"[1,2]".to_vec(), "").unwrap(), Value::Json(serde_json::json!([1, 2])));
+        assert_eq!(body_to_value("text/plain", "그냥 글".as_bytes().to_vec(), "").unwrap(), Value::Text("그냥 글".into()));
+        // 본문이 비면 쿼리스트링.
+        assert_eq!(body_to_value("", Vec::new(), "a=1").unwrap(), Value::Json(serde_json::json!({"a": "1"})));
+    }
+
+    #[test]
+    fn multipart_takes_the_first_file_part() {
+        let png = png_bytes(3, 2);
+        let boundary = "----nlTestBoundary";
+        let mut body = Vec::new();
+        // 파일이 아닌 파트를 먼저 둬서 건너뛰는지 본다.
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"note\"\r\n\r\n");
+        body.extend_from_slice(b"hello\r\n");
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n",
+        );
+        body.extend_from_slice(&png);
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        let ct = format!("multipart/form-data; boundary={boundary}");
+        match body_to_value(&ct, body, "").unwrap() {
+            Value::Image { width, height, .. } => assert_eq!((width, height), (3, 2)),
+            other => panic!("이미지가 아니다: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipart_without_a_file_part_is_an_error() {
+        let boundary = "b1";
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--b1\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n1\r\n--b1--\r\n");
+        let err = body_to_value("multipart/form-data; boundary=b1", body.clone(), "").unwrap_err();
+        assert!(err.contains("파일 파트"), "{err}");
+        // boundary 가 없으면 그 사실을 알린다.
+        let err2 = body_to_value("multipart/form-data", body, "").unwrap_err();
+        assert!(err2.contains("boundary"), "{err2}");
+        let _ = boundary;
+    }
+
+    #[test]
+    fn boundary_is_read_from_the_content_type() {
+        assert_eq!(multipart_boundary("multipart/form-data; boundary=abc").as_deref(), Some("abc"));
+        assert_eq!(multipart_boundary("multipart/form-data; boundary=\"a b\"").as_deref(), Some("a b"));
+        assert_eq!(multipart_boundary("multipart/form-data"), None);
+    }
+
+    #[test]
+    fn png_round_trips_through_the_encoder() {
+        let rgba: Vec<u8> = (0..(4 * 3 * 4)).map(|i| (i % 251) as u8).collect();
+        let png = encode_png(4, 3, &rgba).unwrap();
+        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']), "PNG 시그니처가 아니다");
+        let back = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (4, 3));
+        assert_eq!(back.into_raw(), rgba, "PNG 는 무손실이라 픽셀이 그대로여야 한다");
+        // 크기가 안 맞으면 패닉이 아니라 오류.
+        assert!(encode_png(4, 3, &[0; 10]).is_err());
+    }
+
+    /// 진짜 이진 POST 는 소켓으로 직접 보낸다 (`http::call` 은 텍스트 본문만 다룬다).
+    #[test]
+    fn a_binary_png_post_flows_through_and_returns_a_png() {
+        use std::io::Write as _;
+        let addr = free_addr();
+        let mut p = Pipeline::new("이미지 API");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpbin"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
+                .is_some(),
+            "준비 완료 로그가 오지 않았다"
+        );
+
+        let png = png_bytes(8, 5);
+        let mut sock = std::net::TcpStream::connect(&addr).expect("서버에 붙지 못했다");
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let head = format!(
+            "POST /infer HTTP/1.1\r\nHost: {addr}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            png.len()
+        );
+        sock.write_all(head.as_bytes()).unwrap();
+        sock.write_all(&png).unwrap();
+        sock.flush().unwrap();
+
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).expect("응답을 읽지 못했다");
+        let split = find(&raw, b"\r\n\r\n").expect("응답 머리와 몸을 가를 수 없다");
+        let head_text = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let body = &raw[split + 4..];
+
+        assert!(head_text.starts_with("HTTP/1.1 200"), "응답 머리: {head_text}");
+        assert!(head_text.to_ascii_lowercase().contains("content-type: image/png"), "응답 머리: {head_text}");
+        let back = image::load_from_memory(body).expect("응답이 PNG 가 아니다");
+        assert_eq!((back.width(), back.height()), (8, 5), "돌아온 이미지 크기가 다르다");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 로직을 거쳐도 이미지는 이미지다 — 디바운스는 값을 바꾸지 않으므로 응답은 여전히 PNG 다.
+    /// (이미지를 숫자로 바꾸는 로직은 아직 없다. 그런 것이 생기면 응답이 JSON 으로 바뀌어야 한다.)
+    #[test]
+    fn an_image_through_a_logic_node_is_still_a_png() {
+        use std::io::Write as _;
+        let addr = free_addr();
+        let mut p = Pipeline::new("이미지 → 로직");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let logic = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Debounce { ms: 0 } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [2.0, 0.0]));
+        p.add_link(server, logic).unwrap();
+        p.add_link(logic, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpimg2"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+        assert!(wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))).is_some());
+
+        let png = png_bytes(4, 4);
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let head = format!(
+            "POST /infer HTTP/1.1\r\nHost: {addr}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            png.len()
+        );
+        sock.write_all(head.as_bytes()).unwrap();
+        sock.write_all(&png).unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).unwrap();
+        let head_text = String::from_utf8_lossy(&raw).into_owned();
+        assert!(head_text.starts_with("HTTP/1.1 200"), "{head_text}");
+        assert!(head_text.to_ascii_lowercase().contains("image/png"), "{}", &head_text[..head_text.len().min(300)]);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
     }
 
     #[test]
