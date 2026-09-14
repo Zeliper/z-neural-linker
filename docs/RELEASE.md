@@ -75,7 +75,27 @@ cargo run -p nl-update --example nl-keygen -- verify <직전 릴리스의 latest
 직전 매니페스트가 지금 키로 검증되면 키가 바뀌지 않은 것이다. 키를 바꿔야 한다면
 아래 "키를 잃어버렸을 때" 를 먼저 읽는다.
 
-### ③ 태그
+### ③ 로컬 드라이런 (선택)
+
+태그를 밀기 전에 CI 가 무엇을 내놓을지 여기서 먼저 본다. `release.yml` 과 같은 함수
+(`packaging/lib.sh`)를 쓰므로 결과가 어긋나지 않는다.
+
+```sh
+packaging/release-local.sh --crates nl-runtime,nl-cli --out /tmp/dist-local
+```
+
+`--key` 를 주지 않으면 **임시 키**로 서명하고 검증까지 해 본다(형식 확인용, 배포용 아님).
+진짜 키로 보려면 `--key packaging/keys/neural-linker.key`, CI 와 같은 방식으로 보려면
+`MINISIGN_KEY=... --key env`.
+
+| 옵션 | 뜻 |
+| --- | --- |
+| `--crates` | 빌드할 크레이트 (기본 `nl-app,nl-runtime,nl-cli`) |
+| `--targets` | `linux`, `windows` (기본 둘 다) |
+| `--installer` | Inno Setup 이 있으면 Windows setup.exe 도 만든다 (CI 에는 없는 단계) |
+| `--skip-build` | 이미 빌드된 산출물을 그대로 포장한다 |
+
+### ④ 태그
 
 ```sh
 git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
@@ -84,7 +104,7 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 태그 없이 시험만 하려면 Actions 에서 `workflow_dispatch` 로 돌린다 — 빌드와 서명은 하고
 릴리스 첨부만 건너뛴다.
 
-### ④ CI 산출물 확인
+### ⑤ CI 산출물 확인
 
 릴리스에 아래가 다 붙었는지 본다. 하나라도 빠지면 그 플랫폼 사용자는 업데이트를 받지 못한다.
 
@@ -98,7 +118,7 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 
 `.minisig` 가 없으면 `MINISIGN_KEY` 시크릿이 빠진 것이다. 그대로 올리면 안 된다.
 
-### ⑤ 서명 검증
+### ⑥ 서명 검증
 
 CI 에도 검증 단계가 있지만(`UPDATE_PUBLIC_KEY` 변수가 있을 때), 올리기 전에 손으로 한 번 더 본다.
 
@@ -117,7 +137,7 @@ cargo run -p nl-update --example nl-keygen -- verify runtimes/latest.json --pubk
 - 자산 `url` 이 https 이고 매니페스트와 같은 오리진인가
 - 자산마다 `sha256` 과 `size` 가 있는가
 
-### ⑥ 배포 서버 업로드
+### ⑦ 배포 서버 업로드
 
 자산과 매니페스트를 같은 곳에 올린다. **매니페스트와 서명을 마지막에, 같이 올린다** —
 자산보다 먼저 올리면 그 사이에 확인한 사용자가 404 를 만난다.
@@ -134,7 +154,7 @@ cargo run -p nl-update --example nl-keygen -- verify runtimes/latest.json --pubk
 curl -sSfI <base>/latest.json && curl -sSfI <base>/latest.json.minisig
 ```
 
-### ⑦ 빌더에서 업데이트 확인
+### ⑧ 빌더에서 업데이트 확인
 
 직전 버전 빌더를 실행해 새 버전 배지가 뜨는지, 내려받아 적용되는지, 다시 뜬 앱의 `--version` 이
 새 버전인지 본다.
@@ -146,7 +166,7 @@ curl -sSfI <base>/latest.json && curl -sSfI <base>/latest.json.minisig
 시험 서버로 돌려 보려면 `NL_UPDATE_URL` 과 `NL_UPDATE_INSECURE=1` 을 함께 켠다.
 루프백 http 로 띄웠다면 `NL_ALLOW_HTTP=1` 도 필요하다.
 
-### ⑧ 배포 앱 종단 확인
+### ⑨ 배포 앱 종단 확인
 
 새 빌더로 `.nlapp` 을 하나 만들어(입력 무장은 끄고) 배포 앱까지 돈다.
 

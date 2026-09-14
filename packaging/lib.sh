@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# 릴리스 단계의 공통 함수. CI(`.github/workflows/release.yml`)와 로컬 스크립트
+# (`packaging/release-local.sh`)가 같은 코드를 쓰도록 여기에 모은다.
+#
+#   source packaging/lib.sh
+#
+# 이 파일은 `set -euo pipefail` 을 스스로 켜지 않는다 — 부르는 쪽이 정한다.
+
+# 저장소 뿌리. 이 파일이 `packaging/` 안에 있다는 것만 가정한다.
+NL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export NL_ROOT
+
+nl_log()  { printf '\033[1;34m▸\033[0m %s\n' "$*" >&2; }
+nl_warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
+nl_die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+# 워크스페이스 버전. `[workspace.package] version` 첫 줄을 읽는다.
+nl_workspace_version() {
+  sed -n 's/^version = "\(.*\)"$/\1/p' "$NL_ROOT/Cargo.toml" | head -1
+}
+
+# 태그가 있으면 태그 버전, 없으면 워크스페이스 버전. CI 의 "버전 확인" 단계와 같은 규칙이다.
+#   nl_release_version "$GITHUB_REF"
+nl_release_version() {
+  local ref="${1:-}"
+  if [[ "$ref" == refs/tags/v* ]]; then
+    printf '%s\n' "${ref#refs/tags/v}"
+  else
+    nl_workspace_version
+  fi
+}
+
+# 아직 없는 파일도 절대 경로로 바꾼다. `cd` 하는 함수에 상대 경로를 넘겨도 엉뚱한 곳에 쓰지 않게.
+nl_abs() {
+  local p="$1"
+  case "$p" in
+    /*) printf '%s\n' "$p" ;;
+    *)  printf '%s/%s\n' "$(pwd)" "$p" ;;
+  esac
+}
+
+# 크레이트가 내놓는 실행 파일 이름들. **크레이트 이름과 다를 수 있다** — `nl-cli` 는 `nl` 을 만든다.
+# 이름을 짐작하지 말고 cargo 에게 묻는다.
+#   nl_bin_names nl-cli   → nl
+nl_bin_names() {
+  local crate="$1"
+  cargo metadata --no-deps --format-version 1 --manifest-path "$NL_ROOT/Cargo.toml" 2>/dev/null |
+    python3 -c '
+import json, sys
+want = sys.argv[1]
+meta = json.load(sys.stdin)
+for pkg in meta["packages"]:
+    if pkg["name"] != want:
+        continue
+    for t in pkg["targets"]:
+        if "bin" in t["kind"]:
+            print(t["name"])
+' "$crate"
+}
+
+# 파일 크기(바이트)와 sha256. 산출물 표와 매니페스트가 같은 값을 쓰게 한다.
+nl_size()   { stat -c %s "$1"; }
+nl_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+
+# ── 아카이브 ──────────────────────────────────────────────────────────
+
+# Linux tar.gz. install.sh 가 기대하는 배치 그대로 담는다.
+#   nl_pack_linux <출력 tar.gz> <스테이징 부모> <바이너리...>
+nl_pack_linux() {
+  local out parent
+  out="$(nl_abs "$1")"; parent="$(nl_abs "$2")"; shift 2
+  local stage="$parent/neural-linker"
+  rm -rf "$stage"; mkdir -p "$stage"
+  cp "$@" "$stage/"
+  cp "$NL_ROOT/packaging/linux/install.sh" \
+     "$NL_ROOT/packaging/linux/neural-linker.desktop" \
+     "$NL_ROOT/packaging/linux/neural-linker-mime.xml" "$stage/"
+  tar -czf "$out" -C "$parent" neural-linker
+  rm -rf "$stage"
+}
+
+# Windows zip. 설치 프로그램 없이 풀어 쓰는 묶음이다.
+#   nl_pack_windows <출력 zip> <스테이징 부모> <exe...>
+nl_pack_windows() {
+  local out parent
+  out="$(nl_abs "$1")"; parent="$(nl_abs "$2")"; shift 2
+  local stage="$parent/win"
+  rm -rf "$stage"; mkdir -p "$stage"
+  cp "$@" "$stage/"
+  ( cd "$stage" && zip -q -r "$out" . )
+  rm -rf "$stage"
+}
+
+# ── 매니페스트 ────────────────────────────────────────────────────────
+
+# 빌더 자체 업데이트 매니페스트. `make-manifest.sh` 는 자기가 있는 폴더에 latest.json 을 쓴다.
+#   nl_make_app_manifest <버전> <자산 기본 URL> <출력 파일> <자산...>
+nl_make_app_manifest() {
+  local version="$1" base="$2" out
+  out="$(nl_abs "$3")"; shift 3
+  local args=()
+  for f in "$@"; do args+=("$(realpath "$f")"); done
+  ( cd "$NL_ROOT/packaging" && NOTES="${NOTES:-$version 릴리스}" ./make-manifest.sh "$version" "$base" "${args[@]}" >/dev/null )
+  mkdir -p "$(dirname "$out")"
+  mv "$NL_ROOT/packaging/latest.json" "$out"
+  # 서명이 함께 만들어졌다면 같이 옮긴다.
+  [[ -f "$NL_ROOT/packaging/latest.json.minisig" ]] && mv "$NL_ROOT/packaging/latest.json.minisig" "$out.minisig"
+  return 0
+}
+
+# 빌더가 대상별 런타임을 받아 오는 매니페스트.
+#   nl_make_runtimes_manifest <버전> <자산 기본 URL> <출력 파일> <대상키=파일...>
+nl_make_runtimes_manifest() {
+  local version="$1" base="$2" out
+  out="$(nl_abs "$3")"; shift 3
+  python3 "$NL_ROOT/packaging/make-runtimes-manifest.py" "$version" "$base" "$out" "$@" >/dev/null
+}
+
+# ── 서명·검증 ─────────────────────────────────────────────────────────
+
+# nl-keygen 예제 도구. minisign CLI 는 쓰지 않는다.
+nl_keygen() {
+  cargo run -q --manifest-path "$NL_ROOT/Cargo.toml" -p nl-update --example nl-keygen -- "$@"
+}
+
+# 매니페스트 서명. 키는 경로이거나 MINISIGN_KEY 환경 변수의 내용이다.
+#   nl_sign <파일> [키 경로]
+nl_sign() {
+  local f="$1" key="${2:-}"
+  if [[ -n "$key" && -f "$key" ]]; then
+    nl_keygen sign "$f" --key "$key"
+  else
+    nl_keygen sign "$f"
+  fi
+}
+
+# 서명 검증. 배포 앱이 쓰는 nl_update::verify_manifest 를 그대로 부른다.
+#   nl_verify <파일> <공개키 base64 또는 .pub 경로>
+nl_verify() {
+  nl_keygen verify "$1" --pubkey "$2"
+}
+
+# ── 산출물 표 ─────────────────────────────────────────────────────────
+
+# 폴더 아래 모든 파일을 경로·크기·sha256 으로 찍는다.
+#   nl_artifact_table <폴더>
+nl_artifact_table() {
+  local dir
+  dir="$(nl_abs "$1")"
+  printf '%-52s %12s  %s\n' "파일" "크기(바이트)" "sha256"
+  printf '%-52s %12s  %s\n' "----" "------------" "------"
+  while IFS= read -r f; do
+    printf '%-52s %12s  %s\n' "${f#"$dir"/}" "$(nl_size "$f")" "$(nl_sha256 "$f")"
+  done < <(find "$dir" -type f | sort)
+}

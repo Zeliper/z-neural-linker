@@ -57,12 +57,9 @@ jobs:
       - name: 버전 확인
         id: version
         run: |
-          # 태그(v0.2.0)가 있으면 그것을, 손으로 돌렸으면 워크스페이스 버전을 쓴다.
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-          fi
+          # 규칙은 packaging/lib.sh 에 있다 — 로컬 스크립트(release-local.sh)도 같은 함수를 쓴다.
+          source packaging/lib.sh
+          VERSION="$(nl_release_version "${GITHUB_REF:-}")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "버전: $VERSION"
 
@@ -78,35 +75,20 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          source packaging/lib.sh
           LIN=target/release
           WIN="target/$WINDOWS_TARGET/release"
-          OUT=dist
+          OUT="$PWD/dist"
           mkdir -p "$OUT"
 
-          # ── Linux: install.sh 가 기대하는 배치 그대로 담는다 ──
-          STAGE="$OUT/neural-linker"
-          mkdir -p "$STAGE"
-          cp "$LIN/nl-app" "$LIN/nl-runtime" "$STAGE/"
-          cp packaging/linux/install.sh packaging/linux/neural-linker.desktop \
-             packaging/linux/neural-linker-mime.xml "$STAGE/"
-          # install.sh 는 인자로 바이너리 경로를 받는다. 풀어 놓은 자리에서 바로 되도록 기본값을 옆으로 맞춘다.
-          tar -czf "$OUT/neural-linker-$VERSION-linux-x86_64.tar.gz" -C "$OUT" neural-linker
-          rm -rf "$STAGE"
-
-          # ── Windows: 설치 프로그램 없이 풀어 쓰는 zip ──
-          STAGE="$OUT/win"
-          mkdir -p "$STAGE"
-          cp "$WIN/nl-app.exe" "$WIN/nl-runtime.exe" "$STAGE/"
-          (cd "$STAGE" && zip -q -r "../neural-linker-$VERSION-windows-x86_64.zip" .)
-          rm -rf "$STAGE"
+          # 포장 규칙은 packaging/lib.sh 에 있다 — 로컬 스크립트도 같은 함수를 쓴다.
+          nl_pack_linux   "$OUT/neural-linker-$VERSION-linux-x86_64.tar.gz"   "$OUT" "$LIN/nl-app" "$LIN/nl-runtime"
+          nl_pack_windows "$OUT/neural-linker-$VERSION-windows-x86_64.zip" "$OUT" "$WIN/nl-app.exe" "$WIN/nl-runtime.exe"
 
           # ── 자동 업데이트가 그대로 내려받는 알맹이 ──
-          cp "$LIN/nl-app" "$OUT/nl-app"
-          cp "$LIN/nl-runtime" "$OUT/nl-runtime"
-          cp "$WIN/nl-app.exe" "$OUT/nl-app.exe"
-          cp "$WIN/nl-runtime.exe" "$OUT/nl-runtime.exe"
+          cp "$LIN/nl-app" "$LIN/nl-runtime" "$WIN/nl-app.exe" "$WIN/nl-runtime.exe" "$OUT/"
 
-          ls -la "$OUT"
+          nl_artifact_table "$OUT"
 
       - name: 매니페스트 만들기
         env:
@@ -114,20 +96,18 @@ jobs:
           BASE_URL: ${{ vars.UPDATE_BASE_URL || 'https://updates.trustanc.dev/neural-linker' }}
         run: |
           set -euo pipefail
-          OUT=dist
-          APP_BASE="$BASE_URL/$VERSION"
+          source packaging/lib.sh
+          OUT="$PWD/dist"
 
           # ── 빌더 자체 업데이트 (latest.json) ──
           # make-manifest.sh 는 파일 이름으로 대상을 정한다: *.exe → windows-x86_64(installer), 그 밖 → linux-x86_64(binary).
           # Windows 쪽은 Inno Setup 설치 프로그램이라야 kind=installer 가 맞는데 러너에 Inno Setup 이 없다.
           # 그래서 지금은 Linux 자산만 넣는다 — Windows 사용자는 zip 을 받아 덮어쓴다.
-          (cd packaging && NOTES="${VERSION} 릴리스" ./make-manifest.sh "$VERSION" "$APP_BASE" "../$OUT/nl-app")
-          mv packaging/latest.json "$OUT/latest.json"
+          NOTES="$VERSION 릴리스" nl_make_app_manifest "$VERSION" "$BASE_URL/$VERSION" "$OUT/latest.json" "$OUT/nl-app"
 
           # ── 빌더가 받아 오는 대상별 런타임 (runtimes/latest.json) ──
           # 형식은 nl_bundle::manifest::write_manifest 와 같다 (nl_update::Manifest).
-          python3 packaging/make-runtimes-manifest.py \
-            "$VERSION" "$BASE_URL/$VERSION/runtimes" "$OUT/runtimes/latest.json" \
+          nl_make_runtimes_manifest "$VERSION" "$BASE_URL/$VERSION/runtimes" "$OUT/runtimes/latest.json" \
             "linux-x86_64=$OUT/nl-runtime" \
             "windows-x86_64=$OUT/nl-runtime.exe"
 
@@ -135,11 +115,12 @@ jobs:
         if: env.MINISIGN_KEY != ''
         run: |
           set -euo pipefail
+          source packaging/lib.sh
           # minisign CLI 를 깔지 않는다 — nl-update 의 예제 도구가 같은 형식을 만든다.
           # 비밀키는 MINISIGN_KEY 환경 변수로만 건네고 디스크에 쓰지 않는다.
           # 비밀번호 없는 키(minisign -G -W 와 같은 것)여야 한다 — CI 는 대화형 입력을 받을 수 없다.
           for f in dist/latest.json dist/runtimes/latest.json; do
-            cargo run -q -p nl-update --example nl-keygen -- sign "$f"
+            [[ -f "$f.minisig" ]] || nl_sign "$f"
           done
 
       - name: 서명 검증 (배포 앱과 같은 코드로)
@@ -148,10 +129,11 @@ jobs:
           UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
+          source packaging/lib.sh
           # 올리기 전에 여기서 막는다. 이 검증은 nl_update::verify_manifest 를 그대로 부른다 —
           # 통과하면 사용자의 앱에서도 통과한다.
           for f in dist/latest.json dist/runtimes/latest.json; do
-            cargo run -q -p nl-update --example nl-keygen -- verify "$f" --pubkey "$UPDATE_PUBLIC_KEY"
+            nl_verify "$f" "$UPDATE_PUBLIC_KEY"
           done
 
       - name: 산출물 보관
