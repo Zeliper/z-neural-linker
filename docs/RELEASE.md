@@ -59,8 +59,13 @@ pub const UPDATE_URL: &str = "https://updates.trustanc.dev/neural-linker/latest.
 워크스페이스 `Cargo.toml` 의 `[workspace.package] version` 하나만 고치면 전 크레이트가 따라간다.
 
 ```sh
-cargo test --workspace && cargo clippy --workspace --all-targets
+scripts/verify-all.sh          # 포맷·클리피·테스트·릴리스 빌드·종단 시험
+scripts/verify-all.sh --gui    # 위 + 헤드리스 sway 시나리오(smoke·startup)
 ```
+
+한 단계가 실패해도 끝까지 돌고 마지막에 실패 목록과 로그 경로를 낸다 — 릴리스 직전에 알아야 할 것은
+"무엇이 처음 깨졌나" 가 아니라 "무엇무엇이 깨져 있나" 다. 첫 실패에서 멈추려면 `--fail-fast`.
+로그는 `dist-local/verify/<시각>/` 아래에 단계별로 남는다.
 
 ### ② CHANGELOG 갱신
 
