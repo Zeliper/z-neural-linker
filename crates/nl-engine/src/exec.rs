@@ -35,7 +35,10 @@ pub enum DynTensor<B: Backend> {
 }
 
 // DynTensor 는 R1..R5 만 담는다. nl-core 의 상한이 바뀌면 여기도 함께 바꿔야 한다.
-const _: () = assert!(MAX_RANK == 5, "DynTensor 의 변형 수와 nl_core::shape::MAX_RANK 가 어긋납니다");
+const _: () = assert!(
+    MAX_RANK == 5,
+    "DynTensor 의 변형 수와 nl_core::shape::MAX_RANK 가 어긋납니다"
+);
 
 /// 랭크별 단형화를 한 곳에 모으는 매크로 — 단항 연산.
 macro_rules! map_t {
@@ -73,7 +76,6 @@ macro_rules! zip_t {
         }
     };
 }
-
 
 impl<B: Backend> DynTensor<B> {
     pub fn rank(&self) -> usize {
@@ -145,7 +147,11 @@ impl<B: Backend> DynTensor<B> {
             bail!("narrow dim {dim} 이 랭크 {} 밖", dims.len());
         }
         if start + len > dims[dim] {
-            bail!("narrow 범위 [{start}, {}) 가 차원 {dim} 크기 {} 를 넘습니다", start + len, dims[dim]);
+            bail!(
+                "narrow 범위 [{start}, {}) 가 차원 {dim} 크기 {} 를 넘습니다",
+                start + len,
+                dims[dim]
+            );
         }
         Ok(map_t!(self, |t| t.narrow(dim, start, len)))
     }
@@ -397,11 +403,19 @@ impl<B: Backend> Model<B> {
     }
     /// 입력 노드별 샘플 형상 (배치 제외), `input_nodes()` 순서.
     pub fn input_sample_shapes(&self) -> Vec<Vec<usize>> {
-        self.input_nodes.iter().filter_map(|id| self.report.shape(*id)).map(|s| s.sample()).collect()
+        self.input_nodes
+            .iter()
+            .filter_map(|id| self.report.shape(*id))
+            .map(|s| s.sample())
+            .collect()
     }
     /// 출력 노드별 샘플 형상 (배치 제외), `output_nodes()` 순서.
     pub fn output_sample_shapes(&self) -> Vec<Vec<usize>> {
-        self.output_nodes.iter().filter_map(|id| self.report.shape(*id)).map(|s| s.sample()).collect()
+        self.output_nodes
+            .iter()
+            .filter_map(|id| self.report.shape(*id))
+            .map(|s| s.sample())
+            .collect()
     }
     pub fn trainable_names(&self) -> Vec<String> {
         self.trainable.iter().cloned().collect()
@@ -414,7 +428,11 @@ impl<B: Backend> Model<B> {
     }
     /// 학습 대상 파라미터의 원소 수 합.
     pub fn trainable_count(&self) -> usize {
-        self.trainable.iter().filter_map(|n| self.params.get(n)).map(|t| t.numel()).sum()
+        self.trainable
+            .iter()
+            .filter_map(|n| self.params.get(n))
+            .map(|t| t.numel())
+            .sum()
     }
 
     /// 모든 파라미터를 호스트 텐서로 (safetensors 저장용).
@@ -434,12 +452,21 @@ impl<B: Backend> Model<B> {
                 if extra.len() > shown.len() { " …" } else { "" }
             );
         }
-        for (name, want) in self.params.iter().map(|(k, v)| (k.clone(), v.dims())).collect::<Vec<_>>() {
+        for (name, want) in self
+            .params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.dims()))
+            .collect::<Vec<_>>()
+        {
             let got = map
                 .get(&name)
                 .with_context(|| format!("체크포인트에 파라미터 '{name}' 이 없습니다"))?;
             if got.shape != want {
-                bail!("파라미터 '{name}' 형상 불일치: 체크포인트 {:?} vs 모델 {:?}", got.shape, want);
+                bail!(
+                    "파라미터 '{name}' 형상 불일치: 체크포인트 {:?} vs 모델 {:?}",
+                    got.shape,
+                    want
+                );
             }
             let t = DynTensor::from_host(got, &self.device)?;
             self.params.insert(name, t);
@@ -492,7 +519,12 @@ impl<B: Backend> Model<B> {
                         self.insert_trainable(param_name(id, P_BIAS), b);
                     }
                 }
-                LayerKind::Conv2d { out_channels, kernel, bias, .. } => {
+                LayerKind::Conv2d {
+                    out_channels,
+                    kernel,
+                    bias,
+                    ..
+                } => {
                     let s = self.in_shape(id, 0)?;
                     if s.len() != 3 {
                         bail!("Conv2d 입력은 [C, H, W] 여야 합니다 (지금 {s:?})");
@@ -551,7 +583,11 @@ impl<B: Backend> Model<B> {
     /// `train` 이 true 면 Dropout 이 걸리고 BatchNorm 이 배치 통계를 쓰며 running 통계를 갱신한다.
     pub fn forward(&mut self, inputs: Vec<DynTensor<B>>, train: bool) -> Result<Vec<DynTensor<B>>> {
         if inputs.len() != self.input_nodes.len() {
-            bail!("입력 텐서 {} 개가 필요한데 {} 개를 받았습니다", self.input_nodes.len(), inputs.len());
+            bail!(
+                "입력 텐서 {} 개가 필요한데 {} 개를 받았습니다",
+                self.input_nodes.len(),
+                inputs.len()
+            );
         }
         let mut slot: BTreeMap<NodeId, DynTensor<B>> = BTreeMap::new();
         for (id, t) in self.input_nodes.iter().zip(inputs) {
@@ -579,7 +615,11 @@ impl<B: Backend> Model<B> {
             let mut ins = Vec::with_capacity(n_in);
             for s in 0..n_in {
                 let from = *sources.get(&s).with_context(|| format!("입력 {s} 가 비어 있음"))?;
-                ins.push(slot.get(&from).cloned().with_context(|| format!("노드 {from} 의 값이 없음"))?);
+                ins.push(
+                    slot.get(&from)
+                        .cloned()
+                        .with_context(|| format!("노드 {from} 의 값이 없음"))?,
+                );
             }
             let out = self
                 .apply(id, &kind, ins, train)
@@ -589,7 +629,11 @@ impl<B: Backend> Model<B> {
 
         self.output_nodes
             .iter()
-            .map(|id| slot.get(id).cloned().with_context(|| format!("출력 노드 {id} 의 값이 없음")))
+            .map(|id| {
+                slot.get(id)
+                    .cloned()
+                    .with_context(|| format!("출력 노드 {id} 의 값이 없음"))
+            })
             .collect()
     }
 
@@ -605,26 +649,50 @@ impl<B: Backend> Model<B> {
 
             LayerKind::Linear { bias, .. } => {
                 let w = self.p(id, P_WEIGHT)?.into_r2()?;
-                let b = if *bias { Some(self.p(id, P_BIAS)?.into_r1()?) } else { None };
+                let b = if *bias {
+                    Some(self.p(id, P_BIAS)?.into_r1()?)
+                } else {
+                    None
+                };
                 Ok(map_t!(x()?, |t| module::linear(t, w.clone(), b.clone())))
             }
 
-            LayerKind::Conv2d { stride, padding, bias, .. } => {
+            LayerKind::Conv2d {
+                stride, padding, bias, ..
+            } => {
                 let t = x()?.into_r4()?;
                 let w = self.p(id, P_WEIGHT)?.into_r4()?;
-                let b = if *bias { Some(self.p(id, P_BIAS)?.into_r1()?) } else { None };
+                let b = if *bias {
+                    Some(self.p(id, P_BIAS)?.into_r1()?)
+                } else {
+                    None
+                };
                 let opt = ConvOptions::new(*stride, *padding, [1, 1], 1);
                 Ok(DynTensor::R4(module::conv2d(t, w, b, opt)))
             }
 
             LayerKind::MaxPool2d { kernel, stride } => {
                 let t = x()?.into_r4()?;
-                Ok(DynTensor::R4(module::max_pool2d(t, *kernel, *stride, [0, 0], [1, 1], false)))
+                Ok(DynTensor::R4(module::max_pool2d(
+                    t,
+                    *kernel,
+                    *stride,
+                    [0, 0],
+                    [1, 1],
+                    false,
+                )))
             }
 
             LayerKind::AvgPool2d { kernel, stride } => {
                 let t = x()?.into_r4()?;
-                Ok(DynTensor::R4(module::avg_pool2d(t, *kernel, *stride, [0, 0], true, false)))
+                Ok(DynTensor::R4(module::avg_pool2d(
+                    t,
+                    *kernel,
+                    *stride,
+                    [0, 0],
+                    true,
+                    false,
+                )))
             }
 
             LayerKind::GlobalAvgPool => {
@@ -787,26 +855,34 @@ fn batch_norm<B: Backend>(
         let v_flat = var.clone().detach().reshape(&[c])?.mul_scalar(unbiased);
         // running 통계는 학습 대상이 아니다. require_grad 가 걸린 적이 없어 현재 백엔드에서는
         // 노드가 생기지 않지만, 백엔드 동작에 기대지 않도록 명시적으로 떼어 둔다.
-        let new_mean = running_mean.detach().mul_scalar(1.0 - mom).try_add(m_flat.mul_scalar(mom))?.detach();
-        let new_var = running_var.detach().mul_scalar(1.0 - mom).try_add(v_flat.mul_scalar(mom))?.detach();
-        (centered.try_div(var.add_scalar(eps as f64).sqrt())?, Some((new_mean, new_var)))
+        let new_mean = running_mean
+            .detach()
+            .mul_scalar(1.0 - mom)
+            .try_add(m_flat.mul_scalar(mom))?
+            .detach();
+        let new_var = running_var
+            .detach()
+            .mul_scalar(1.0 - mom)
+            .try_add(v_flat.mul_scalar(mom))?
+            .detach();
+        (
+            centered.try_div(var.add_scalar(eps as f64).sqrt())?,
+            Some((new_mean, new_var)),
+        )
     } else {
         let mean = running_mean.reshape(&pshape)?;
         let var = running_var.reshape(&pshape)?;
         (x.try_sub(mean)?.try_div(var.add_scalar(eps as f64).sqrt())?, None)
     };
 
-    let y = normed.try_mul(gamma.reshape(&pshape)?)?.try_add(beta.reshape(&pshape)?)?;
+    let y = normed
+        .try_mul(gamma.reshape(&pshape)?)?
+        .try_add(beta.reshape(&pshape)?)?;
     Ok((y, updated))
 }
 
 /// 마지막 차원 기준 레이어 정규화.
-fn layer_norm<B: Backend>(
-    x: DynTensor<B>,
-    gamma: DynTensor<B>,
-    beta: DynTensor<B>,
-    eps: f32,
-) -> Result<DynTensor<B>> {
+fn layer_norm<B: Backend>(x: DynTensor<B>, gamma: DynTensor<B>, beta: DynTensor<B>, eps: f32) -> Result<DynTensor<B>> {
     let dims = x.dims();
     let rank = dims.len();
     let last = rank - 1;
@@ -828,12 +904,24 @@ fn layer_norm<B: Backend>(
 /// 실행을 막는 진짜 원인이 아닌데, id 순으로 아무거나 고르면 그런 노드가 지목되곤 했다.
 fn describe_graph_errors(graph: &Graph, report: &ShapeReport) -> String {
     let contributing = contributing_nodes(graph);
-    let name_of = |id: &NodeId| graph.nodes.get(id).map(|n| n.display_name()).unwrap_or_else(|| "?".into());
+    let name_of = |id: &NodeId| {
+        graph
+            .nodes
+            .get(id)
+            .map(|n| n.display_name())
+            .unwrap_or_else(|| "?".into())
+    };
 
     let mut rows: Vec<(bool, NodeId, String)> = report
         .errors
         .iter()
-        .map(|(id, e)| (!contributing.contains(id), *id, format!("레이어 '{}': {e}", name_of(id))))
+        .map(|(id, e)| {
+            (
+                !contributing.contains(id),
+                *id,
+                format!("레이어 '{}': {e}", name_of(id)),
+            )
+        })
         .collect();
     // 출력에 기여하는 노드가 앞, 그다음 id 순 (결정적).
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));

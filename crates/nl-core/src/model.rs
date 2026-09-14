@@ -57,7 +57,11 @@ pub struct ProjectSettings {
 
 impl Default for ProjectSettings {
     fn default() -> Self {
-        Self { default_device: DevicePref::Auto, runs_dir: None, build: None }
+        Self {
+            default_device: DevicePref::Auto,
+            runs_dir: None,
+            build: None,
+        }
     }
 }
 
@@ -143,7 +147,12 @@ pub struct Node {
 
 impl Node {
     pub fn new(kind: LayerKind, pos: [f32; 2]) -> Self {
-        Self { id: NodeId::new(), name: String::new(), kind, pos }
+        Self {
+            id: NodeId::new(),
+            name: String::new(),
+            kind,
+            pos,
+        }
     }
 
     /// 표시 이름: 이름이 비었으면 레이어 라벨.
@@ -181,7 +190,11 @@ pub struct Edge {
 
 impl Edge {
     pub fn new(from: NodeId, to: Port) -> Self {
-        Self { id: EdgeId::new(), from, to }
+        Self {
+            id: EdgeId::new(),
+            from,
+            to,
+        }
     }
 }
 
@@ -202,7 +215,11 @@ impl Graph {
         if to.slot >= target.kind.spec().inputs {
             return None;
         }
-        if self.edges.values().any(|e| e.to == to || (e.from == from && e.to.node == to.node)) {
+        if self
+            .edges
+            .values()
+            .any(|e| e.to == to || (e.from == from && e.to.node == to.node))
+        {
             return None;
         }
         let e = Edge::new(from, to);
@@ -214,7 +231,12 @@ impl Graph {
     /// 노드와 연결된 엣지를 함께 지운다. 지운 엣지 목록을 돌려준다(undo 용).
     pub fn remove_node(&mut self, id: NodeId) -> (Option<Node>, Vec<Edge>) {
         let node = self.nodes.remove(&id);
-        let gone: Vec<EdgeId> = self.edges.values().filter(|e| e.from == id || e.to.node == id).map(|e| e.id).collect();
+        let gone: Vec<EdgeId> = self
+            .edges
+            .values()
+            .filter(|e| e.from == id || e.to.node == id)
+            .map(|e| e.id)
+            .collect();
         let edges = gone.iter().filter_map(|eid| self.edges.remove(eid)).collect();
         (node, edges)
     }
@@ -242,12 +264,20 @@ impl Graph {
 
     /// 노드의 입력 슬롯별 출처 (slot → from). 비어 있는 슬롯은 없다.
     pub fn inputs_of(&self, id: NodeId) -> BTreeMap<usize, NodeId> {
-        self.edges.values().filter(|e| e.to.node == id).map(|e| (e.to.slot, e.from)).collect()
+        self.edges
+            .values()
+            .filter(|e| e.to.node == id)
+            .map(|e| (e.to.slot, e.from))
+            .collect()
     }
 
     /// 노드의 출력을 받는 노드들.
     pub fn outputs_of(&self, id: NodeId) -> Vec<NodeId> {
-        self.edges.values().filter(|e| e.from == id).map(|e| e.to.node).collect()
+        self.edges
+            .values()
+            .filter(|e| e.from == id)
+            .map(|e| e.to.node)
+            .collect()
     }
 
     pub fn nodes_of_kind(&self, pred: impl Fn(&LayerKind) -> bool) -> Vec<NodeId> {
@@ -256,14 +286,22 @@ impl Graph {
 
     /// 입력 노드들(이름 → 정렬, 이름이 같으면 id 순). 엔진의 입력 텐서 순서.
     pub fn input_nodes(&self) -> Vec<NodeId> {
-        let mut v: Vec<&Node> = self.nodes.values().filter(|n| matches!(n.kind, LayerKind::Input { .. })).collect();
+        let mut v: Vec<&Node> = self
+            .nodes
+            .values()
+            .filter(|n| matches!(n.kind, LayerKind::Input { .. }))
+            .collect();
         v.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         v.into_iter().map(|n| n.id).collect()
     }
 
     /// 출력 노드들(같은 규칙).
     pub fn output_nodes(&self) -> Vec<NodeId> {
-        let mut v: Vec<&Node> = self.nodes.values().filter(|n| matches!(n.kind, LayerKind::Output)).collect();
+        let mut v: Vec<&Node> = self
+            .nodes
+            .values()
+            .filter(|n| matches!(n.kind, LayerKind::Output))
+            .collect();
         v.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         v.into_iter().map(|n| n.id).collect()
     }
@@ -275,7 +313,9 @@ impl Graph {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Act {
     Relu,
-    LeakyRelu { slope: f32 },
+    LeakyRelu {
+        slope: f32,
+    },
     Gelu,
     Silu,
     Sigmoid,
@@ -319,11 +359,17 @@ impl Act {
 #[serde(tag = "type")]
 pub enum LayerKind {
     /// 모델 입력. `shape` = 샘플 형상.
-    Input { shape: Vec<usize> },
+    Input {
+        shape: Vec<usize>,
+    },
     /// 모델 출력 (항등). 여러 개 가능.
     Output,
     /// 완전연결. 마지막 차원 `in → out_features`.
-    Linear { out_features: usize, #[serde(default = "yes")] bias: bool },
+    Linear {
+        out_features: usize,
+        #[serde(default = "yes")]
+        bias: bool,
+    },
     /// 2D 합성곱. 입력 `[C, H, W]`.
     Conv2d {
         out_channels: usize,
@@ -353,21 +399,42 @@ pub enum LayerKind {
     /// `[a, b, c] → [a*b*c]`.
     Flatten,
     /// 샘플 형상을 `shape` 로 (원소 수 동일).
-    Reshape { shape: Vec<usize> },
-    Activation { act: Act },
-    Dropout { #[serde(default = "half")] p: f32 },
+    Reshape {
+        shape: Vec<usize>,
+    },
+    Activation {
+        act: Act,
+    },
+    Dropout {
+        #[serde(default = "half")]
+        p: f32,
+    },
     /// 채널(첫 샘플 차원) 기준 배치 정규화. `[C, …]`.
-    BatchNorm { #[serde(default = "eps5")] eps: f32, #[serde(default = "mom01")] momentum: f32 },
+    BatchNorm {
+        #[serde(default = "eps5")]
+        eps: f32,
+        #[serde(default = "mom01")]
+        momentum: f32,
+    },
     /// 마지막 차원 기준 레이어 정규화.
-    LayerNorm { #[serde(default = "eps5")] eps: f32 },
+    LayerNorm {
+        #[serde(default = "eps5")]
+        eps: f32,
+    },
     /// 원소별 합 (입력 2, 같은 형상).
     Add,
     /// 원소별 곱 (입력 2, 같은 형상).
     Mul,
     /// 샘플 차원 `dim`(0 = 첫 샘플 차원) 기준 이어붙이기 (입력 2).
-    Concat { #[serde(default)] dim: usize },
+    Concat {
+        #[serde(default)]
+        dim: usize,
+    },
     /// 정수 인덱스 `[L] → [L, dim]`.
-    Embedding { vocab: usize, dim: usize },
+    Embedding {
+        vocab: usize,
+        dim: usize,
+    },
 }
 
 fn yes() -> bool {
@@ -450,16 +517,34 @@ impl LayerKind {
         vec![
             LayerKind::Input { shape: vec![16] },
             LayerKind::Output,
-            LayerKind::Linear { out_features: 64, bias: true },
-            LayerKind::Conv2d { out_channels: 16, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
-            LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
-            LayerKind::AvgPool2d { kernel: [2, 2], stride: [2, 2] },
+            LayerKind::Linear {
+                out_features: 64,
+                bias: true,
+            },
+            LayerKind::Conv2d {
+                out_channels: 16,
+                kernel: [3, 3],
+                stride: [1, 1],
+                padding: [1, 1],
+                bias: true,
+            },
+            LayerKind::MaxPool2d {
+                kernel: [2, 2],
+                stride: [2, 2],
+            },
+            LayerKind::AvgPool2d {
+                kernel: [2, 2],
+                stride: [2, 2],
+            },
             LayerKind::GlobalAvgPool,
             LayerKind::Flatten,
             LayerKind::Reshape { shape: vec![1, 4, 4] },
             LayerKind::Activation { act: Act::Relu },
             LayerKind::Dropout { p: 0.5 },
-            LayerKind::BatchNorm { eps: 1e-5, momentum: 0.1 },
+            LayerKind::BatchNorm {
+                eps: 1e-5,
+                momentum: 0.1,
+            },
             LayerKind::LayerNorm { eps: 1e-5 },
             LayerKind::Add,
             LayerKind::Mul,
@@ -507,9 +592,23 @@ impl LayerKind {
         match self {
             LayerKind::Input { shape } => format!("[{}]", dims(shape)),
             LayerKind::Output => String::new(),
-            LayerKind::Linear { out_features, bias } => format!("→ {}{}", out_features, if *bias { "" } else { " (no bias)" }),
-            LayerKind::Conv2d { out_channels, kernel, stride, padding, .. } => {
-                format!("{}ch k{} s{} p{}", out_channels, dims(kernel), dims(stride), dims(padding))
+            LayerKind::Linear { out_features, bias } => {
+                format!("→ {}{}", out_features, if *bias { "" } else { " (no bias)" })
+            }
+            LayerKind::Conv2d {
+                out_channels,
+                kernel,
+                stride,
+                padding,
+                ..
+            } => {
+                format!(
+                    "{}ch k{} s{} p{}",
+                    out_channels,
+                    dims(kernel),
+                    dims(stride),
+                    dims(padding)
+                )
             }
             LayerKind::MaxPool2d { kernel, stride } | LayerKind::AvgPool2d { kernel, stride } => {
                 format!("k{} s{}", dims(kernel), dims(stride))
@@ -540,7 +639,10 @@ pub struct ProjectFile {
 
 impl ProjectFile {
     pub fn new(project: Project) -> Self {
-        Self { format_version: FORMAT_VERSION, project }
+        Self {
+            format_version: FORMAT_VERSION,
+            project,
+        }
     }
 
     pub fn to_json(&self) -> String {
@@ -564,7 +666,13 @@ mod tests {
     use super::*;
 
     fn lin(g: &mut Graph, out: usize) -> NodeId {
-        g.add_node(Node::new(LayerKind::Linear { out_features: out, bias: true }, [0.0, 0.0]))
+        g.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: out,
+                bias: true,
+            },
+            [0.0, 0.0],
+        ))
     }
 
     #[test]
@@ -588,7 +696,10 @@ mod tests {
         g.add_edge(a, Port::new(b, 0)).unwrap();
         assert!(g.would_create_cycle(b, a));
         assert!(!g.would_create_cycle(a, b));
-        assert!(g.add_edge(b, Port::new(a, 0)).is_some(), "문서는 순환을 거부하지 않는다");
+        assert!(
+            g.add_edge(b, Port::new(a, 0)).is_some(),
+            "문서는 순환을 거부하지 않는다"
+        );
     }
 
     #[test]
@@ -608,7 +719,10 @@ mod tests {
     #[test]
     fn palette_covers_every_variant_once() {
         let p = LayerKind::palette();
-        let tags: Vec<String> = p.iter().map(|k| serde_json::to_value(k).unwrap()["type"].as_str().unwrap().to_string()).collect();
+        let tags: Vec<String> = p
+            .iter()
+            .map(|k| serde_json::to_value(k).unwrap()["type"].as_str().unwrap().to_string())
+            .collect();
         let mut dedup = tags.clone();
         dedup.sort();
         dedup.dedup();

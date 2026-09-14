@@ -115,9 +115,15 @@ fn chain(kinds: Vec<LayerKind>) -> ModelDef {
 fn mlp(input: usize, hidden: usize, output: usize) -> ModelDef {
     chain(vec![
         LayerKind::Input { shape: vec![input] },
-        LayerKind::Linear { out_features: hidden, bias: true },
+        LayerKind::Linear {
+            out_features: hidden,
+            bias: true,
+        },
         LayerKind::Activation { act: Act::Relu },
-        LayerKind::Linear { out_features: output, bias: true },
+        LayerKind::Linear {
+            out_features: output,
+            bias: true,
+        },
     ])
 }
 
@@ -174,13 +180,31 @@ fn mlp_output_shape_matches_shape_infer() {
 fn cnn_output_shape_matches_shape_infer() {
     let def = chain(vec![
         LayerKind::Input { shape: vec![1, 8, 8] },
-        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
-        LayerKind::BatchNorm { eps: 1e-5, momentum: 0.1 },
+        LayerKind::Conv2d {
+            out_channels: 4,
+            kernel: [3, 3],
+            stride: [1, 1],
+            padding: [1, 1],
+            bias: true,
+        },
+        LayerKind::BatchNorm {
+            eps: 1e-5,
+            momentum: 0.1,
+        },
         LayerKind::Activation { act: Act::Relu },
-        LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
-        LayerKind::AvgPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::MaxPool2d {
+            kernel: [2, 2],
+            stride: [2, 2],
+        },
+        LayerKind::AvgPool2d {
+            kernel: [2, 2],
+            stride: [2, 2],
+        },
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 3, bias: true },
+        LayerKind::Linear {
+            out_features: 3,
+            bias: true,
+        },
     ]);
     let want = inferred_output_shape(&def);
     assert_eq!(want, vec![3]);
@@ -193,7 +217,13 @@ fn residual_add_and_concat_output_shape_matches_shape_infer() {
     let mut def = ModelDef::new("res");
     let g = &mut def.graph;
     let i = add(g, LayerKind::Input { shape: vec![8] });
-    let l = add(g, LayerKind::Linear { out_features: 8, bias: true });
+    let l = add(
+        g,
+        LayerKind::Linear {
+            out_features: 8,
+            bias: true,
+        },
+    );
     let s = add(g, LayerKind::Add);
     let c = add(g, LayerKind::Concat { dim: 0 });
     let n = add(g, LayerKind::LayerNorm { eps: 1e-5 });
@@ -218,7 +248,10 @@ fn embedding_output_shape_matches_shape_infer() {
         LayerKind::Input { shape: vec![4] },
         LayerKind::Embedding { vocab: 10, dim: 6 },
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 3, bias: true },
+        LayerKind::Linear {
+            out_features: 3,
+            bias: true,
+        },
     ]);
     let want = inferred_output_shape(&def);
     assert_eq!(want, vec![3]);
@@ -268,7 +301,12 @@ fn xor_run() -> &'static XorRun {
         let mut def = mlp(2, 16, 2);
         def.train.loss = Loss::CrossEntropy;
         def.train.metric = Metric::Accuracy;
-        def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+        def.train.optimizer = Optimizer::Adam {
+            lr: 1e-2,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        };
         def.train.epochs = 40;
         def.train.batch_size = 64;
         def.train.device = test_device();
@@ -284,7 +322,11 @@ fn xor_mlp_reaches_high_accuracy_on_cpu() {
     assert_eq!(r.run.status, RunStatus::Finished);
     let last = r.run.last().expect("에포크 기록");
     let acc = last.val_metric.expect("정확도");
-    assert!(acc >= 0.95, "XOR 정확도가 낮습니다: {acc} (train_loss {})", last.train_loss);
+    assert!(
+        acc >= 0.95,
+        "XOR 정확도가 낮습니다: {acc} (train_loss {})",
+        last.train_loss
+    );
     // 총 스텝 수가 수백 단위인지 (기대치 확인용).
     assert!(r.run.epochs.len() == 40);
 }
@@ -311,7 +353,10 @@ fn checkpoint_round_trip_gives_identical_outputs() {
 
     // 이름·형상 요약도 읽혀야 한다.
     let sum = nl_engine::checkpoint_summary(&ckpt).unwrap();
-    assert!(sum.iter().any(|(n, s)| n.ends_with(".weight") && s.len() == 2), "요약: {sum:?}");
+    assert!(
+        sum.iter().any(|(n, s)| n.ends_with(".weight") && s.len() == 2),
+        "요약: {sum:?}"
+    );
 }
 
 #[test]
@@ -338,14 +383,23 @@ fn linear_regression_converges_below_mse_005() {
     let mut def = mlp(2, 32, 1);
     def.train.loss = Loss::Mse;
     def.train.metric = Metric::Mae;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 80;
     def.train.batch_size = 64;
     def.train.device = test_device();
     let run = train_to_end(def, synthetic(SyntheticKind::LinearRegression, 2048), &dir);
     let last = run.last().unwrap();
     let val = last.val_loss.expect("검증 손실");
-    assert!(val < 0.05, "MSE 가 수렴하지 않았습니다: val {val}, train {}", last.train_loss);
+    assert!(
+        val < 0.05,
+        "MSE 가 수렴하지 않았습니다: val {val}, train {}",
+        last.train_loss
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -354,9 +408,23 @@ fn linear_regression_converges_below_mse_005() {
 #[test]
 fn every_optimizer_reduces_the_loss() {
     let opts = [
-        Optimizer::Sgd { lr: 5e-2, momentum: 0.9 },
-        Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 },
-        Optimizer::AdamW { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 1e-2 },
+        Optimizer::Sgd {
+            lr: 5e-2,
+            momentum: 0.9,
+        },
+        Optimizer::Adam {
+            lr: 1e-2,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        },
+        Optimizer::AdamW {
+            lr: 1e-2,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 1e-2,
+        },
     ];
     for opt in opts {
         let dir = temp_dir("opt");
@@ -371,7 +439,11 @@ fn every_optimizer_reduces_the_loss() {
         let run = train_to_end(def, synthetic(SyntheticKind::Xor, 1024), &dir);
         let first = run.epochs.first().unwrap().train_loss;
         let last = run.epochs.last().unwrap().train_loss;
-        assert!(last < first, "{} 이 손실을 줄이지 못했습니다: {first} → {last}", opt.label());
+        assert!(
+            last < first,
+            "{} 이 손실을 줄이지 못했습니다: {first} → {last}",
+            opt.label()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
@@ -401,7 +473,11 @@ fn pause_and_stop_control_the_run() {
     // Started 와 Step 몇 개를 받을 때까지 기다린다.
     let mut steps = 0;
     while steps < 5 {
-        match h.events.recv_timeout(std::time::Duration::from_secs(30)).expect("이벤트") {
+        match h
+            .events
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("이벤트")
+        {
             TrainEvent::Step { .. } => steps += 1,
             TrainEvent::Failed { error, .. } => panic!("학습 실패: {error}"),
             _ => {}
@@ -455,7 +531,10 @@ fn separate_validation_source_is_used() {
 
     let mut ds = synthetic(SyntheticKind::Xor, 512);
     ds.split = nl_core::Split::Separate {
-        validation: Box::new(DataSource::Synthetic { kind: SyntheticKind::Xor, samples: 128 }),
+        validation: Box::new(DataSource::Synthetic {
+            kind: SyntheticKind::Xor,
+            samples: 128,
+        }),
     };
     let run = train_to_end(def, ds, &dir);
     assert_eq!(run.status, RunStatus::Finished);
@@ -471,7 +550,12 @@ fn resume_from_checkpoint_starts_from_a_lower_loss() {
     let mut def = mlp(2, 16, 2);
     def.train.loss = Loss::CrossEntropy;
     def.train.metric = Metric::Accuracy;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 15;
     def.train.batch_size = 64;
     def.train.device = test_device();
@@ -504,7 +588,10 @@ fn resume_from_checkpoint_starts_from_a_lower_loss() {
     let second = second.unwrap();
     let a = first.epochs.first().unwrap().train_loss;
     let b = second.epochs.first().unwrap().train_loss;
-    assert!(b < a, "이어서 학습한 첫 에포크 손실이 더 낮아야 합니다: 처음 {a}, 이어서 {b}");
+    assert!(
+        b < a,
+        "이어서 학습한 첫 에포크 손실이 더 낮아야 합니다: 처음 {a}, 이어서 {b}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -521,9 +608,21 @@ fn two_input_model_trains_with_columns_split_in_node_order() {
     let a = named(g, LayerKind::Input { shape: vec![2] }, "a");
     let b = named(g, LayerKind::Input { shape: vec![2] }, "b");
     let cat = add(g, LayerKind::Concat { dim: 0 });
-    let l1 = add(g, LayerKind::Linear { out_features: 32, bias: true });
+    let l1 = add(
+        g,
+        LayerKind::Linear {
+            out_features: 32,
+            bias: true,
+        },
+    );
     let act = add(g, LayerKind::Activation { act: Act::Relu });
-    let l2 = add(g, LayerKind::Linear { out_features: 1, bias: true });
+    let l2 = add(
+        g,
+        LayerKind::Linear {
+            out_features: 1,
+            bias: true,
+        },
+    );
     let o = add(g, LayerKind::Output);
     g.add_edge(a, Port::new(cat, 0)).unwrap();
     g.add_edge(b, Port::new(cat, 1)).unwrap();
@@ -535,7 +634,12 @@ fn two_input_model_trains_with_columns_split_in_node_order() {
     assert_eq!(def.graph.input_nodes(), vec![a, b], "input_nodes 는 이름 순이어야 한다");
     def.train.loss = Loss::Mse;
     def.train.metric = Metric::Mae;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 60;
     def.train.batch_size = 32;
     def.train.device = test_device();
@@ -548,7 +652,11 @@ fn two_input_model_trains_with_columns_split_in_node_order() {
     );
     let last = run.last().unwrap();
     let val = last.val_loss.expect("검증 손실");
-    assert!(val < 0.05, "2입력 회귀가 수렴하지 않았습니다: {val} (train {})", last.train_loss);
+    assert!(
+        val < 0.05,
+        "2입력 회귀가 수렴하지 않았습니다: {val} (train {})",
+        last.train_loss
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -563,7 +671,13 @@ fn mismatched_column_count_is_rejected_with_a_clear_message() {
     let a = named(g, LayerKind::Input { shape: vec![2] }, "a");
     let b = named(g, LayerKind::Input { shape: vec![3] }, "b");
     let cat = add(g, LayerKind::Concat { dim: 0 });
-    let l = add(g, LayerKind::Linear { out_features: 1, bias: true });
+    let l = add(
+        g,
+        LayerKind::Linear {
+            out_features: 1,
+            bias: true,
+        },
+    );
     let o = add(g, LayerKind::Output);
     g.add_edge(a, Port::new(cat, 0)).unwrap();
     g.add_edge(b, Port::new(cat, 1)).unwrap();
@@ -603,10 +717,28 @@ fn two_output_model_trains_on_the_first_output() {
     let mut def = ModelDef::new("2출력");
     let g = &mut def.graph;
     let i = add(g, LayerKind::Input { shape: vec![2] });
-    let l1 = add(g, LayerKind::Linear { out_features: 16, bias: true });
+    let l1 = add(
+        g,
+        LayerKind::Linear {
+            out_features: 16,
+            bias: true,
+        },
+    );
     let act = add(g, LayerKind::Activation { act: Act::Relu });
-    let head_a = add(g, LayerKind::Linear { out_features: 2, bias: true });
-    let head_b = add(g, LayerKind::Linear { out_features: 1, bias: true });
+    let head_a = add(
+        g,
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+    );
+    let head_b = add(
+        g,
+        LayerKind::Linear {
+            out_features: 1,
+            bias: true,
+        },
+    );
     let oa = named(g, LayerKind::Output, "a");
     let ob = named(g, LayerKind::Output, "b");
     link(g, i, l1);
@@ -615,11 +747,20 @@ fn two_output_model_trains_on_the_first_output() {
     link(g, act, head_b);
     link(g, head_a, oa);
     link(g, head_b, ob);
-    assert_eq!(def.graph.output_nodes(), vec![oa, ob], "output_nodes 는 이름 순이어야 한다");
+    assert_eq!(
+        def.graph.output_nodes(),
+        vec![oa, ob],
+        "output_nodes 는 이름 순이어야 한다"
+    );
 
     def.train.loss = Loss::CrossEntropy;
     def.train.metric = Metric::Accuracy;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 40;
     def.train.batch_size = 64;
     def.train.device = test_device();
@@ -628,7 +769,8 @@ fn two_output_model_trains_on_the_first_output() {
     let (run, logs) = train_collecting_logs(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
     assert_eq!(run.status, RunStatus::Finished);
     assert!(
-        logs.iter().any(|m| m.contains("Output 레이어가 2 개") && m.contains("'a'")),
+        logs.iter()
+            .any(|m| m.contains("Output 레이어가 2 개") && m.contains("'a'")),
         "다출력 안내 로그가 없습니다: {logs:?}"
     );
     let acc = run.last().unwrap().val_metric.expect("정확도");
@@ -637,7 +779,9 @@ fn two_output_model_trains_on_the_first_output() {
     // 추론은 두 출력을 모두 돌려준다.
     let ckpt = dir.join(run.checkpoint.as_ref().unwrap());
     let mut s = Session::load(&def, Some(&ckpt), test_device()).unwrap();
-    let out = s.run(&[HostTensor::new(vec![2, 2], vec![0.8, 0.8, -0.8, 0.8])]).unwrap();
+    let out = s
+        .run(&[HostTensor::new(vec![2, 2], vec![0.8, 0.8, -0.8, 0.8])])
+        .unwrap();
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].shape, vec![2, 2]);
     assert_eq!(out[1].shape, vec![2, 1]);
@@ -659,7 +803,11 @@ fn step_schedule_is_reported_per_epoch() {
     def.train.device = test_device();
 
     let run = train_to_end(def, synthetic(SyntheticKind::Xor, 256), &dir);
-    let lrs: Vec<f64> = run.epochs.iter().map(|e| e.lr.expect("lr 이 기록되어야 합니다")).collect();
+    let lrs: Vec<f64> = run
+        .epochs
+        .iter()
+        .map(|e| e.lr.expect("lr 이 기록되어야 합니다"))
+        .collect();
     assert_eq!(lrs, vec![0.1, 0.1, 0.05, 0.05, 0.025, 0.025]);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -682,7 +830,10 @@ fn cosine_schedule_and_warmup_shape_the_learning_rate() {
     assert!((lrs[0] - 0.1).abs() < 1e-9, "워밍업이 적용되지 않았습니다: {lrs:?}");
     assert!(lrs[1] < 0.2 && lrs[1] > 0.02);
     assert!((lrs[4] - 0.02).abs() < 1e-9, "마지막이 min_lr 이 아닙니다: {lrs:?}");
-    assert!(lrs[1] > lrs[2] && lrs[2] > lrs[3], "코사인이 단조 감소해야 합니다: {lrs:?}");
+    assert!(
+        lrs[1] > lrs[2] && lrs[2] > lrs[3],
+        "코사인이 단조 감소해야 합니다: {lrs:?}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -703,7 +854,10 @@ fn early_stopping_ends_the_run_as_finished() {
     let (run, logs) = train_collecting_logs(def, synthetic(SyntheticKind::Xor, 256), &dir);
     assert_eq!(run.status, RunStatus::Finished, "조기 종료는 정상 종료여야 합니다");
     assert_eq!(run.epochs.len(), 3, "patience 2 면 3 에포크에서 멈춰야 합니다");
-    assert!(logs.iter().any(|m| m.contains("조기 종료")), "조기 종료 로그가 없습니다: {logs:?}");
+    assert!(
+        logs.iter().any(|m| m.contains("조기 종료")),
+        "조기 종료 로그가 없습니다: {logs:?}"
+    );
     assert!(run.checkpoint.is_some());
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -713,7 +867,12 @@ fn resume_restores_weights_only_and_says_so() {
     let dir = temp_dir("resume-log");
     let mut def = mlp(2, 16, 2);
     def.train.loss = Loss::CrossEntropy;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 10;
     def.train.batch_size = 64;
     def.train.device = test_device();
@@ -746,7 +905,8 @@ fn resume_restores_weights_only_and_says_so() {
     }
     let second = second.unwrap();
     assert!(
-        logs.iter().any(|m| m.contains("가중치만 복원") && m.contains("옵티마이저")),
+        logs.iter()
+            .any(|m| m.contains("가중치만 복원") && m.contains("옵티마이저")),
         "이어서 학습 로그가 계약을 밝히지 않습니다: {logs:?}"
     );
     assert!(
@@ -764,15 +924,32 @@ fn image_sized_samples_train_through_the_resident_path() {
     let dir = temp_dir("resident-cnn");
     let mut def = chain(vec![
         LayerKind::Input { shape: vec![1, 8, 8] },
-        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
+        LayerKind::Conv2d {
+            out_channels: 4,
+            kernel: [3, 3],
+            stride: [1, 1],
+            padding: [1, 1],
+            bias: true,
+        },
         LayerKind::Activation { act: Act::Relu },
-        LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::MaxPool2d {
+            kernel: [2, 2],
+            stride: [2, 2],
+        },
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 4, bias: true },
+        LayerKind::Linear {
+            out_features: 4,
+            bias: true,
+        },
     ]);
     def.train.loss = Loss::CrossEntropy;
     def.train.metric = Metric::Accuracy;
-    def.train.optimizer = Optimizer::Adam { lr: 5e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 5e-3,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 8;
     def.train.batch_size = 32;
     def.train.device = test_device();
@@ -782,7 +959,11 @@ fn image_sized_samples_train_through_the_resident_path() {
     assert_eq!(run.status, RunStatus::Finished);
     let first = run.epochs.first().unwrap().train_loss;
     let last = run.epochs.last().unwrap();
-    assert!(last.train_loss < first, "학습이 진행되지 않았습니다: {first} → {}", last.train_loss);
+    assert!(
+        last.train_loss < first,
+        "학습이 진행되지 않았습니다: {first} → {}",
+        last.train_loss
+    );
     let acc = last.val_metric.expect("정확도");
     assert!(acc > 0.5, "사분면 분류가 무작위 수준입니다: {acc}");
     std::fs::remove_dir_all(&dir).ok();
@@ -827,15 +1008,18 @@ fn training_warns_about_classes_with_no_samples() {
     assert!(warning.contains('2'), "어느 클래스가 비었는지 없습니다: {warning}");
 
     // 스캔 결과도 같은 것을 알려야 한다.
-    let info = nl_engine::scan(&nl_core::DatasetSpec::new(
-        "간격",
-        DataSource::Csv {
-            path: "gap.csv".into(),
-            input_cols: vec!["x0".into(), "x1".into()],
-            target_cols: vec!["y".into()],
-            header: true,
-        },
-    ), &dir)
+    let info = nl_engine::scan(
+        &nl_core::DatasetSpec::new(
+            "간격",
+            DataSource::Csv {
+                path: "gap.csv".into(),
+                input_cols: vec!["x0".into(), "x1".into()],
+                target_cols: vec!["y".into()],
+                header: true,
+            },
+        ),
+        &dir,
+    )
     .unwrap();
     assert_eq!(info.classes.len(), 4);
     assert_eq!(info.empty_classes, vec![2]);
@@ -850,20 +1034,32 @@ fn tokenized_text_feeds_an_embedding_model() {
     const LEN: usize = 8;
 
     let mut field = Field::new("문장", FieldKind::Text);
-    field.encode = vec![Transform::Tokenize { vocab: VOCAB.into(), max_len: LEN }];
+    field.encode = vec![Transform::Tokenize {
+        vocab: VOCAB.into(),
+        max_len: LEN,
+    }];
     assert_eq!(field.tensor_shape(), Some(vec![LEN]));
 
     // 텍스트 → [1, 8] 정수 텐서.
     let encoded = nl_engine::encode(&field, &nl_engine::Value::Text("hello you".into())).unwrap();
     assert_eq!(encoded.shape, vec![1, LEN]);
-    assert!(encoded.data.iter().all(|v| *v >= 0.0 && (*v as usize) <= VOCAB.chars().count()));
+    assert!(encoded
+        .data
+        .iter()
+        .all(|v| *v >= 0.0 && (*v as usize) <= VOCAB.chars().count()));
 
     // 그 텐서를 그대로 먹는 Embedding 모델.
     let def = chain(vec![
         LayerKind::Input { shape: vec![LEN] },
-        LayerKind::Embedding { vocab: VOCAB.chars().count() + 1, dim: 6 },
+        LayerKind::Embedding {
+            vocab: VOCAB.chars().count() + 1,
+            dim: 6,
+        },
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 3, bias: true },
+        LayerKind::Linear {
+            out_features: 3,
+            bias: true,
+        },
     ]);
     assert_eq!(inferred_output_shape(&def), vec![3]);
 
@@ -915,7 +1111,12 @@ fn b1_accuracy_is_real_for_single_unit_binary_output() {
     let mut def = mlp(2, 16, 1);
     def.train.loss = Loss::BceWithLogits;
     def.train.metric = Metric::Accuracy;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 60;
     def.train.batch_size = 64;
     def.train.val_split = 0.3;
@@ -926,7 +1127,11 @@ fn b1_accuracy_is_real_for_single_unit_binary_output() {
     let last = run.last().unwrap();
     let acc = last.val_metric.expect("정확도");
     // 고치기 전에는 검증셋의 라벨 0 비율(약 0.48)에 고정되어 있었다.
-    assert!(acc > 0.9, "단일 출력 정확도가 낮습니다: {acc} (손실 {})", last.val_loss.unwrap_or(f64::NAN));
+    assert!(
+        acc > 0.9,
+        "단일 출력 정확도가 낮습니다: {acc} (손실 {})",
+        last.val_loss.unwrap_or(f64::NAN)
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -944,7 +1149,13 @@ fn b2_too_few_output_units_is_reported_before_training() {
     let g = &mut d2.graph;
     let i = add(g, LayerKind::Input { shape: vec![1, 8, 8] });
     let f = add(g, LayerKind::Flatten);
-    let l = add(g, LayerKind::Linear { out_features: 2, bias: true });
+    let l = add(
+        g,
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+    );
     let o = add(g, LayerKind::Output);
     link(g, i, f);
     link(g, f, l);
@@ -953,8 +1164,14 @@ fn b2_too_few_output_units_is_reported_before_training() {
 
     let e = train_expect_failure(d2, synthetic(SyntheticKind::Quadrants, 200), &dir);
     assert!(e.contains("클래스"), "클래스 수를 짚어 주지 않습니다: {e}");
-    assert!(e.contains("2 유닛") || e.contains("Output"), "출력 폭을 짚어 주지 않습니다: {e}");
-    assert!(!e.contains("index out of bounds"), "백엔드 패닉이 그대로 새어 나옵니다: {e}");
+    assert!(
+        e.contains("2 유닛") || e.contains("Output"),
+        "출력 폭을 짚어 주지 않습니다: {e}"
+    );
+    assert!(
+        !e.contains("index out of bounds"),
+        "백엔드 패닉이 그대로 새어 나옵니다: {e}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -974,7 +1191,10 @@ fn b3_embedding_rejects_out_of_range_and_fractional_indices() {
         LayerKind::Input { shape: vec![2] },
         LayerKind::Embedding { vocab: 4, dim: 3 },
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 2, bias: true },
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
     ]);
     let mut s = Session::load(&def, None, test_device()).unwrap();
 
@@ -1037,9 +1257,14 @@ fn b4_single_class_cross_entropy_is_rejected() {
 fn b5_rank_above_the_limit_is_caught_by_validation_not_at_train_time() {
     let def = chain(vec![
         LayerKind::Input { shape: vec![1, 8, 8] },
-        LayerKind::Reshape { shape: vec![1, 2, 2, 4, 4] }, // 배치 포함 랭크 6
+        LayerKind::Reshape {
+            shape: vec![1, 2, 2, 4, 4],
+        }, // 배치 포함 랭크 6
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 2, bias: true },
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
     ]);
     let rep = shape::infer(&def.graph);
     assert!(!rep.errors.is_empty(), "형상 추론이 랭크 상한을 놓쳤습니다");
@@ -1073,7 +1298,10 @@ fn b7_early_stopping_keeps_the_best_weights() {
     assert_eq!(run.status, RunStatus::Finished);
     assert_eq!(run.epochs.len(), 3);
 
-    let best = run.best_checkpoint.as_ref().expect("best_checkpoint 가 기록되어야 합니다");
+    let best = run
+        .best_checkpoint
+        .as_ref()
+        .expect("best_checkpoint 가 기록되어야 합니다");
     assert!(best.ends_with("best.safetensors"), "{best}");
     assert!(dir.join(best).exists(), "best 파일이 없습니다");
     assert_eq!(
@@ -1121,14 +1349,27 @@ fn graph_errors_point_at_the_node_that_blocks_the_output() {
     let i = add(g, LayerKind::Input { shape: vec![4] });
     let conv = named(
         g,
-        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [0, 0], bias: true },
+        LayerKind::Conv2d {
+            out_channels: 4,
+            kernel: [3, 3],
+            stride: [1, 1],
+            padding: [0, 0],
+            bias: true,
+        },
         "진짜원인",
     );
     let o = add(g, LayerKind::Output);
     link(g, i, conv);
     link(g, conv, o);
     // 캔버스에 떠 있는, 출력과 이어지지 않은 노드. id 순으로는 이쪽이 먼저 걸릴 수 있다.
-    named(g, LayerKind::Linear { out_features: 2, bias: true }, "떠있는노드");
+    named(
+        g,
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+        "떠있는노드",
+    );
 
     let e = match Session::load(&def, None, test_device()) {
         Ok(_) => panic!("오류 그래프를 받아들였습니다"),
@@ -1138,7 +1379,10 @@ fn graph_errors_point_at_the_node_that_blocks_the_output() {
     if let Some(stray) = e.find("떠있는노드") {
         assert!(real < stray, "떠 있는 노드가 먼저 나옵니다: {e}");
     }
-    assert!(e.contains("이어지지 않은"), "떠 있는 노드가 있다는 사실을 알려야 합니다: {e}");
+    assert!(
+        e.contains("이어지지 않은"),
+        "떠 있는 노드가 있다는 사실을 알려야 합니다: {e}"
+    );
 }
 
 /// `Step` 은 솎아 내도 되지만 `Epoch`·`Finished` 는 한 개도 빠지면 안 된다.
@@ -1245,6 +1489,61 @@ fn validation_loss_uses_the_same_definition_as_training() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// B2 의 남은 틈: one-hot 타깃 폭이 출력과 다르면 학습 시작 전에 막는다.
+#[test]
+fn b2_one_hot_target_width_is_checked_before_training() {
+    let dir = temp_dir("b2-onehot");
+    // 타깃 3 열 one-hot, 출력은 2 유닛.
+    let mut text = String::from("x0,x1,t0,t1,t2\n");
+    for i in 0..60 {
+        let f = ((i * 7) % 19) as f32 / 10.0 - 1.0;
+        let k = i % 3;
+        let (a, b, c) = ((k == 0) as u8, (k == 1) as u8, (k == 2) as u8);
+        text.push_str(&format!("{f},{},{a},{b},{c}\n", f * 0.5));
+    }
+    std::fs::write(dir.join("onehot.csv"), text).unwrap();
+    let ds = DatasetSpec::new(
+        "원핫",
+        DataSource::Csv {
+            path: "onehot.csv".into(),
+            input_cols: vec!["x0".into(), "x1".into()],
+            target_cols: vec!["t0".into(), "t1".into(), "t2".into()],
+            header: true,
+        },
+    );
+
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 1;
+    def.train.device = test_device();
+
+    let e = train_expect_failure(def, ds, &dir);
+    assert!(e.contains("one-hot"), "one-hot 폭 문제를 짚어 주지 않습니다: {e}");
+    assert!(e.contains("3") && e.contains("2"), "폭을 알려 주지 않습니다: {e}");
+    assert!(!e.contains("index out of bounds"), "백엔드 오류가 새어 나옵니다: {e}");
+
+    // 폭이 맞으면 통과한다.
+    let dir2 = temp_dir("b2-onehot-ok");
+    std::fs::copy(dir.join("onehot.csv"), dir2.join("onehot.csv")).unwrap();
+    let ds2 = DatasetSpec::new(
+        "원핫",
+        DataSource::Csv {
+            path: "onehot.csv".into(),
+            input_cols: vec!["x0".into(), "x1".into()],
+            target_cols: vec!["t0".into(), "t1".into(), "t2".into()],
+            header: true,
+        },
+    );
+    let mut ok = mlp(2, 8, 3);
+    ok.train.loss = Loss::CrossEntropy;
+    ok.train.epochs = 2;
+    ok.train.device = test_device();
+    let run = train_to_end(ok, ds2, &dir2);
+    assert_eq!(run.status, RunStatus::Finished);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir2).ok();
+}
+
 // ───────────────────────────── 성능 측정 (NL_BENCH=1) ─────────────────────────────
 
 /// XOR 1000 샘플 × 200 에포크 CPU 소요 시간. 배치 업로드 경로를 바꿀 때 전후 비교용.
@@ -1258,7 +1557,12 @@ fn bench_xor_1000_samples_200_epochs() {
     let mut def = mlp(2, 16, 2);
     def.train.loss = Loss::CrossEntropy;
     def.train.metric = Metric::None;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 200;
     def.train.batch_size = 32;
     def.train.val_split = 0.0;
@@ -1289,15 +1593,32 @@ fn bench_quadrants_cnn() {
     let dir = temp_dir("bench-cnn");
     let mut def = chain(vec![
         LayerKind::Input { shape: vec![1, 8, 8] },
-        LayerKind::Conv2d { out_channels: 8, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
+        LayerKind::Conv2d {
+            out_channels: 8,
+            kernel: [3, 3],
+            stride: [1, 1],
+            padding: [1, 1],
+            bias: true,
+        },
         LayerKind::Activation { act: Act::Relu },
-        LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] },
+        LayerKind::MaxPool2d {
+            kernel: [2, 2],
+            stride: [2, 2],
+        },
         LayerKind::Flatten,
-        LayerKind::Linear { out_features: 4, bias: true },
+        LayerKind::Linear {
+            out_features: 4,
+            bias: true,
+        },
     ]);
     def.train.loss = Loss::CrossEntropy;
     def.train.metric = Metric::None;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-3,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 8;
     def.train.batch_size = 32;
     def.train.val_split = 0.0;
@@ -1361,7 +1682,10 @@ fn gpu_auto_picks_a_device_that_actually_works() {
         DevicePref::Cpu => {
             // GPU 가 하나도 쓸 만하지 않았다는 뜻 — 전부 실패로 기록되어 있어야 한다.
             for d in list.iter().skip(1) {
-                if matches!(d.kind, nl_engine::DeviceKind::DiscreteGpu | nl_engine::DeviceKind::IntegratedGpu) {
+                if matches!(
+                    d.kind,
+                    nl_engine::DeviceKind::DiscreteGpu | nl_engine::DeviceKind::IntegratedGpu
+                ) {
                     assert!(
                         matches!(nl_engine::probe_cached(d.pref), Some(Err(_))),
                         "CPU 로 떨어졌는데 {} 가 실패로 기록되지 않았습니다",
@@ -1373,7 +1697,11 @@ fn gpu_auto_picks_a_device_that_actually_works() {
         p => {
             assert!(nl_engine::probe(p).is_ok(), "Auto 가 검사에 실패한 장치를 골랐습니다");
             let info = list.iter().find(|d| d.pref == p).unwrap();
-            assert_ne!(info.kind, nl_engine::DeviceKind::OtherGpu, "소프트웨어 래스터라이저는 후보가 아닙니다");
+            assert_ne!(
+                info.kind,
+                nl_engine::DeviceKind::OtherGpu,
+                "소프트웨어 래스터라이저는 후보가 아닙니다"
+            );
         }
     }
 
@@ -1389,7 +1717,12 @@ fn gpu_auto_picks_a_device_that_actually_works() {
     let mut def = mlp(2, 16, 2);
     def.train.loss = Loss::CrossEntropy;
     def.train.metric = Metric::Accuracy;
-    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
     def.train.epochs = 10;
     def.train.batch_size = 64;
     def.train.device = DevicePref::Auto;
@@ -1423,7 +1756,12 @@ fn gpu_xor_trains_on_wgpu() {
         let mut def = mlp(2, 16, 2);
         def.train.loss = Loss::CrossEntropy;
         def.train.metric = Metric::Accuracy;
-        def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+        def.train.optimizer = Optimizer::Adam {
+            lr: 1e-2,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        };
         def.train.epochs = 40;
         def.train.batch_size = 64;
         def.train.device = target.pref;

@@ -44,7 +44,12 @@ impl Session {
     pub fn load(model: &ModelDef, weights: Option<&Path>, device: DevicePref) -> anyhow::Result<Self> {
         let (info, handle) = device::resolve_entry(device);
         let (inner, input_shapes, output_shapes) = dispatch!(handle, build, model, weights)?;
-        Ok(Self { inner, device_name: info.name, input_shapes, output_shapes })
+        Ok(Self {
+            inner,
+            device_name: info.name,
+            input_shapes,
+            output_shapes,
+        })
     }
 
     /// 입력은 `Graph::input_nodes()` 순서, 출력은 `Graph::output_nodes()` 순서. 배치 차원 포함.
@@ -75,8 +80,8 @@ fn build<B: Backend>(
 ) -> Result<(Box<dyn Runner>, Vec<Vec<usize>>, Vec<Vec<usize>>)> {
     let mut model = Model::<B>::new(def, device, def.train.seed)?;
     if let Some(path) = w {
-        let loaded = weights::load_for(path, Some(def.id))
-            .with_context(|| format!("가중치 읽기 실패: {}", path.display()))?;
+        let loaded =
+            weights::load_for(path, Some(def.id)).with_context(|| format!("가중치 읽기 실패: {}", path.display()))?;
         model
             .load_host_params(&loaded)
             .with_context(|| format!("가중치 적용 실패: {}", path.display()))?;

@@ -18,16 +18,33 @@ pub struct Region {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Source {
-    ScreenCapture { region: Region, fps: f32 },
-    HttpPoll { url: String, interval_ms: u64, #[serde(default)] headers: BTreeMap<String, String> },
-    WebSocket { url: String },
+    ScreenCapture {
+        region: Region,
+        fps: f32,
+    },
+    HttpPoll {
+        url: String,
+        interval_ms: u64,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+    WebSocket {
+        url: String,
+    },
     /// 표준 입력 한 줄 = JSON 하나.
     StdinJson,
     /// 파일 내용(이미지/CSV 행)을 주기적으로 다시 읽는다.
-    File { path: String, interval_ms: u64 },
-    Timer { interval_ms: u64 },
+    File {
+        path: String,
+        interval_ms: u64,
+    },
+    Timer {
+        interval_ms: u64,
+    },
     /// GUI 위젯 이벤트(버튼 클릭, 슬라이더 값, 텍스트).
-    GuiEvent { widget: WidgetId },
+    GuiEvent {
+        widget: WidgetId,
+    },
     /// 빌더에서 사용자가 값을 직접 넣는 시험용 소스.
     Manual,
     /// **인바운드** HTTP 서버. 배포된 앱을 바깥 프로그램이 호출할 수 있게 연다.
@@ -50,17 +67,38 @@ pub enum Source {
 #[serde(tag = "type")]
 pub enum InputAction {
     None,
-    MoveTo { x: i32, y: i32 },
-    Click { button: MouseButton },
+    MoveTo {
+        x: i32,
+        y: i32,
+    },
+    Click {
+        button: MouseButton,
+    },
     /// 현재 커서 기준 상대 이동.
-    MoveBy { dx: i32, dy: i32 },
-    KeyTap { key: String },
-    KeyDown { key: String },
-    KeyUp { key: String },
-    TypeText { text: String },
-    Scroll { dx: i32, dy: i32 },
+    MoveBy {
+        dx: i32,
+        dy: i32,
+    },
+    KeyTap {
+        key: String,
+    },
+    KeyDown {
+        key: String,
+    },
+    KeyUp {
+        key: String,
+    },
+    TypeText {
+        text: String,
+    },
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
     /// 여러 액션 순서대로.
-    Sequence { steps: Vec<InputAction> },
+    Sequence {
+        steps: Vec<InputAction>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -75,17 +113,38 @@ pub enum MouseButton {
 #[serde(tag = "type")]
 pub enum Sink {
     /// 입력값(정수 인덱스) → `actions[index]`.
-    MouseKeyboard { actions: Vec<InputAction>, #[serde(default)] cooldown_ms: u64 },
+    MouseKeyboard {
+        actions: Vec<InputAction>,
+        #[serde(default)]
+        cooldown_ms: u64,
+    },
     /// `body_template` 안의 `{{value}}` 를 입력 JSON 으로 치환.
-    HttpCall { method: String, url: String, #[serde(default)] headers: BTreeMap<String, String>, #[serde(default)] body_template: String },
-    WebSocketSend { url: String },
+    HttpCall {
+        method: String,
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        #[serde(default)]
+        body_template: String,
+    },
+    WebSocketSend {
+        url: String,
+    },
     StdoutJson,
-    GuiWidget { widget: WidgetId },
-    File { path: String, #[serde(default)] append: bool },
+    GuiWidget {
+        widget: WidgetId,
+    },
+    File {
+        path: String,
+        #[serde(default)]
+        append: bool,
+    },
     Log,
     /// [`Source::HttpServer`] 노드가 받은 요청에 값을 JSON 으로 돌려준다.
     /// `server` 는 그 서버 노드의 id 여야 한다 (같은 파이프라인 안).
-    HttpReply { server: PNodeId },
+    HttpReply {
+        server: PNodeId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -106,11 +165,21 @@ pub enum Logic {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PNodeKind {
-    Source { source: Source },
+    Source {
+        source: Source,
+    },
     /// 모델 추론. `payload` 가 인코더/디코더를 정한다(없으면 모델의 payload).
-    Model { model: ModelId, #[serde(default)] payload: Option<PayloadId> },
-    Logic { logic: Logic },
-    Sink { sink: Sink },
+    Model {
+        model: ModelId,
+        #[serde(default)]
+        payload: Option<PayloadId>,
+    },
+    Logic {
+        logic: Logic,
+    },
+    Sink {
+        sink: Sink,
+    },
 }
 
 impl PNodeKind {
@@ -167,7 +236,12 @@ pub struct PNode {
 
 impl PNode {
     pub fn new(kind: PNodeKind, pos: [f32; 2]) -> Self {
-        Self { id: PNodeId::new(), name: String::new(), kind, pos }
+        Self {
+            id: PNodeId::new(),
+            name: String::new(),
+            kind,
+            pos,
+        }
     }
 }
 
@@ -193,7 +267,10 @@ pub fn new_token() -> String {
         bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
     }
     bytes.truncate(TOKEN_LEN);
-    bytes.iter().map(|b| TOKEN_ALPHABET[(*b % 64) as usize] as char).collect()
+    bytes
+        .iter()
+        .map(|b| TOKEN_ALPHABET[(*b % 64) as usize] as char)
+        .collect()
 }
 
 /// `bind` 주소가 루프백(바깥에서 닿을 수 없는 곳)인가.
@@ -243,7 +320,13 @@ fn d_hz() -> f32 {
 
 impl Pipeline {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { id: PipelineId::new(), name: name.into(), nodes: BTreeMap::new(), links: BTreeMap::new(), tick_hz: d_hz() }
+        Self {
+            id: PipelineId::new(),
+            name: name.into(),
+            nodes: BTreeMap::new(),
+            links: BTreeMap::new(),
+            tick_hz: d_hz(),
+        }
     }
 
     pub fn add_node(&mut self, node: PNode) -> PNodeId {
@@ -264,7 +347,11 @@ impl Pipeline {
         if self.links.values().any(|l| l.from == from && l.to == to) {
             return None;
         }
-        let l = Link { id: LinkId::new(), from, to };
+        let l = Link {
+            id: LinkId::new(),
+            from,
+            to,
+        };
         let id = l.id;
         self.links.insert(id, l);
         Some(id)
@@ -272,7 +359,12 @@ impl Pipeline {
 
     pub fn remove_node(&mut self, id: PNodeId) -> (Option<PNode>, Vec<Link>) {
         let node = self.nodes.remove(&id);
-        let gone: Vec<LinkId> = self.links.values().filter(|l| l.from == id || l.to == id).map(|l| l.id).collect();
+        let gone: Vec<LinkId> = self
+            .links
+            .values()
+            .filter(|l| l.from == id || l.to == id)
+            .map(|l| l.id)
+            .collect();
         let links = gone.iter().filter_map(|k| self.links.remove(k)).collect();
         (node, links)
     }
@@ -319,7 +411,14 @@ mod tests {
 
     #[test]
     fn loopback_binds_are_recognised() {
-        for ok in ["127.0.0.1:8799", "127.0.0.1", "localhost:1", "LOCALHOST", "[::1]:8799", "::1"] {
+        for ok in [
+            "127.0.0.1:8799",
+            "127.0.0.1",
+            "localhost:1",
+            "LOCALHOST",
+            "[::1]:8799",
+            "::1",
+        ] {
             assert!(is_loopback_bind(ok), "{ok} 가 루프백으로 인식되지 않았다");
         }
         for no in ["0.0.0.0:8799", "192.168.0.5:80", "example.com:80", ""] {

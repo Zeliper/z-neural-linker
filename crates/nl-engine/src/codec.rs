@@ -4,9 +4,7 @@
 //! 배치 1 텐서(`[1, …]`)로 만든다. 디코드는 그 반대로 텐서에서 시작해 `field.decode` 를 적용한다.
 //! 결과 형상은 `Field::tensor_shape()` 와 일치한다.
 
-use crate::limits::{
-    check_image_size, checked_elems, decode_image, MAX_CLASSES, MAX_TOKENS,
-};
+use crate::limits::{check_image_size, checked_elems, decode_image, MAX_CLASSES, MAX_TOKENS};
 use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
@@ -20,7 +18,11 @@ pub enum Value {
     Text(String),
     Json(serde_json::Value),
     /// RGBA8, 행 우선.
-    Image { width: u32, height: u32, rgba: Vec<u8> },
+    Image {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
     Tensor(HostTensor),
 }
 
@@ -28,8 +30,16 @@ pub enum Value {
 #[derive(Clone, Debug)]
 enum Mid {
     /// `[c, h, w]` 행 우선, 값 범위는 원본 그대로(0..255).
-    Img { c: usize, h: usize, w: usize, data: Vec<f32> },
-    Vec { shape: Vec<usize>, data: Vec<f32> },
+    Img {
+        c: usize,
+        h: usize,
+        w: usize,
+        data: Vec<f32>,
+    },
+    Vec {
+        shape: Vec<usize>,
+        data: Vec<f32>,
+    },
     Json(serde_json::Value),
     /// `Tokenize` 가 정수 인덱스로 바꿔 주기를 기다리는 문자열.
     Text(String),
@@ -48,11 +58,9 @@ impl Mid {
 
 /// `field.encode` 체인을 적용해 배치 1 텐서를 만든다.
 pub fn encode(field: &Field, value: &Value) -> Result<HostTensor> {
-    let mut mid = start(field, value)
-        .with_context(|| format!("필드 '{}' 인코딩 시작 실패", field.name))?;
+    let mut mid = start(field, value).with_context(|| format!("필드 '{}' 인코딩 시작 실패", field.name))?;
     for (i, t) in field.encode.iter().enumerate() {
-        mid = apply_encode(mid, t)
-            .with_context(|| format!("필드 '{}' 의 encode[{i}] ({t:?}) 실패", field.name))?;
+        mid = apply_encode(mid, t).with_context(|| format!("필드 '{}' 의 encode[{i}] ({t:?}) 실패", field.name))?;
     }
     let (shape, data) = mid.into_parts()?;
     let mut full = vec![1usize];
@@ -64,7 +72,10 @@ pub fn encode(field: &Field, value: &Value) -> Result<HostTensor> {
 pub fn decode(field: &Field, tensor: &HostTensor) -> Result<Value> {
     // 배치 차원을 떼고 첫 샘플만 본다.
     let (sample_shape, data) = first_sample(tensor);
-    let mut cur = Dec::Nums { shape: sample_shape, data };
+    let mut cur = Dec::Nums {
+        shape: sample_shape,
+        data,
+    };
     for (i, t) in field.decode.iter().enumerate() {
         cur = apply_decode(cur, t, field)
             .with_context(|| format!("필드 '{}' 의 decode[{i}] ({t:?}) 실패", field.name))?;
@@ -93,7 +104,11 @@ fn first_sample(t: &HostTensor) -> (Vec<usize>, Vec<f32>) {
 
 fn start(field: &Field, value: &Value) -> Result<Mid> {
     match &field.kind {
-        FieldKind::Image { width, height, channels } => {
+        FieldKind::Image {
+            width,
+            height,
+            channels,
+        } => {
             let (w, h, c) = (*width, *height, *channels);
             if c != 1 && c != 3 {
                 bail!("이미지 채널은 1 또는 3 만 지원합니다 (지금 {c})");
@@ -105,9 +120,15 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
             let data = numbers(value)?;
             let want: usize = shape.iter().product();
             if data.len() != want {
-                bail!("Tensor 필드 형상 {shape:?} 은 원소 {want} 개인데 {} 개를 받았습니다", data.len());
+                bail!(
+                    "Tensor 필드 형상 {shape:?} 은 원소 {want} 개인데 {} 개를 받았습니다",
+                    data.len()
+                );
             }
-            Ok(Mid::Vec { shape: shape.clone(), data })
+            Ok(Mid::Vec {
+                shape: shape.clone(),
+                data,
+            })
         }
         FieldKind::Scalar => {
             let data = numbers(value)?;
@@ -121,7 +142,10 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
             if data.len() != *len {
                 bail!("Vector 필드 길이 {len} 인데 {} 개를 받았습니다", data.len());
             }
-            Ok(Mid::Vec { shape: vec![*len], data })
+            Ok(Mid::Vec {
+                shape: vec![*len],
+                data,
+            })
         }
         FieldKind::ClassLabel { labels } => {
             let idx = match value {
@@ -131,14 +155,20 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
                     .with_context(|| format!("라벨 '{s}' 이 목록에 없습니다"))?,
                 Value::Number(n) => *n as usize,
                 Value::Numbers(v) if v.len() == 1 => v[0] as usize,
-                other => bail!("ClassLabel 필드에는 Text 나 Number 가 필요합니다 (지금 {})", kind_of(other)),
+                other => bail!(
+                    "ClassLabel 필드에는 Text 나 Number 가 필요합니다 (지금 {})",
+                    kind_of(other)
+                ),
             };
             if idx >= labels.len() {
                 bail!("클래스 인덱스 {idx} 가 라벨 수 {} 를 넘습니다", labels.len());
             }
             let mut v = vec![0.0f32; labels.len()];
             v[idx] = 1.0;
-            Ok(Mid::Vec { shape: vec![labels.len()], data: v })
+            Ok(Mid::Vec {
+                shape: vec![labels.len()],
+                data: v,
+            })
         }
         FieldKind::Json => match value {
             Value::Json(j) => Ok(Mid::Json(j.clone())),
@@ -164,16 +194,29 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
 /// - 문자열 [`Value::Json`] — `data:image/...;base64,…` 또는 순수 base64 PNG/JPEG.
 fn image_start(value: &Value, w: usize, h: usize, c: usize) -> Result<Mid> {
     match value {
-        Value::Image { width: iw, height: ih, rgba } => {
+        Value::Image {
+            width: iw,
+            height: ih,
+            rgba,
+        } => {
             let data = rgba_to_planar(*iw as usize, *ih as usize, rgba, w, h, c)?;
             Ok(Mid::Img { c, h, w, data })
         }
         Value::Tensor(t) if t.shape.len() == 3 => {
             let want = checked_elems(&t.shape, "이미지 텐서")?;
             if want != t.data.len() {
-                bail!("이미지 텐서 형상 {:?} 은 원소 {want} 개인데 데이터는 {} 개입니다", t.shape, t.data.len());
+                bail!(
+                    "이미지 텐서 형상 {:?} 은 원소 {want} 개인데 데이터는 {} 개입니다",
+                    t.shape,
+                    t.data.len()
+                );
             }
-            Ok(Mid::Img { c: t.shape[0], h: t.shape[1], w: t.shape[2], data: t.data.clone() })
+            Ok(Mid::Img {
+                c: t.shape[0],
+                h: t.shape[1],
+                w: t.shape[2],
+                data: t.data.clone(),
+            })
         }
         Value::Numbers(v) => planar_from_flat(v, w, h, c, "Numbers", None),
         Value::Json(serde_json::Value::String(text)) => {
@@ -233,7 +276,12 @@ fn planar_from_flat(
         }
         bail!("{msg}");
     }
-    Ok(Mid::Img { c, h, w, data: values.to_vec() })
+    Ok(Mid::Img {
+        c,
+        h,
+        w,
+        data: values.to_vec(),
+    })
 }
 
 /// 중첩 배열의 각 단계 길이 (첫 원소 기준). 숫자면 빈 벡터.
@@ -299,7 +347,10 @@ fn image_bytes_from_str(text: &str) -> Result<Vec<u8>> {
         }
     };
     if !looks_like_image(&bytes) {
-        bail!("base64 를 풀었지만 PNG 도 JPEG 도 아닙니다 (앞 바이트: {:02X?})", &bytes[..bytes.len().min(8)]);
+        bail!(
+            "base64 를 풀었지만 PNG 도 JPEG 도 아닙니다 (앞 바이트: {:02X?})",
+            &bytes[..bytes.len().min(8)]
+        );
     }
     Ok(bytes)
 }
@@ -350,7 +401,12 @@ fn rgba_to_planar(iw: usize, ih: usize, rgba: &[u8], w: usize, h: usize, c: usiz
     check_image_size(w as u32, h as u32, "목표 이미지")?;
     let need = checked_elems(&[iw, ih, 4], "RGBA 버퍼")?;
     if rgba.len() < need {
-        bail!("RGBA 버퍼가 {}×{} 에 비해 짧습니다 ({} 바이트, {need} 필요)", iw, ih, rgba.len());
+        bail!(
+            "RGBA 버퍼가 {}×{} 에 비해 짧습니다 ({} 바이트, {need} 필요)",
+            iw,
+            ih,
+            rgba.len()
+        );
     }
     checked_elems(&[c, h, w], "목표 이미지")?;
     let img = image::RgbaImage::from_raw(iw as u32, ih as u32, rgba[..need].to_vec())
@@ -386,7 +442,12 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             };
             check_image_size(*width as u32, *height as u32, "Resize 목표")?;
             let out = resample(&data, c, h, w, *height, *width)?;
-            Ok(Mid::Img { c, h: *height, w: *width, data: out })
+            Ok(Mid::Img {
+                c,
+                h: *height,
+                w: *width,
+                data: out,
+            })
         }
         Transform::Grayscale => {
             let Mid::Img { c, h, w, data } = mid else {
@@ -427,7 +488,12 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
                     out[dst..dst + width].copy_from_slice(&data[src..src + width]);
                 }
             }
-            Ok(Mid::Img { c, h: *height, w: *width, data: out })
+            Ok(Mid::Img {
+                c,
+                h: *height,
+                w: *width,
+                data: out,
+            })
         }
         Transform::Normalize { mean, std } => {
             let (shape, mut data) = mid.into_parts()?;
@@ -456,7 +522,10 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             }
             let mut v = vec![0.0f32; *classes];
             v[idx] = 1.0;
-            Ok(Mid::Vec { shape: vec![*classes], data: v })
+            Ok(Mid::Vec {
+                shape: vec![*classes],
+                data: v,
+            })
         }
         Transform::JsonPointer { pointer } => {
             let Mid::Json(j) = mid else {
@@ -472,7 +541,10 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
         Transform::Argmax => {
             let (_, data) = mid.into_parts()?;
             let idx = argmax(&data);
-            Ok(Mid::Vec { shape: vec![1], data: vec![idx as f32] })
+            Ok(Mid::Vec {
+                shape: vec![1],
+                data: vec![idx as f32],
+            })
         }
         Transform::Softmax => {
             let (shape, data) = mid.into_parts()?;
@@ -489,7 +561,10 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             let Mid::Text(text) = mid else {
                 bail!("Tokenize 는 Text 필드에만 쓸 수 있습니다");
             };
-            Ok(Mid::Vec { shape: vec![*max_len], data: tokenize(&text, vocab, *max_len)? })
+            Ok(Mid::Vec {
+                shape: vec![*max_len],
+                data: tokenize(&text, vocab, *max_len)?,
+            })
         }
         Transform::MapLabel => bail!("MapLabel 은 디코드 전용입니다"),
     }
@@ -517,7 +592,12 @@ fn tokenize(text: &str, vocab: &str, max_len: usize) -> Result<Vec<f32>> {
 
 fn rebuild(shape: Vec<usize>, data: Vec<f32>) -> Mid {
     if shape.len() == 3 {
-        Mid::Img { c: shape[0], h: shape[1], w: shape[2], data }
+        Mid::Img {
+            c: shape[0],
+            h: shape[1],
+            w: shape[2],
+            data,
+        }
     } else {
         Mid::Vec { shape, data }
     }
@@ -531,10 +611,18 @@ fn normalize(data: &mut [f32], shape: &[usize], mean: &[f32], std: &[f32], inver
     if std.iter().any(|s| s.abs() < f32::EPSILON) {
         bail!("Normalize 의 std 에 0 이 있습니다");
     }
-    let (channels, per) = if shape.len() == 3 { (shape[0], shape[1] * shape[2]) } else { (1, data.len()) };
+    let (channels, per) = if shape.len() == 3 {
+        (shape[0], shape[1] * shape[2])
+    } else {
+        (1, data.len())
+    };
     let pick = |i: usize, v: &[f32]| if v.len() == 1 { v[0] } else { v[i % v.len()] };
     if mean.len() != 1 && mean.len() != channels {
-        bail!("Normalize mean 길이 {} 가 채널 {} 과 맞지 않습니다", mean.len(), channels);
+        bail!(
+            "Normalize mean 길이 {} 가 채널 {} 과 맞지 않습니다",
+            mean.len(),
+            channels
+        );
     }
     if std.len() != 1 && std.len() != channels {
         bail!("Normalize std 길이 {} 가 채널 {} 과 맞지 않습니다", std.len(), channels);
@@ -543,7 +631,11 @@ fn normalize(data: &mut [f32], shape: &[usize], mean: &[f32], std: &[f32], inver
         let (m, s) = (pick(ch, mean), pick(ch, std));
         for i in 0..per {
             let idx = ch * per + i;
-            data[idx] = if inverse { data[idx] * s + m } else { (data[idx] - m) / s };
+            data[idx] = if inverse {
+                data[idx] * s + m
+            } else {
+                (data[idx] - m) / s
+            };
         }
     }
     Ok(())
@@ -563,8 +655,14 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
         Dec::Text(_) => bail!("이미 문자열이 된 값에는 더 이상 변환을 적용할 수 없습니다"),
     };
     Ok(match t {
-        Transform::Softmax => Dec::Nums { shape, data: softmax(&data) },
-        Transform::Argmax => Dec::Nums { shape: vec![1], data: vec![argmax(&data) as f32] },
+        Transform::Softmax => Dec::Nums {
+            shape,
+            data: softmax(&data),
+        },
+        Transform::Argmax => Dec::Nums {
+            shape: vec![1],
+            data: vec![argmax(&data) as f32],
+        },
         Transform::Threshold { value } => {
             for v in data.iter_mut() {
                 *v = if *v >= *value { 1.0 } else { 0.0 };
@@ -594,9 +692,12 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
             } else {
                 argmax(&data)
             };
-            let name = labels
-                .get(idx)
-                .with_context(|| format!("클래스 인덱스 {idx} 에 해당하는 라벨이 없습니다 (라벨 {} 개)", labels.len()))?;
+            let name = labels.get(idx).with_context(|| {
+                format!(
+                    "클래스 인덱스 {idx} 에 해당하는 라벨이 없습니다 (라벨 {} 개)",
+                    labels.len()
+                )
+            })?;
             Dec::Text(name.clone())
         }
         // 인코드의 역변환.
@@ -613,13 +714,20 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
         Transform::OneHot { classes } => {
             check_classes(*classes)?;
             // 디코드 쪽 OneHot 은 인덱스를 one-hot 벡터로 펼친다.
-            let idx = if data.len() == 1 { data[0] as usize } else { argmax(&data) };
+            let idx = if data.len() == 1 {
+                data[0] as usize
+            } else {
+                argmax(&data)
+            };
             if idx >= *classes {
                 bail!("OneHot 인덱스 {idx} 가 클래스 수 {classes} 를 넘습니다");
             }
             let mut v = vec![0.0f32; *classes];
             v[idx] = 1.0;
-            Dec::Nums { shape: vec![*classes], data: v }
+            Dec::Nums {
+                shape: vec![*classes],
+                data: v,
+            }
         }
         Transform::Resize { .. } | Transform::Grayscale | Transform::Crop { .. } => {
             bail!("이미지 변환({t:?})은 디코드에 쓸 수 없습니다")
@@ -641,7 +749,13 @@ fn binary_index(v: f32) -> usize {
 }
 
 fn argmax(v: &[f32]) -> usize {
-    v.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m }).0
+    v.iter()
+        .enumerate()
+        .fold(
+            (0usize, f32::NEG_INFINITY),
+            |m, (i, &x)| if x > m.1 { (i, x) } else { m },
+        )
+        .0
 }
 
 fn softmax(v: &[f32]) -> Vec<f32> {
@@ -724,7 +838,11 @@ mod tests {
                 rgba.extend_from_slice(&[v, v / 2, 0, 255]);
             }
         }
-        Value::Image { width: w, height: h, rgba }
+        Value::Image {
+            width: w,
+            height: h,
+            rgba,
+        }
     }
 
     #[test]
@@ -734,16 +852,31 @@ mod tests {
         let t = encode(f, &checkerboard(16, 12)).unwrap();
         assert_eq!(t.shape, vec![1, 3, 6, 8]);
         assert_eq!(f.tensor_shape(), Some(vec![3, 6, 8]));
-        assert!(t.data.iter().all(|v| (0.0..=1.0).contains(v)), "Scale 이 0..1 로 만들어야 한다");
+        assert!(
+            t.data.iter().all(|v| (0.0..=1.0).contains(v)),
+            "Scale 이 0..1 로 만들어야 한다"
+        );
     }
 
     #[test]
     fn resize_grayscale_crop_chain_follows_field_shape() {
-        let mut f = Field::new("img", FieldKind::Image { width: 16, height: 16, channels: 3 });
+        let mut f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 16,
+                height: 16,
+                channels: 3,
+            },
+        );
         f.encode = vec![
             Transform::Resize { width: 8, height: 8 },
             Transform::Grayscale,
-            Transform::Crop { x: 1, y: 1, width: 4, height: 4 },
+            Transform::Crop {
+                x: 1,
+                y: 1,
+                width: 4,
+                height: 4,
+            },
         ];
         let t = encode(&f, &checkerboard(16, 16)).unwrap();
         assert_eq!(t.shape, vec![1, 1, 4, 4]);
@@ -771,7 +904,9 @@ mod tests {
     #[test]
     fn json_pointer_extracts_numbers() {
         let mut f = Field::new("j", FieldKind::Json);
-        f.encode = vec![Transform::JsonPointer { pointer: "/data/values".into() }];
+        f.encode = vec![Transform::JsonPointer {
+            pointer: "/data/values".into(),
+        }];
         let j = serde_json::json!({"data": {"values": [1.0, 2.0, 3.0]}});
         let t = encode(&f, &Value::Json(j)).unwrap();
         assert_eq!(t.shape, vec![1, 3]);
@@ -781,7 +916,10 @@ mod tests {
     #[test]
     fn text_tokenizes_into_a_padded_index_tensor() {
         let mut f = Field::new("t", FieldKind::Text);
-        f.encode = vec![Transform::Tokenize { vocab: "abc".into(), max_len: 5 }];
+        f.encode = vec![Transform::Tokenize {
+            vocab: "abc".into(),
+            max_len: 5,
+        }];
         // 인덱스는 1 부터, 없는 문자('z')와 남는 자리는 0.
         let t = encode(&f, &Value::Text("cabz".into())).unwrap();
         assert_eq!(t.shape, vec![1, 5]);
@@ -804,19 +942,37 @@ mod tests {
     #[test]
     fn tokenize_rejects_bad_settings_and_wrong_fields() {
         let mut f = Field::new("t", FieldKind::Text);
-        f.encode = vec![Transform::Tokenize { vocab: String::new(), max_len: 4 }];
+        f.encode = vec![Transform::Tokenize {
+            vocab: String::new(),
+            max_len: 4,
+        }];
         assert!(encode(&f, &Value::Text("x".into())).is_err(), "빈 vocab");
 
-        f.encode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 0 }];
+        f.encode = vec![Transform::Tokenize {
+            vocab: "ab".into(),
+            max_len: 0,
+        }];
         assert!(encode(&f, &Value::Text("x".into())).is_err(), "max_len 0");
 
         let mut g = Field::new("v", FieldKind::Vector { len: 2 });
-        g.encode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 2 }];
-        assert!(encode(&g, &Value::Numbers(vec![1.0, 2.0])).is_err(), "Text 가 아닌 필드");
+        g.encode = vec![Transform::Tokenize {
+            vocab: "ab".into(),
+            max_len: 2,
+        }];
+        assert!(
+            encode(&g, &Value::Numbers(vec![1.0, 2.0])).is_err(),
+            "Text 가 아닌 필드"
+        );
 
         let mut h = Field::new("t", FieldKind::Text);
-        h.decode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 2 }];
-        assert!(decode(&h, &HostTensor::new(vec![1, 2], vec![1.0, 2.0])).is_err(), "디코드 전용 아님");
+        h.decode = vec![Transform::Tokenize {
+            vocab: "ab".into(),
+            max_len: 2,
+        }];
+        assert!(
+            decode(&h, &HostTensor::new(vec![1, 2], vec![1.0, 2.0])).is_err(),
+            "디코드 전용 아님"
+        );
     }
 
     // ── Image 입력의 여러 모습 (HTTP 추론 API) ──
@@ -824,13 +980,22 @@ mod tests {
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
         let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 8) as u8, (y * 8) as u8, 128]));
         let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
         out.into_inner()
     }
 
     #[test]
     fn image_accepts_flat_and_nested_json_numbers() {
-        let f = Field::new("img", FieldKind::Image { width: 2, height: 2, channels: 1 });
+        let f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 2,
+                height: 2,
+                channels: 1,
+            },
+        );
         // 평탄 배열.
         let flat = serde_json::json!([1.0, 2.0, 3.0, 4.0]);
         let t = encode(&f, &Value::Json(flat)).unwrap();
@@ -848,14 +1013,31 @@ mod tests {
 
     #[test]
     fn image_json_shape_mismatch_names_the_expected_shape() {
-        let f = Field::new("img", FieldKind::Image { width: 4, height: 3, channels: 3 });
-        let e = format!("{:#}", encode(&f, &Value::Json(serde_json::json!([1.0, 2.0]))).unwrap_err());
+        let f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 4,
+                height: 3,
+                channels: 3,
+            },
+        );
+        let e = format!(
+            "{:#}",
+            encode(&f, &Value::Json(serde_json::json!([1.0, 2.0]))).unwrap_err()
+        );
         assert!(e.contains("[3, 3, 4]"), "기대 형상이 없습니다: {e}");
         assert!(e.contains("36"), "기대 원소 수가 없습니다: {e}");
 
         // 채널이 마지막인 배열은 원소 수가 같아 개수로는 못 잡는다 — 중첩 순서로 잡아야 한다.
         // 필드는 [c=3][h=2][w=4], 들어온 것은 [h=2][w=4][c=3] (둘 다 24 개).
-        let g = Field::new("img", FieldKind::Image { width: 4, height: 2, channels: 3 });
+        let g = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 4,
+                height: 2,
+                channels: 3,
+            },
+        );
         let hwc = serde_json::json!([
             [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
             [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
@@ -879,7 +1061,14 @@ mod tests {
 
     #[test]
     fn image_accepts_base64_png_with_and_without_data_url() {
-        let mut f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 3 });
+        let mut f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 4,
+                height: 4,
+                channels: 3,
+            },
+        );
         f.encode = vec![Transform::Scale { min: 0.0, max: 255.0 }];
         let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes(8, 8));
 
@@ -896,10 +1085,20 @@ mod tests {
 
     #[test]
     fn image_rejects_strings_that_are_not_images() {
-        let f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 3 });
+        let f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 4,
+                height: 4,
+                channels: 3,
+            },
+        );
         // base64 로 풀리지만 이미지가 아니다.
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello world hello world");
-        let e = format!("{:#}", encode(&f, &Value::Json(serde_json::Value::String(b64))).unwrap_err());
+        let e = format!(
+            "{:#}",
+            encode(&f, &Value::Json(serde_json::Value::String(b64))).unwrap_err()
+        );
         assert!(e.contains("PNG") && e.contains("JPEG"), "{e}");
 
         // base64 조차 아니다.
@@ -921,15 +1120,31 @@ mod tests {
 
     #[test]
     fn normalize_validates_std_length_too() {
-        let mut f = Field::new("img", FieldKind::Image { width: 2, height: 2, channels: 3 });
-        f.encode = vec![Transform::Normalize { mean: vec![0.0; 3], std: vec![1.0, 2.0] }];
+        let mut f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 2,
+                height: 2,
+                channels: 3,
+            },
+        );
+        f.encode = vec![Transform::Normalize {
+            mean: vec![0.0; 3],
+            std: vec![1.0, 2.0],
+        }];
         let e = format!("{:#}", encode(&f, &Value::Numbers(vec![0.0; 12])).unwrap_err());
         assert!(e.contains("std"), "{e}");
 
         // 길이 1(전체 적용)과 채널 수는 통과한다.
-        f.encode = vec![Transform::Normalize { mean: vec![0.0], std: vec![2.0] }];
+        f.encode = vec![Transform::Normalize {
+            mean: vec![0.0],
+            std: vec![2.0],
+        }];
         assert!(encode(&f, &Value::Numbers(vec![4.0; 12])).is_ok());
-        f.encode = vec![Transform::Normalize { mean: vec![0.0; 3], std: vec![1.0, 2.0, 4.0] }];
+        f.encode = vec![Transform::Normalize {
+            mean: vec![0.0; 3],
+            std: vec![1.0, 2.0, 4.0],
+        }];
         assert!(encode(&f, &Value::Numbers(vec![4.0; 12])).is_ok());
     }
 
@@ -940,39 +1155,84 @@ mod tests {
         f.decode = vec![Transform::MapLabel];
 
         // 확률 (0..1): 0.5 기준.
-        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![0.7])).unwrap(), Value::Text("예".into()));
-        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![0.3])).unwrap(), Value::Text("아니오".into()));
+        assert_eq!(
+            decode(&f, &HostTensor::new(vec![1, 1], vec![0.7])).unwrap(),
+            Value::Text("예".into())
+        );
+        assert_eq!(
+            decode(&f, &HostTensor::new(vec![1, 1], vec![0.3])).unwrap(),
+            Value::Text("아니오".into())
+        );
         // 로짓 (범위 밖): 0 기준.
-        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![2.5])).unwrap(), Value::Text("예".into()));
-        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![-2.5])).unwrap(), Value::Text("아니오".into()));
+        assert_eq!(
+            decode(&f, &HostTensor::new(vec![1, 1], vec![2.5])).unwrap(),
+            Value::Text("예".into())
+        );
+        assert_eq!(
+            decode(&f, &HostTensor::new(vec![1, 1], vec![-2.5])).unwrap(),
+            Value::Text("아니오".into())
+        );
 
         // 라벨이 3 개인데 단일 실수가 오면 모호하므로 오류로 알린다.
-        let mut g = Field::new("c", FieldKind::ClassLabel { labels: vec!["a".into(), "b".into(), "c".into()] });
+        let mut g = Field::new(
+            "c",
+            FieldKind::ClassLabel {
+                labels: vec!["a".into(), "b".into(), "c".into()],
+            },
+        );
         g.decode = vec![Transform::MapLabel];
         let e = format!("{:#}", decode(&g, &HostTensor::new(vec![1, 1], vec![0.7])).unwrap_err());
         assert!(e.contains("Argmax"), "{e}");
         // 정수 인덱스는 그대로 통한다.
-        assert_eq!(decode(&g, &HostTensor::new(vec![1, 1], vec![2.0])).unwrap(), Value::Text("c".into()));
+        assert_eq!(
+            decode(&g, &HostTensor::new(vec![1, 1], vec![2.0])).unwrap(),
+            Value::Text("c".into())
+        );
     }
 
     // ── 보안 (M19): 악성 입력이 패닉이 아니라 Err ──
 
     #[test]
     fn zero_sized_resize_chain_errors_instead_of_panicking() {
-        let mut f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 1 });
-        f.encode = vec![Transform::Resize { width: 0, height: 0 }, Transform::Resize { width: 4, height: 4 }];
+        let mut f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 4,
+                height: 4,
+                channels: 1,
+            },
+        );
+        f.encode = vec![
+            Transform::Resize { width: 0, height: 0 },
+            Transform::Resize { width: 4, height: 4 },
+        ];
         assert!(encode(&f, &Value::Numbers(vec![0.0; 16])).is_err());
     }
 
     #[test]
     fn oversized_transform_parameters_are_rejected() {
-        let mut f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 1 });
+        let mut f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 4,
+                height: 4,
+                channels: 1,
+            },
+        );
         // 거대 Resize — 할당을 시도하기 전에 거절해야 한다.
-        f.encode = vec![Transform::Resize { width: 100_000, height: 100_000 }];
+        f.encode = vec![Transform::Resize {
+            width: 100_000,
+            height: 100_000,
+        }];
         assert!(encode(&f, &Value::Numbers(vec![0.0; 16])).is_err());
 
         // Crop 의 x + width 가 usize 를 넘는다.
-        f.encode = vec![Transform::Crop { x: usize::MAX, y: 0, width: 4, height: 4 }];
+        f.encode = vec![Transform::Crop {
+            x: usize::MAX,
+            y: 0,
+            width: 4,
+            height: 4,
+        }];
         assert!(encode(&f, &Value::Numbers(vec![0.0; 16])).is_err());
 
         // 거대 OneHot.
@@ -982,22 +1242,42 @@ mod tests {
 
         // 거대 Tokenize.
         let mut h = Field::new("t", FieldKind::Text);
-        h.encode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: usize::MAX }];
+        h.encode = vec![Transform::Tokenize {
+            vocab: "ab".into(),
+            max_len: usize::MAX,
+        }];
         assert!(encode(&h, &Value::Text("a".into())).is_err());
     }
 
     #[test]
     fn image_field_with_absurd_dimensions_is_rejected() {
-        let f = Field::new("img", FieldKind::Image { width: 100_000, height: 100_000, channels: 3 });
+        let f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 100_000,
+                height: 100_000,
+                channels: 3,
+            },
+        );
         let e = format!("{:#}", encode(&f, &Value::Numbers(vec![0.0; 4])).unwrap_err());
         assert!(e.contains("상한"), "{e}");
     }
 
     #[test]
     fn mismatched_tensor_image_is_rejected() {
-        let f = Field::new("img", FieldKind::Image { width: 2, height: 2, channels: 1 });
+        let f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 2,
+                height: 2,
+                channels: 1,
+            },
+        );
         // 형상은 [1,2,2](4 개)인데 데이터가 2 개뿐 — 릴리스에서도 잡아야 한다.
-        let bad = HostTensor { shape: vec![1, 2, 2], data: vec![1.0, 2.0] };
+        let bad = HostTensor {
+            shape: vec![1, 2, 2],
+            data: vec![1.0, 2.0],
+        };
         assert!(encode(&f, &Value::Tensor(bad)).is_err());
     }
 
@@ -1008,8 +1288,17 @@ mod tests {
         let t = HostTensor::new(vec![1, 3], vec![0.2, 0.9, 0.5]);
         assert_eq!(decode(&f, &t).unwrap(), Value::Numbers(vec![0.0, 1.0, 1.0]));
 
-        let mut g = Field::new("i", FieldKind::Tensor { shape: vec![1, 2, 2], dtype: Default::default() });
-        g.encode = vec![Transform::Normalize { mean: vec![0.5], std: vec![0.25] }];
+        let mut g = Field::new(
+            "i",
+            FieldKind::Tensor {
+                shape: vec![1, 2, 2],
+                dtype: Default::default(),
+            },
+        );
+        g.encode = vec![Transform::Normalize {
+            mean: vec![0.5],
+            std: vec![0.25],
+        }];
         let enc = encode(&g, &Value::Numbers(vec![0.5, 0.75, 0.25, 0.5])).unwrap();
         assert_eq!(enc.data, vec![0.0, 1.0, -1.0, 0.0]);
     }

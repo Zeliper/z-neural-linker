@@ -32,10 +32,16 @@ impl HostTensor {
     }
     pub fn zeros(shape: Vec<usize>) -> Self {
         let n = checked_elems(&shape, "텐서").expect("zeros 형상");
-        Self { shape, data: vec![0.0; n] }
+        Self {
+            shape,
+            data: vec![0.0; n],
+        }
     }
     pub fn scalar(v: f32) -> Self {
-        Self { shape: vec![1], data: vec![v] }
+        Self {
+            shape: vec![1],
+            data: vec![v],
+        }
     }
     pub fn numel(&self) -> usize {
         self.data.len()
@@ -51,7 +57,12 @@ impl HostTensor {
         }
         self.data
             .chunks(last)
-            .map(|row| row.iter().enumerate().fold((0, f32::NEG_INFINITY), |m, (i, &v)| if v > m.1 { (i, v) } else { m }).0)
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .fold((0, f32::NEG_INFINITY), |m, (i, &v)| if v > m.1 { (i, v) } else { m })
+                    .0
+            })
             .collect()
     }
 }

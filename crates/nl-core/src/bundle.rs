@@ -186,7 +186,12 @@ impl BuildSpec {
             app_name: p.name.clone(),
             entry_pipeline: p.pipelines.keys().next().copied(),
             default_device: p.settings.default_device,
-            models: p.models.values().filter(|m| m.weights.is_some()).map(|m| m.id).collect(),
+            models: p
+                .models
+                .values()
+                .filter(|m| m.weights.is_some())
+                .map(|m| m.id)
+                .collect(),
             targets: vec![],
             ..Self::default()
         }
@@ -253,7 +258,10 @@ mod tests {
     #[test]
     fn arm_input_defaults_to_off_and_round_trips() {
         let m = BundleManifest::new("내 앱", "1.2.3");
-        assert!(!m.arm_input, "기본은 입력 금지 — 받은 사람이 모르는 사이 커서가 움직이면 안 된다");
+        assert!(
+            !m.arm_input,
+            "기본은 입력 금지 — 받은 사람이 모르는 사이 커서가 움직이면 안 된다"
+        );
 
         // 켜서 왕복.
         let mut armed = m.clone();

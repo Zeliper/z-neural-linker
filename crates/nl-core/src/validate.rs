@@ -29,10 +29,18 @@ pub struct Issue {
 }
 
 fn err(at: Where, m: impl Into<String>) -> Issue {
-    Issue { severity: Severity::Error, at, message: m.into() }
+    Issue {
+        severity: Severity::Error,
+        at,
+        message: m.into(),
+    }
 }
 fn warn(at: Where, m: impl Into<String>) -> Issue {
-    Issue { severity: Severity::Warning, at, message: m.into() }
+    Issue {
+        severity: Severity::Warning,
+        at,
+        message: m.into(),
+    }
 }
 
 /// `from` 에서 링크를 따라 닿을 수 있는 모든 노드 (자기 자신 제외).
@@ -82,7 +90,10 @@ pub fn validate(p: &Project) -> Vec<Issue> {
         }
         for n in m.graph.nodes.values() {
             if !reach.contains(&n.id) && !matches!(n.kind, LayerKind::Output) && !rep.errors.contains_key(&n.id) {
-                v.push(warn(Where::Node(*mid, n.id), format!("{}: 출력에 연결되지 않음", n.display_name())));
+                v.push(warn(
+                    Where::Node(*mid, n.id),
+                    format!("{}: 출력에 연결되지 않음", n.display_name()),
+                ));
             }
         }
         if let Some(d) = m.train.dataset {
@@ -100,7 +111,9 @@ pub fn validate(p: &Project) -> Vec<Issue> {
         // ── HTTP 서버가 마우스·키보드를 구동할 수 있는가 ──
         // 원격 요청 하나로 남의 컴퓨터를 조작하게 되는 조합이라, 토큰이 없으면 오류로 막는다.
         for (server_id, token) in pl.nodes.values().filter_map(|n| match &n.kind {
-            PNodeKind::Source { source: Source::HttpServer { token, .. } } => Some((n.id, token.clone())),
+            PNodeKind::Source {
+                source: Source::HttpServer { token, .. },
+            } => Some((n.id, token.clone())),
             _ => None,
         }) {
             let reached = reachable_from(pl, server_id);
@@ -108,7 +121,12 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                 .iter()
                 .copied()
                 .filter(|id| {
-                    matches!(pl.nodes.get(id).map(|x| &x.kind), Some(PNodeKind::Sink { sink: Sink::MouseKeyboard { .. } }))
+                    matches!(
+                        pl.nodes.get(id).map(|x| &x.kind),
+                        Some(PNodeKind::Sink {
+                            sink: Sink::MouseKeyboard { .. }
+                        })
+                    )
                 })
                 .collect();
             if driven.is_empty() {
@@ -136,7 +154,10 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                 if !p.models.contains_key(model) {
                     v.push(err(Where::PNode(*pid, n.id), "참조하는 모델이 없음"));
                 } else if p.models[model].weights.is_none() {
-                    v.push(warn(Where::PNode(*pid, n.id), format!("모델 '{}' 에 학습된 가중치가 없음", p.models[model].name)));
+                    v.push(warn(
+                        Where::PNode(*pid, n.id),
+                        format!("모델 '{}' 에 학습된 가중치가 없음", p.models[model].name),
+                    ));
                 }
                 if let Some(pay) = payload {
                     if !p.payloads.contains_key(pay) {
@@ -145,11 +166,22 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                 }
             }
             // HTTP 응답 싱크는 같은 파이프라인의 HTTP 서버 소스를 가리켜야 한다.
-            if let PNodeKind::Sink { sink: Sink::HttpReply { server } } = &n.kind {
+            if let PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            } = &n.kind
+            {
                 match pl.nodes.get(server) {
-                    None => v.push(err(Where::PNode(*pid, n.id), "HTTP 응답: 가리키는 서버 노드가 이 파이프라인에 없음")),
+                    None => v.push(err(
+                        Where::PNode(*pid, n.id),
+                        "HTTP 응답: 가리키는 서버 노드가 이 파이프라인에 없음",
+                    )),
                     Some(target) => {
-                        if !matches!(target.kind, PNodeKind::Source { source: Source::HttpServer { .. } }) {
+                        if !matches!(
+                            target.kind,
+                            PNodeKind::Source {
+                                source: Source::HttpServer { .. }
+                            }
+                        ) {
                             v.push(err(
                                 Where::PNode(*pid, n.id),
                                 format!("HTTP 응답: 가리키는 노드가 HTTP 서버가 아님 ({})", target.kind.label()),
@@ -159,10 +191,11 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                 }
             }
             // 인증 없는 HTTP 서버는 루프백에서만 열 수 있다. 그 밖의 주소는 실행기가 거부한다.
-            if let PNodeKind::Source { source: Source::HttpServer { bind, token, .. } } = &n.kind {
-                if token.as_ref().is_none_or(|t| t.trim().is_empty())
-                    && !crate::pipeline::is_loopback_bind(bind)
-                {
+            if let PNodeKind::Source {
+                source: Source::HttpServer { bind, token, .. },
+            } = &n.kind
+            {
+                if token.as_ref().is_none_or(|t| t.trim().is_empty()) && !crate::pipeline::is_loopback_bind(bind) {
                     v.push(err(
                         Where::PNode(*pid, n.id),
                         format!(
@@ -173,10 +206,13 @@ pub fn validate(p: &Project) -> Vec<Issue> {
             }
 
             // 응답할 싱크가 없는 HTTP 서버는 모든 요청이 시간 초과로 끝난다.
-            if let PNodeKind::Source { source: Source::HttpServer { .. } } = &n.kind {
-                let replied = pl.nodes.values().any(|o| {
-                    matches!(&o.kind, PNodeKind::Sink { sink: Sink::HttpReply { server } } if *server == n.id)
-                });
+            if let PNodeKind::Source {
+                source: Source::HttpServer { .. },
+            } = &n.kind
+            {
+                let replied = pl.nodes.values().any(
+                    |o| matches!(&o.kind, PNodeKind::Sink { sink: Sink::HttpReply { server } } if *server == n.id),
+                );
                 if !replied {
                     v.push(warn(
                         Where::PNode(*pid, n.id),
@@ -188,10 +224,16 @@ pub fn validate(p: &Project) -> Vec<Issue> {
             let ups = pl.upstream(n.id).len();
             let downs = pl.downstream(n.id).len();
             if !n.kind.is_source() && ups == 0 {
-                v.push(warn(Where::PNode(*pid, n.id), format!("{}: 입력이 연결되지 않음", n.kind.label())));
+                v.push(warn(
+                    Where::PNode(*pid, n.id),
+                    format!("{}: 입력이 연결되지 않음", n.kind.label()),
+                ));
             }
             if !n.kind.is_sink() && downs == 0 {
-                v.push(warn(Where::PNode(*pid, n.id), format!("{}: 출력이 연결되지 않음", n.kind.label())));
+                v.push(warn(
+                    Where::PNode(*pid, n.id),
+                    format!("{}: 출력이 연결되지 않음", n.kind.label()),
+                ));
             }
         }
     }
@@ -211,11 +253,22 @@ mod tests {
         let mut p = Project::new("p");
         let mut pl = Pipeline::new("api");
         let server = pl.add_node(PNode::new(
-            PNodeKind::Source { source: Source::HttpServer { bind: "127.0.0.1:0".into(), path: "/x".into(), token: None } },
+            PNodeKind::Source {
+                source: Source::HttpServer {
+                    bind: "127.0.0.1:0".into(),
+                    path: "/x".into(),
+                    token: None,
+                },
+            },
             [0.0, 0.0],
         ));
         let log = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
-        let reply = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [2.0, 0.0]));
+        let reply = pl.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [2.0, 0.0],
+        ));
         pl.add_link(server, reply).unwrap();
         let pid = pl.id;
         p.pipelines.insert(pid, pl);
@@ -223,25 +276,35 @@ mod tests {
         // 올바른 짝이면 HTTP 관련 오류가 없다.
         let issues = validate(&p);
         assert!(
-            !issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("HTTP 응답")),
+            !issues
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.message.contains("HTTP 응답")),
             "{issues:?}"
         );
 
         // 서버가 아닌 노드를 가리키면 오류.
-        p.pipelines.get_mut(&pid).unwrap().nodes.get_mut(&reply).unwrap().kind =
-            PNodeKind::Sink { sink: Sink::HttpReply { server: log } };
+        p.pipelines.get_mut(&pid).unwrap().nodes.get_mut(&reply).unwrap().kind = PNodeKind::Sink {
+            sink: Sink::HttpReply { server: log },
+        };
         let issues = validate(&p);
         assert!(
-            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("HTTP 서버가 아님")),
+            issues
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.message.contains("HTTP 서버가 아님")),
             "{issues:?}"
         );
 
         // 없는 노드를 가리키면 오류.
-        p.pipelines.get_mut(&pid).unwrap().nodes.get_mut(&reply).unwrap().kind =
-            PNodeKind::Sink { sink: Sink::HttpReply { server: PNodeId::from_u128(999) } };
+        p.pipelines.get_mut(&pid).unwrap().nodes.get_mut(&reply).unwrap().kind = PNodeKind::Sink {
+            sink: Sink::HttpReply {
+                server: PNodeId::from_u128(999),
+            },
+        };
         let issues = validate(&p);
         assert!(
-            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("이 파이프라인에 없음")),
+            issues
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.message.contains("이 파이프라인에 없음")),
             "{issues:?}"
         );
     }
@@ -267,13 +330,17 @@ mod tests {
             ));
             // 중간에 로직을 하나 끼워 "직접이 아니라 거쳐서도" 잡히는지 본다.
             let logic = pl.add_node(PNode::new(
-                PNodeKind::Logic { logic: Logic::Threshold { value: 0.5 } },
+                PNodeKind::Logic {
+                    logic: Logic::Threshold { value: 0.5 },
+                },
                 [1.0, 0.0],
             ));
             let click = pl.add_node(PNode::new(
                 PNodeKind::Sink {
                     sink: Sink::MouseKeyboard {
-                        actions: vec![InputAction::Click { button: MouseButton::Left }],
+                        actions: vec![InputAction::Click {
+                            button: MouseButton::Left,
+                        }],
                         cooldown_ms: 0,
                     },
                 },
@@ -312,7 +379,9 @@ mod tests {
         // 빈 토큰은 없는 것과 같다.
         let issues = validate(&build(Some("   ")));
         assert!(
-            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("마우스·키보드를 움직인다")),
+            issues
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.message.contains("마우스·키보드를 움직인다")),
             "빈 토큰이 통과했다: {issues:?}"
         );
     }
@@ -325,15 +394,26 @@ mod tests {
         let mut pl = Pipeline::new("api");
         let server = pl.add_node(PNode::new(
             PNodeKind::Source {
-                source: Source::HttpServer { bind: "127.0.0.1:0".into(), path: "/x".into(), token: None },
+                source: Source::HttpServer {
+                    bind: "127.0.0.1:0".into(),
+                    path: "/x".into(),
+                    token: None,
+                },
             },
             [0.0, 0.0],
         ));
-        let reply = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = pl.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         pl.add_link(server, reply).unwrap();
         p.pipelines.insert(pl.id, pl);
         assert!(
-            !validate(&p).iter().any(|i| i.message.contains("마우스·키보드를 움직인다")),
+            !validate(&p)
+                .iter()
+                .any(|i| i.message.contains("마우스·키보드를 움직인다")),
             "{:?}",
             validate(&p)
         );
@@ -356,18 +436,31 @@ mod tests {
                 },
                 [0.0, 0.0],
             ));
-            let reply = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+            let reply = pl.add_node(PNode::new(
+                PNodeKind::Sink {
+                    sink: Sink::HttpReply { server },
+                },
+                [1.0, 0.0],
+            ));
             pl.add_link(server, reply).unwrap();
             p.pipelines.insert(pl.id, pl);
             p
         };
         let flagged = |p: &Project| {
-            validate(p).iter().any(|i| i.severity == Severity::Error && i.message.contains("바깥에서 닿는 주소"))
+            validate(p)
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.message.contains("바깥에서 닿는 주소"))
         };
 
-        assert!(flagged(&build("0.0.0.0:8799", None)), "0.0.0.0 에 토큰 없이 여는데 통과했다");
+        assert!(
+            flagged(&build("0.0.0.0:8799", None)),
+            "0.0.0.0 에 토큰 없이 여는데 통과했다"
+        );
         assert!(flagged(&build("192.168.0.5:8799", None)));
-        assert!(!flagged(&build("0.0.0.0:8799", Some("t"))), "토큰이 있으면 열 수 있어야 한다");
+        assert!(
+            !flagged(&build("0.0.0.0:8799", Some("t"))),
+            "토큰이 있으면 열 수 있어야 한다"
+        );
         assert!(!flagged(&build("127.0.0.1:8799", None)), "루프백은 토큰 없이도 된다");
         assert!(!flagged(&build("localhost:8799", None)));
         assert!(!flagged(&build("[::1]:8799", None)));
@@ -379,7 +472,13 @@ mod tests {
         let mut p = Project::new("p");
         let mut pl = Pipeline::new("api");
         let server = pl.add_node(PNode::new(
-            PNodeKind::Source { source: Source::HttpServer { bind: "127.0.0.1:0".into(), path: "/x".into(), token: None } },
+            PNodeKind::Source {
+                source: Source::HttpServer {
+                    bind: "127.0.0.1:0".into(),
+                    path: "/x".into(),
+                    token: None,
+                },
+            },
             [0.0, 0.0],
         ));
         let log = pl.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
@@ -387,7 +486,9 @@ mod tests {
         p.pipelines.insert(pl.id, pl);
         let issues = validate(&p);
         assert!(
-            issues.iter().any(|i| i.severity == Severity::Warning && i.message.contains("시간 초과")),
+            issues
+                .iter()
+                .any(|i| i.severity == Severity::Warning && i.message.contains("시간 초과")),
             "{issues:?}"
         );
     }
@@ -398,10 +499,20 @@ mod tests {
         let m = p.add_model("m");
         let g = &mut p.models.get_mut(&m).unwrap().graph;
         let a = g.add_node(Node::new(LayerKind::Input { shape: vec![4] }, [0.0, 0.0]));
-        let b = g.add_node(Node::new(LayerKind::Linear { out_features: 2, bias: true }, [0.0, 0.0]));
+        let b = g.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+            [0.0, 0.0],
+        ));
         g.add_edge(a, Port::new(b, 0)).unwrap();
         let issues = validate(&p);
-        assert!(issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("Output")));
-        assert!(issues.iter().any(|i| i.severity == Severity::Warning && i.message.contains("연결되지 않음")));
+        assert!(issues
+            .iter()
+            .any(|i| i.severity == Severity::Error && i.message.contains("Output")));
+        assert!(issues
+            .iter()
+            .any(|i| i.severity == Severity::Warning && i.message.contains("연결되지 않음")));
     }
 }

@@ -17,13 +17,26 @@ pub enum Dtype {
 #[serde(tag = "type")]
 pub enum FieldKind {
     /// 형상이 정해진 텐서 (샘플 형상).
-    Tensor { shape: Vec<usize>, #[serde(default)] dtype: Dtype },
+    Tensor {
+        shape: Vec<usize>,
+        #[serde(default)]
+        dtype: Dtype,
+    },
     /// 이미지. 인코더가 `[channels, h, w]` f32 로 만든다.
-    Image { width: usize, height: usize, #[serde(default = "three")] channels: usize },
+    Image {
+        width: usize,
+        height: usize,
+        #[serde(default = "three")]
+        channels: usize,
+    },
     Scalar,
-    Vector { len: usize },
+    Vector {
+        len: usize,
+    },
     /// 클래스 라벨 (정수 인덱스 ↔ 이름).
-    ClassLabel { labels: Vec<String> },
+    ClassLabel {
+        labels: Vec<String>,
+    },
     Text,
     /// 임의 JSON (파이프라인 소스/싱크 사이 전달용, 모델에 직접 넣을 수는 없음).
     Json,
@@ -46,27 +59,50 @@ fn three() -> usize {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Transform {
-    Resize { width: usize, height: usize },
+    Resize {
+        width: usize,
+        height: usize,
+    },
     Grayscale,
-    Crop { x: usize, y: usize, width: usize, height: usize },
+    Crop {
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    },
     /// 채널별 (x - mean) / std. 길이 1 이면 전체에 적용.
-    Normalize { mean: Vec<f32>, std: Vec<f32> },
+    Normalize {
+        mean: Vec<f32>,
+        std: Vec<f32>,
+    },
     /// 선형 [min, max] → [0, 1].
-    Scale { min: f32, max: f32 },
-    OneHot { classes: usize },
+    Scale {
+        min: f32,
+        max: f32,
+    },
+    OneHot {
+        classes: usize,
+    },
     Argmax,
     Softmax,
-    Threshold { value: f32 },
+    Threshold {
+        value: f32,
+    },
     /// 인덱스 → 라벨 이름 (ClassLabel 필드와 짝).
     MapLabel,
     /// JSON 포인터로 값 추출 (예: "/data/0/value").
-    JsonPointer { pointer: String },
+    JsonPointer {
+        pointer: String,
+    },
     /// 문자 단위 토크나이저 (`Text` 필드 → Embedding 입력).
     ///
     /// `vocab` 의 문자 하나가 인덱스 하나다. 인덱스는 **1 부터** 시작하고 0 은 패딩 겸 미지 문자다
     /// (따라서 Embedding 의 `vocab` 은 `vocab.chars().count() + 1` 이상이어야 한다).
     /// 결과는 길이 `max_len` 의 정수 텐서 — 짧으면 0 으로 채우고 길면 자른다.
-    Tokenize { vocab: String, max_len: usize },
+    Tokenize {
+        vocab: String,
+        max_len: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,14 +119,23 @@ pub struct Field {
 
 impl Field {
     pub fn new(name: impl Into<String>, kind: FieldKind) -> Self {
-        Self { name: name.into(), kind, encode: vec![], decode: vec![] }
+        Self {
+            name: name.into(),
+            kind,
+            encode: vec![],
+            decode: vec![],
+        }
     }
 
     /// 인코딩 후 모델에 들어가는 샘플 형상 (알 수 있을 때).
     pub fn tensor_shape(&self) -> Option<Vec<usize>> {
         let mut shape = match &self.kind {
             FieldKind::Tensor { shape, .. } => shape.clone(),
-            FieldKind::Image { width, height, channels } => vec![*channels, *height, *width],
+            FieldKind::Image {
+                width,
+                height,
+                channels,
+            } => vec![*channels, *height, *width],
             FieldKind::Scalar => vec![1],
             FieldKind::Vector { len } => vec![*len],
             FieldKind::ClassLabel { labels } => vec![labels.len()],
@@ -133,13 +178,25 @@ pub struct PayloadSpec {
 
 impl PayloadSpec {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { id: PayloadId::new(), name: name.into(), inputs: vec![], outputs: vec![] }
+        Self {
+            id: PayloadId::new(),
+            name: name.into(),
+            inputs: vec![],
+            outputs: vec![],
+        }
     }
 
     /// 분류 프리셋: 이미지 → 클래스.
     pub fn image_classifier(name: &str, w: usize, h: usize, labels: Vec<String>) -> Self {
         let mut p = Self::new(name);
-        let mut img = Field::new("image", FieldKind::Image { width: w, height: h, channels: 3 });
+        let mut img = Field::new(
+            "image",
+            FieldKind::Image {
+                width: w,
+                height: h,
+                channels: 3,
+            },
+        );
         img.encode = vec![Transform::Scale { min: 0.0, max: 255.0 }];
         p.inputs.push(img);
         let mut out = Field::new("class", FieldKind::ClassLabel { labels });
@@ -163,7 +220,14 @@ mod tests {
 
     #[test]
     fn image_field_shape_follows_encode_chain() {
-        let mut f = Field::new("img", FieldKind::Image { width: 640, height: 480, channels: 3 });
+        let mut f = Field::new(
+            "img",
+            FieldKind::Image {
+                width: 640,
+                height: 480,
+                channels: 3,
+            },
+        );
         f.encode = vec![Transform::Resize { width: 64, height: 32 }, Transform::Grayscale];
         assert_eq!(f.tensor_shape(), Some(vec![1, 32, 64]));
     }
