@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Neural Linker 사용자 설치 (Linux). 바이너리·데스크톱 항목·MIME(.nlproj) 연결을 ~/.local 아래에 넣는다.
+# 빌더(nl-app) 옆에 배포 런타임(nl-runtime)과 CLI(nl)가 같이 들어 있으면 함께 설치한다.
 #   ./install.sh [바이너리 경로]      기본: ../../target/release/nl-app
 #   ./install.sh --uninstall
 set -euo pipefail
@@ -18,7 +19,7 @@ MIME_DIR="$HOME/.local/share/mime"
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-  rm -f "$BIN_DIR/nl-app" "$BIN_DIR/nl-runtime" "$APP_DIR/neural-linker.desktop" \
+  rm -f "$BIN_DIR/nl-app" "$BIN_DIR/nl-runtime" "$BIN_DIR/nl" "$APP_DIR/neural-linker.desktop" \
         "$MIME_DIR/packages/neural-linker-mime.xml" "$ICON_DIR/neural-linker.svg"
   update-mime-database "$MIME_DIR" >/dev/null 2>&1 || true
   update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
@@ -30,9 +31,14 @@ fi
 mkdir -p "$BIN_DIR" "$APP_DIR" "$MIME_DIR/packages" "$ICON_DIR"
 install -m 755 "$BIN_SRC" "$BIN_DIR/nl-app"
 install -m 644 "$HERE/neural-linker.desktop" "$APP_DIR/neural-linker.desktop"
-# 배포 런타임이 같이 들어 있으면 빌더 옆에 둔다 — nl_bundle::find_runtime 이 거기서 찾는다.
-if [[ -x "$(dirname "$BIN_SRC")/nl-runtime" ]]; then
-  install -m 755 "$(dirname "$BIN_SRC")/nl-runtime" "$BIN_DIR/nl-runtime"
+# 배포 런타임이 같이 들어 있으면 빌더 옆에 둔다 — nl_bundle::find_runtime 규칙 ② 가 거기서 찾는다.
+SRC_DIR="$(dirname "$BIN_SRC")"
+if [[ -x "$SRC_DIR/nl-runtime" ]]; then
+  install -m 755 "$SRC_DIR/nl-runtime" "$BIN_DIR/nl-runtime"
+fi
+# CLI. 실행 파일 이름은 크레이트 이름(nl-cli)이 아니라 `nl` 이다.
+if [[ -x "$SRC_DIR/nl" ]]; then
+  install -m 755 "$SRC_DIR/nl" "$BIN_DIR/nl"
 fi
 install -m 644 "$HERE/neural-linker-mime.xml" "$MIME_DIR/packages/neural-linker-mime.xml"
 # 아이콘은 아직 저장소에 없다. 있으면 넣고 없으면 넘어간다 — set -e 때문에 여기서 설치가 통째로 멈추면 안 된다.
@@ -43,4 +49,7 @@ update-mime-database "$MIME_DIR" >/dev/null 2>&1 || true
 update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
 xdg-mime default neural-linker.desktop application/x-neural-linker >/dev/null 2>&1 || true
 echo "설치했습니다: $BIN_DIR/nl-app ($("$BIN_DIR/nl-app" --version))"
+# `set -e` 아래에서는 `[[ … ]] && echo` 가 마지막 줄이면 조건이 거짓일 때 종료 코드가 1 이 된다.
+if [[ -x "$BIN_DIR/nl-runtime" ]]; then echo "             $BIN_DIR/nl-runtime (배포 런타임)"; fi
+if [[ -x "$BIN_DIR/nl" ]]; then echo "             $BIN_DIR/nl (명령줄 도구)"; fi
 echo ".nlproj 파일을 더블클릭하면 Neural Linker 로 열립니다. \$PATH 에 $BIN_DIR 이 있어야 합니다."
