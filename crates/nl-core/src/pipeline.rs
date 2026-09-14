@@ -178,6 +178,24 @@ pub struct Link {
     pub to: PNodeId,
 }
 
+/// 토큰에 쓰는 글자. URL·헤더·셸 어디에 넣어도 따옴표가 필요 없다.
+const TOKEN_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+/// [`new_token`] 이 만드는 글자 수.
+pub const TOKEN_LEN: usize = 32;
+
+/// `Source::HttpServer` 에 넣을 무작위 토큰 (URL-safe 32자, 192비트).
+///
+/// 난수는 `uuid` v4 에서 가져온다 — nl-core 가 이미 쓰는 의존성이고 OS 난수(`getrandom`)를 쓴다.
+/// 알파벳이 64자라 바이트를 64로 나눈 나머지에 치우침이 없다(256 = 64 × 4).
+pub fn new_token() -> String {
+    let mut bytes = Vec::with_capacity(TOKEN_LEN);
+    while bytes.len() < TOKEN_LEN {
+        bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    }
+    bytes.truncate(TOKEN_LEN);
+    bytes.iter().map(|b| TOKEN_ALPHABET[(*b % 64) as usize] as char).collect()
+}
+
 /// `bind` 주소가 루프백(바깥에서 닿을 수 없는 곳)인가.
 ///
 /// `127.0.0.0/8`, `::1`, `localhost` 를 루프백으로 본다. 나머지(`0.0.0.0` 포함)는 아니다.
@@ -265,5 +283,56 @@ impl Pipeline {
 
     pub fn downstream(&self, id: PNodeId) -> Vec<PNodeId> {
         self.links.values().filter(|l| l.from == id).map(|l| l.to).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn tokens_are_url_safe_and_the_right_length() {
+        let t = new_token();
+        assert_eq!(t.chars().count(), TOKEN_LEN);
+        assert!(
+            t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "URL 에 그대로 못 넣는 글자가 있다: {t}"
+        );
+    }
+
+    #[test]
+    fn tokens_do_not_repeat() {
+        let set: BTreeSet<String> = (0..200).map(|_| new_token()).collect();
+        assert_eq!(set.len(), 200, "같은 토큰이 두 번 나왔다");
+    }
+
+    /// 알파벳 64자를 고르게 쓰는지 — 한쪽으로 쏠리면 실제 엔트로피가 준다.
+    #[test]
+    fn tokens_use_the_whole_alphabet() {
+        let mut seen = BTreeSet::new();
+        for _ in 0..500 {
+            seen.extend(new_token().chars());
+        }
+        assert!(seen.len() >= 60, "쓰인 글자가 {}종뿐이다", seen.len());
+    }
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        for ok in ["127.0.0.1:8799", "127.0.0.1", "localhost:1", "LOCALHOST", "[::1]:8799", "::1"] {
+            assert!(is_loopback_bind(ok), "{ok} 가 루프백으로 인식되지 않았다");
+        }
+        for no in ["0.0.0.0:8799", "192.168.0.5:80", "example.com:80", ""] {
+            assert!(!is_loopback_bind(no), "{no} 가 루프백으로 인식됐다");
+        }
+    }
+
+    #[test]
+    fn host_is_split_from_the_port() {
+        assert_eq!(host_of_bind("127.0.0.1:8799"), "127.0.0.1");
+        assert_eq!(host_of_bind("[::1]:8799"), "::1");
+        assert_eq!(host_of_bind("::1"), "::1");
+        assert_eq!(host_of_bind("localhost"), "localhost");
+        assert_eq!(host_of_bind(" 127.0.0.1:1 "), "127.0.0.1");
     }
 }
