@@ -46,6 +46,13 @@ fn named(g: &mut Graph, k: LayerKind, name: &str) -> nl_core::NodeId {
     g.add_node(n)
 }
 
+/// 벤치 결과를 **기계가 읽는 한 줄**로도 낸다. `scripts/bench.sh` 가 이 줄만 골라 모은다.
+///
+/// 사람이 읽는 `BENCH …` 줄은 그대로 둔다 — 손으로 돌릴 때는 그쪽이 낫다.
+fn bench_json(name: &str, unit: &str, value: f64) {
+    println!("BENCHJSON {{\"name\":\"{name}\",\"unit\":\"{unit}\",\"value\":{value:.4}}}");
+}
+
 /// 학습을 끝까지 돌리고 로그까지 모아 돌려준다.
 fn train_collecting_logs(def: ModelDef, ds: DatasetSpec, dir: &Path) -> (RunRecord, Vec<String>) {
     let req = TrainRequest {
@@ -1873,6 +1880,7 @@ fn bench_xor_1000_samples_200_epochs() {
         elapsed.as_secs_f64() * 1000.0 / 200.0,
         last.train_loss
     );
+    bench_json("xor_1000x200_epoch", "ms", elapsed.as_secs_f64() * 1000.0 / 200.0);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1921,6 +1929,11 @@ fn bench_lstm_sequence_lengths() {
             "BENCH lstm len={len} hidden=64 batch=32: 스텝당 {:.1} ms (에포크 {:.3}초, {steps} 스텝)",
             last.seconds * 1000.0 / steps as f64,
             last.seconds
+        );
+        bench_json(
+            &format!("lstm_len{len}_step"),
+            "ms",
+            last.seconds * 1000.0 / steps as f64,
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1976,6 +1989,7 @@ fn bench_quadrants_cnn() {
         elapsed.as_secs_f64(),
         elapsed.as_secs_f64() * 1000.0 / 8.0
     );
+    bench_json("cnn_quadrants_epoch", "ms", elapsed.as_secs_f64() * 1000.0 / 8.0);
     std::fs::remove_dir_all(&dir).ok();
 }
 
