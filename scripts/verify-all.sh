@@ -5,12 +5,16 @@
 #
 #     --gui         헤드리스 sway 하네스로 uitest 시나리오까지 돈다 (sway·wtype·grim 필요)
 #     --fail-fast   첫 실패에서 멈춘다. 기본은 끝까지 돌고 마지막에 실패 목록을 낸다
-#     --out <폴더>  로그 위치. 기본 dist-local/verify/<시각>
+#     --out <폴더>  로그 위치. 기본 dist-local/verify/<시각>-<pid>
 #
 # 기본은 **끝까지 돈다.** 릴리스 직전에 알고 싶은 것은 "무엇이 처음 깨졌나" 가 아니라
 # "무엇무엇이 깨져 있나" 이기 때문이다. 한 번 돌려 목록을 받고 한꺼번에 고치는 편이 빠르다.
 #
 # 종료 코드는 실패한 단계 수(최대 125)다. 0 이면 전부 통과다.
+#
+# 이 스크립트는 **다른 것과 나란히 도는 것을 전제한다.** 산출물 폴더에 pid 를 붙이고, 종단 시험은
+# 샘플의 고정 포트(8799·8800) 대신 빈 포트를 쓰며, 정리할 때 남의 프로세스를 건드리지 않는다.
+# 규칙과 이유는 `scripts/README.md`.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +33,8 @@ while [[ $# -gt 0 ]]; do
     *)            echo "모르는 옵션: $1" >&2; exit 2 ;;
   esac
 done
-[[ -n "$OUT" ]] || OUT="$ROOT/dist-local/verify/$(date +%Y%m%d-%H%M%S)"
+# 시각에 pid 를 더한다. 같은 초에 두 번 돌아도 로그가 섞이지 않아야 한다 — `scripts/README.md`.
+[[ -n "$OUT" ]] || OUT="$ROOT/dist-local/verify/$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$OUT"
 
 # 하네스는 다른 에이전트·세션과 겹치지 않게 전용 폴더를 쓴다.
@@ -130,6 +135,8 @@ run_step fmt      "포맷 검사"   cargo fmt --all -- --check
 run_step clippy   "클리피"      cargo clippy --workspace --all-targets -- -D warnings
 run_step test     "테스트"      env NL_SNAPSHOT_REQUIRED=1 cargo test --workspace
 run_step build    "릴리스 빌드" cargo build --release -p nl-runtime -p nl-cli
+# 종단 시험은 샘플 프로젝트를 복사해 **빈 포트로 옮겨** 띄운다(`rebind_http_server`). 8799 를
+# 다른 세션이 쥐고 있어도 통과해야 하며, 통과하지 않으면 그것이 버그다.
 run_step e2e      "종단 시험"   env NL_E2E=1 cargo test -p nl-cli --test e2e
 
 if [[ $WANT_GUI -eq 1 ]]; then

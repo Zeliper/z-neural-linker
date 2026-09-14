@@ -774,6 +774,11 @@ loginctl enable-linger $USER
 시스템 전역 서비스로 돌리려면 유닛을 `/etc/systemd/system/` 에 두고 `User=`·`Group=`·`WorkingDirectory=`
 를 채우세요. 사용자 유닛에서는 `ProtectHome=` 을 켤 수 없습니다 — 홈을 통째로 가리면 앱이 쓸 것이 없습니다.
 
+템플릿에는 `Environment=MALLOC_ARENA_MAX=2` 가 들어 있습니다. glibc 가 스레드마다 malloc 아레나를
+새로 파는 탓에 오래 돌리면 RSS 가 분당 50 KiB 안팎으로 계속 늘었고, 2로 묶으니 평평해졌습니다
+(30분 부하 시험에서 확인). 누수가 아니라 반환되지 않은 여유 공간이며, Windows 는 힙이 달라 해당
+사항이 없습니다. 처리량이 아쉬우면 올려도 되지만 그만큼 RSS 가 늡니다.
+
 ### 토큰은 환경 파일로
 
 HTTP 서버 노드의 토큰을 유닛 파일에 적지 마세요. 유닛은 0644 로 읽히고 `systemctl cat` 에 그대로 나옵니다.
