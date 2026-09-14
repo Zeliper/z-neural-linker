@@ -110,6 +110,9 @@ enum Command {
         /// 이 이름의 HTTP 서버 노드에만 TLS 를 붙인다. 기본은 전부.
         #[arg(long, value_name = "이름")]
         http_node: Option<String>,
+        /// 사람용 줄 대신 한 줄 JSON 을 찍는다 (journald·Loki 로 바로 흘려보낼 때).
+        #[arg(long)]
+        log_json: bool,
     },
     /// 화면을 찍어 학습용 폴더를 만든다.
     Record {
@@ -263,6 +266,7 @@ fn dispatch() -> Result<i32> {
             tls_cert,
             tls_key,
             http_node,
+            log_json,
         } => run::run(run::Args {
             project: &project,
             pipeline: pipeline.as_deref(),
@@ -274,6 +278,7 @@ fn dispatch() -> Result<i32> {
                 key: tls_key.as_deref(),
                 node: http_node.as_deref(),
             },
+            log_json,
         }),
         Command::Record {
             out,

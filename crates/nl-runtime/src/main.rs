@@ -48,6 +48,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// `--log-json` 이 켜졌는가. 사람용 안내를 어디로 보낼지 정한다.
+static LOG_JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 사람용 안내 한 줄.
+///
+/// JSON 모드에서는 **stderr** 로 보낸다. stdout 은 이벤트 전용이어야 수집기가 한 줄씩 그대로
+/// 먹는다 — 배너나 안내가 섞이면 그 줄에서 파싱이 깨진다. 안내를 없애지 않고 옮기는 이유는
+/// journald 가 두 스트림을 모두 받되 구분해 주기 때문이다.
+fn note(line: impl AsRef<str>) {
+    if LOG_JSON.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{}", line.as_ref());
+    } else {
+        println!("{}", line.as_ref());
+    }
+}
+
 /// 터미널에 글을 쓰는 경로인가. 창을 띄우는 GUI 실행만 아니면 전부 그렇다.
 fn wants_console(command: &Command) -> bool {
     match command {
@@ -58,17 +74,18 @@ fn wants_console(command: &Command) -> bool {
 }
 
 fn run(opts: Options) -> anyhow::Result<ExitCode> {
+    LOG_JSON.store(opts.log_json, std::sync::atomic::Ordering::Relaxed);
     // 환경 파일을 가장 먼저 읽는다. 토큰은 서버를 열 때 읽히므로 그전에 자리를 잡아야 하고,
     // 스레드가 뜨기 전이어야 환경 변수를 만지는 것이 안전하다.
     if let Some(path) = opts.env_file.as_deref() {
         let names = envfile::load(path)?;
         // 값은 비밀이라 찍지 않는다. 무엇이 들어갔는지만 알린다.
-        println!(
+        note(format!(
             "환경 파일 {} ({}개 적용: {})",
             path.display(),
             names.len(),
             names.join(", ")
-        );
+        ));
     }
     let Some(bundle) = load_bundle(opts.bundle_path.as_deref())? else {
         eprintln!("실행할 번들이 없습니다. `.nlapp` 파일을 인자로 주거나 번들이 첨부된 실행 파일로 실행하세요.\n");
@@ -84,6 +101,7 @@ fn run(opts: Options) -> anyhow::Result<ExitCode> {
             opts.run_for.map(Duration::from_secs_f64),
             !opts.no_update,
             work,
+            opts.log_json,
         )?;
     } else {
         run_gui(bundle, device, !opts.no_update, work)?;
@@ -106,7 +124,7 @@ fn open_work_dir(fixed: Option<&Path>, bundle: &Bundle) -> anyhow::Result<WorkDi
         WorkDir::fixed(path).map_err(|e| anyhow::anyhow!("작업 폴더를 열지 못했습니다 ({}): {e}", path.display()))?;
     let fingerprint = app::bundle_fingerprint(bundle);
     let extracted = app::sync_workspace(bundle, &fingerprint, work.path())?;
-    println!(
+    note(format!(
         "작업 폴더 {} ({})",
         work.path().display(),
         if extracted {
@@ -114,14 +132,14 @@ fn open_work_dir(fixed: Option<&Path>, bundle: &Bundle) -> anyhow::Result<WorkDi
         } else {
             "이미 풀려 있어 그대로 씁니다"
         }
-    );
+    ));
     // 처음 풀 때 한 번만 알린다. 인증서를 어디 둬야 하는지가 가장 자주 막히는 지점이다.
     if extracted && work.is_persistent() {
-        println!(
+        note(format!(
             "  인증서 같은 파일은 {}/ 에 두세요 — 번들을 갱신해도 남습니다 (예: cert_pem \"{}/server.crt\")",
             work.path().join(app::LOCAL_DIR).display(),
             app::LOCAL_DIR
-        );
+        ));
     }
     Ok(work)
 }
@@ -197,37 +215,39 @@ fn run_headless(
     run_for: Option<Duration>,
     updates: bool,
     work: WorkDir,
+    // 사람용 줄 대신 한 줄 JSON. stdout 한 줄이 곧 이벤트 하나여야 수집기가 그대로 먹는다.
+    log_json: bool,
 ) -> anyhow::Result<()> {
     let Some(pipeline) = app::entry_pipeline(&bundle.project, &bundle.manifest) else {
         anyhow::bail!("실행할 파이프라인이 없습니다 (매니페스트의 entry_pipeline 확인)");
     };
 
     signals::install();
-    println!(
+    note(format!(
         "{} {} 헤드리스 실행 · 파이프라인 {} · 장치 {}",
         bundle.manifest.app_name,
         bundle.manifest.app_version,
         pipeline.name,
         device.label()
-    );
+    ));
     match run_for {
-        Some(d) => println!(
+        Some(d) => note(format!(
             "{:.1}초 뒤 자동 종료합니다 (Ctrl+C 로 먼저 종료 가능).",
             d.as_secs_f64()
-        ),
-        None => println!("Ctrl+C 로 종료합니다."),
+        )),
+        None => note("Ctrl+C 로 종료합니다."),
     }
     let deadline = run_for.map(|d| std::time::Instant::now() + d);
 
     // 헤드리스는 확인만 한다 — 서버형 배포를 사람 확인 없이 바꿔치우지 않는다.
     let mut update = updates.then(|| update::UpdateUi::new(&bundle.manifest)).flatten();
     if let Some(u) = &mut update {
-        println!("업데이트를 확인합니다: {}", u.manifest_url());
+        note(format!("업데이트를 확인합니다: {}", u.manifest_url()));
         u.start_check();
     }
 
     if bundle.manifest.arm_input {
-        println!("{}", app::ARM_INPUT_NOTICE);
+        note(app::ARM_INPUT_NOTICE);
     }
     let handle = app::spawn_runner(
         &bundle.project,
@@ -242,19 +262,22 @@ fn run_headless(
         let timed_out = deadline.is_some_and(|t| std::time::Instant::now() >= t);
         if (signals::interrupted() || timed_out) && !asked_to_stop {
             asked_to_stop = true;
-            println!(
-                "{}",
-                if timed_out {
-                    "실행 시간이 끝났습니다. 파이프라인을 정지합니다."
-                } else {
-                    "종료 신호를 받았습니다. 파이프라인을 정지합니다."
-                }
-            );
+            note(if timed_out {
+                "실행 시간이 끝났습니다. 파이프라인을 정지합니다."
+            } else {
+                "종료 신호를 받았습니다. 파이프라인을 정지합니다."
+            });
             handle.stop();
         }
         match handle.events.recv_timeout(Duration::from_millis(200)) {
             Ok(ev) => {
-                println!("{}", app::describe_event(&ev));
+                // 모양을 정하는 곳은 `nl_io::event_json` 한 군데다 — `nl run` 과 같은 줄이 나와야
+                // 빌더·명령줄·배포판 로그를 한데 모아 볼 수 있다.
+                if log_json {
+                    println!("{}", nl_io::event_json(&ev));
+                } else {
+                    println!("{}", app::describe_event(&ev));
+                }
                 if matches!(ev, nl_io::RunnerEvent::Stopped) {
                     break;
                 }
@@ -277,7 +300,7 @@ fn drain_update(update: &mut Option<update::UpdateUi>) {
     let Some(u) = update else { return };
     for ev in u.poll() {
         if let Some(line) = update::describe(&ev) {
-            println!("{line}");
+            note(line);
         }
     }
 }

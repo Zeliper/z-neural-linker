@@ -14,6 +14,8 @@ pub struct Args<'a> {
     pub device: Option<&'a str>,
     /// `--tls-cert/--tls-key/--http-node`. 프로젝트 파일은 바뀌지 않는다.
     pub tls: TlsInject<'a>,
+    /// 사람용 줄 대신 한 줄 JSON 을 찍는다 (journald·Loki 로 바로 흘려보낼 때).
+    pub log_json: bool,
 }
 
 pub fn run(args: Args<'_>) -> Result<i32> {
@@ -36,23 +38,27 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         None => l.project.settings.default_device,
     };
 
-    println!(
-        "{} {} · 노드 {} · {:.0}Hz · 장치 {}",
-        bold("실행"),
-        pipeline.name,
-        pipeline.nodes.len(),
-        pipeline.tick_hz,
-        device.label()
-    );
-    if args.arm_input {
-        println!("{}", yellow("  마우스·키보드 싱크가 무장됐다 — 실제 입력이 나간다"));
-    }
-    if tls_nodes > 0 {
-        println!("  {} HTTP 서버 노드 {tls_nodes}개를 https 로 연다", dim("TLS"));
-    }
-    match args.seconds {
-        Some(s) => println!("  {} {s}초 뒤 자동 정지", dim("기간")),
-        None => println!("  {}", dim("Ctrl+C 로 정지")),
+    // JSON 모드에서는 사람용 머리말을 내지 않는다. **stdout 한 줄이 곧 한 이벤트**여야
+    // 수집기가 그대로 먹는다 — 중간에 다른 모양이 섞이면 파싱이 깨진다.
+    if !args.log_json {
+        println!(
+            "{} {} · 노드 {} · {:.0}Hz · 장치 {}",
+            bold("실행"),
+            pipeline.name,
+            pipeline.nodes.len(),
+            pipeline.tick_hz,
+            device.label()
+        );
+        if args.arm_input {
+            println!("{}", yellow("  마우스·키보드 싱크가 무장됐다 — 실제 입력이 나간다"));
+        }
+        if tls_nodes > 0 {
+            println!("  {} HTTP 서버 노드 {tls_nodes}개를 https 로 연다", dim("TLS"));
+        }
+        match args.seconds {
+            Some(s) => println!("  {} {s}초 뒤 자동 정지", dim("기간")),
+            None => println!("  {}", dim("Ctrl+C 로 정지")),
+        }
     }
 
     let mut runner = Runner::new(l.project.clone(), pipeline, l.base_dir.clone(), device);
@@ -68,14 +74,16 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         let over = deadline.is_some_and(|d| Instant::now() >= d);
         if (interrupted() || over) && !asked_stop {
             asked_stop = true;
-            println!(
-                "{}",
-                dim(if over {
-                    "  시간이 다 됐다 — 정지"
-                } else {
-                    "  중단 요청 — 정지"
-                })
-            );
+            if !args.log_json {
+                println!(
+                    "{}",
+                    dim(if over {
+                        "  시간이 다 됐다 — 정지"
+                    } else {
+                        "  중단 요청 — 정지"
+                    })
+                );
+            }
             handle.stop();
         }
         match handle.events.recv_timeout(Duration::from_millis(100)) {
@@ -83,7 +91,11 @@ pub fn run(args: Args<'_>) -> Result<i32> {
                 if matches!(ev, RunnerEvent::Error { .. }) {
                     errors += 1;
                 }
-                if let Some(line) = format_event(&l.project, &ev, start) {
+                if args.log_json {
+                    // 값·미리보기·통계까지 **전부** 낸다. 사람용 출력은 시끄러워서 접지만,
+                    // 수집기는 그것들이 있어야 처리량과 지연을 볼 수 있다.
+                    println!("{}", nl_io::event_json(&ev));
+                } else if let Some(line) = format_event(&l.project, &ev, start) {
                     println!("{line}");
                 }
                 if matches!(ev, RunnerEvent::Stopped) {
@@ -94,12 +106,14 @@ pub fn run(args: Args<'_>) -> Result<i32> {
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
-    println!();
-    println!(
-        "{} {:.1}초 · 오류 {errors}건",
-        bold("종료"),
-        start.elapsed().as_secs_f64()
-    );
+    if !args.log_json {
+        println!();
+        println!(
+            "{} {:.1}초 · 오류 {errors}건",
+            bold("종료"),
+            start.elapsed().as_secs_f64()
+        );
+    }
     Ok(if errors > 0 { 1 } else { 0 })
 }
 
