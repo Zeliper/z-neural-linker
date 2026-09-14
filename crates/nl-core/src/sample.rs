@@ -113,10 +113,12 @@ pub fn api_pipeline(base: u128, bind: &str, model: ModelId, payload: PayloadId) 
         PNodeKind::Source {
             // 샘플은 루프백(127.0.0.1)에만 묶으므로 토큰 없이도 열린다. 바깥에서 닿는 주소로 바꾸려면
             // 토큰을 함께 넣어야 한다 — 그러지 않으면 실행기가 거부한다.
+            // TLS 도 없다: 루프백은 전선을 타지 않으므로 인증서를 요구할 이유가 없다.
             source: Source::HttpServer {
                 bind: bind.into(),
                 path: API_PATH.into(),
                 token: None,
+                tls: None,
             },
         },
         "요청",
@@ -596,7 +598,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}: HTTP 서버 노드가 없다"));
             match &server.kind {
                 PNodeKind::Source {
-                    source: Source::HttpServer { bind, path, token },
+                    source: Source::HttpServer { bind, path, token, tls },
                 } => {
                     assert!(
                         [API_BIND, API_BIND_CNN].contains(&bind.as_str()),
@@ -605,6 +607,9 @@ mod tests {
                     assert_eq!(path, API_PATH);
                     assert!(token.is_none(), "샘플은 루프백이라 토큰 없이 연다");
                     assert!(crate::pipeline::is_loopback_bind(bind), "샘플 주소가 루프백이 아니다");
+                    // 루프백은 전선을 타지 않으므로 샘플에 인증서를 딸려 보내지 않는다.
+                    // 샘플을 열자마자 없는 파일을 찾느라 실패하는 일이 없어야 한다.
+                    assert!(tls.is_none(), "샘플은 TLS 없이 연다");
                 }
                 _ => unreachable!(),
             }

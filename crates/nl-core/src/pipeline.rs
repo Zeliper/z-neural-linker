@@ -54,12 +54,33 @@ pub enum Source {
     /// `token` 이 있으면 요청마다 `Authorization: Bearer <token>` 이나 `X-NL-Token: <token>` 을 요구한다.
     /// 없으면 **루프백 주소에 묶였을 때만** 열린다 — 바깥에서 닿는 주소에 인증 없이 여는 것은 실행기가 거부한다.
     /// 이 서버는 파이프라인을 구동하므로, 마우스·키보드 싱크가 붙어 있으면 인증이 곧 원격 조작 방지선이다.
+    ///
+    /// `tls` 를 주면 https 로 연다. 토큰 규칙은 TLS 와 **무관하게** 그대로다 — TLS 는 도청과
+    /// 중간자를 막을 뿐, 누가 부를 수 있는지는 정해 주지 않는다.
     HttpServer {
         bind: String,
         path: String,
         #[serde(default)]
         token: Option<String>,
+        #[serde(default)]
+        tls: Option<TlsConfig>,
     },
+}
+
+/// `HttpServer` 를 https 로 열 때 쓰는 인증서와 개인키.
+///
+/// 값은 PEM **파일의 경로**다(내용이 아니다). 프로젝트 폴더 기준 상대 경로로 적고,
+/// 실행기가 그 폴더 밖으로는 열어 주지 않는다 — 키를 아무 데서나 읽어 오지 못하게 하는 것이다.
+/// 키는 PKCS#8·PKCS#1·SEC1 중 무엇이어도 된다.
+///
+/// 리버스 프록시를 앞에 두는 배포라면 이 필드는 비워 둔다. 프록시가 TLS 를 끝내고
+/// 루프백으로 넘겨 주는 구성이 여전히 가장 단순하다.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// 인증서 사슬 PEM. 서버 인증서를 맨 앞에 두고 중간 인증서를 뒤에 잇는다.
+    pub cert_pem: String,
+    /// 개인키 PEM.
+    pub key_pem: String,
 }
 
 /// 마우스·키보드 액션. 모델 출력(클래스 인덱스)에 대응시킨다.

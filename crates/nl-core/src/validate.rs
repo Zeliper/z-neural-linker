@@ -205,6 +205,23 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                 }
             }
 
+            // 바깥 주소에 평문으로 여는 것은 막지는 않되 짚어 준다. 토큰이 있어도 평문이면
+            // 그 토큰과 요청 본문이 전선 위에 그대로 흐른다.
+            if let PNodeKind::Source {
+                source: Source::HttpServer { bind, tls, .. },
+            } = &n.kind
+            {
+                if tls.is_none() && !crate::pipeline::is_loopback_bind(bind) {
+                    v.push(warn(
+                        Where::PNode(*pid, n.id),
+                        format!(
+                            "HTTP 서버: {bind} 는 바깥에서 닿는 주소인데 TLS 가 없다 \
+                             (토큰과 본문이 평문으로 오간다 — 인증서를 넣거나 앞에 리버스 프록시를 두어라)"
+                        ),
+                    ));
+                }
+            }
+
             // 응답할 싱크가 없는 HTTP 서버는 모든 요청이 시간 초과로 끝난다.
             if let PNodeKind::Source {
                 source: Source::HttpServer { .. },
@@ -258,6 +275,7 @@ mod tests {
                     bind: "127.0.0.1:0".into(),
                     path: "/x".into(),
                     token: None,
+                    tls: None,
                 },
             },
             [0.0, 0.0],
@@ -324,6 +342,7 @@ mod tests {
                         bind: "127.0.0.1:0".into(),
                         path: "/x".into(),
                         token: token.map(str::to_string),
+                        tls: None,
                     },
                 },
                 [0.0, 0.0],
@@ -398,6 +417,7 @@ mod tests {
                     bind: "127.0.0.1:0".into(),
                     path: "/x".into(),
                     token: None,
+                    tls: None,
                 },
             },
             [0.0, 0.0],
@@ -419,6 +439,52 @@ mod tests {
         );
     }
 
+    /// 바깥 주소를 평문으로 여는 것은 경고다 — 토큰이 있어도 전선 위에서는 보인다.
+    #[test]
+    fn a_non_loopback_bind_without_tls_is_a_warning() {
+        use crate::pipeline::{PNode, PNodeKind, Pipeline, Sink, Source, TlsConfig};
+        let build = |bind: &str, tls: Option<TlsConfig>| {
+            let mut p = Project::new("p");
+            let mut pl = Pipeline::new("api");
+            let server = pl.add_node(PNode::new(
+                PNodeKind::Source {
+                    source: Source::HttpServer {
+                        // 토큰은 넣어 둔다 — TLS 경고가 토큰 오류에 묻히지 않게.
+                        bind: bind.into(),
+                        path: "/x".into(),
+                        token: Some("t".repeat(32)),
+                        tls,
+                    },
+                },
+                [0.0, 0.0],
+            ));
+            let reply = pl.add_node(PNode::new(
+                PNodeKind::Sink {
+                    sink: Sink::HttpReply { server },
+                },
+                [1.0, 0.0],
+            ));
+            pl.add_link(server, reply).unwrap();
+            p.pipelines.insert(pl.id, pl);
+            validate(&p)
+        };
+        let has_tls_warning = |issues: &[Issue]| {
+            issues
+                .iter()
+                .any(|i| i.severity == Severity::Warning && i.message.contains("TLS 가 없다"))
+        };
+
+        let pem = |name: &str| TlsConfig {
+            cert_pem: format!("{name}.crt"),
+            key_pem: format!("{name}.key"),
+        };
+        assert!(has_tls_warning(&build("0.0.0.0:8799", None)), "평문 노출을 안 짚었다");
+        assert!(!has_tls_warning(&build("0.0.0.0:8799", Some(pem("a")))), "TLS 가 있는데 경고했다");
+        // 루프백은 전선을 타지 않으므로 평문이어도 짚지 않는다.
+        assert!(!has_tls_warning(&build("127.0.0.1:8799", None)), "루프백을 짚었다");
+        assert!(!has_tls_warning(&build("localhost:8799", None)), "localhost 를 짚었다");
+    }
+
     /// 바깥에서 닿는 주소에 토큰 없이 여는 것은 오류다.
     #[test]
     fn a_non_loopback_bind_without_a_token_is_an_error() {
@@ -432,6 +498,7 @@ mod tests {
                         bind: bind.into(),
                         path: "/x".into(),
                         token: token.map(str::to_string),
+                        tls: None,
                     },
                 },
                 [0.0, 0.0],
@@ -477,6 +544,7 @@ mod tests {
                     bind: "127.0.0.1:0".into(),
                     path: "/x".into(),
                     token: None,
+                    tls: None,
                 },
             },
             [0.0, 0.0],
