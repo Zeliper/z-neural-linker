@@ -30,7 +30,24 @@
 //!
 //! # 숫자 벡터
 //! curl -d '[0.8,-0.8]' http://127.0.0.1:8799/infer
+//!
+//! # 토큰이 걸린 서버 (둘 중 아무 헤더나)
+//! curl -H 'Authorization: Bearer <token>' -d '[0.8,-0.8]' http://127.0.0.1:8799/infer
+//! curl -H 'X-NL-Token: <token>'           -d '[0.8,-0.8]' http://127.0.0.1:8799/infer
 //! ```
+//!
+//! ## 누가 부를 수 있나
+//! 이 서버는 파이프라인을 **구동한다**. `Sink::MouseKeyboard` 가 붙어 있으면 요청 하나가 남의 컴퓨터를
+//! 움직이므로, 인증은 기능이 아니라 방어선이다. [`AccessPolicy`] 가 요청마다 세 가지를 본다.
+//!
+//! | 조건 | 결과 |
+//! |---|---|
+//! | `Source::HttpServer::token` 이 있는데 헤더가 없거나 틀림 | 401 |
+//! | `Origin` 헤더가 있음 (브라우저에서 온 요청) | 403 |
+//! | `Host` 가 바인드 주소도 `localhost` 도 아님 (DNS rebinding) | 400 |
+//!
+//! 토큰이 없으면 **루프백 바인드에서만** 열린다. 바깥에서 닿는 주소(`0.0.0.0` 등)에 토큰 없이 열려고 하면
+//! 준비 단계에서 오류로 거부한다. `nl_core::validate` 도 같은 조건을 미리 잡아 준다.
 //!
 //! 되돌아오는 쪽도 값에 맞춘다. [`Sink::HttpReply`] 에 이미지가 그대로 오면 `image/png` 로, 로직을 거쳐
 //! 숫자가 됐으면 `application/json` 으로 답한다.
@@ -225,6 +242,87 @@ const HTTP_SERVER_POLL: Duration = Duration::from_millis(50);
 /// 클라이언트가 문자열로도 구분할 수 있게 한다 (상태 코드 503 이 본래 계약이다).
 pub const MODEL_LOADING: &str = "모델을 올리는 중입니다 (model loading). 잠시 뒤 다시 시도하세요";
 
+/// 인바운드 서버의 접근 정책. 수신 스레드가 요청마다 확인한다.
+///
+/// 이 서버는 파이프라인을 구동한다 — 마우스·키보드 싱크가 붙어 있으면 요청 하나가 남의 컴퓨터를
+/// 움직인다. 그래서 세 겹으로 막는다.
+///
+/// 1. **토큰**: `Authorization: Bearer <token>` 이나 `X-NL-Token`. 없거나 틀리면 401.
+///    토큰이 설정돼 있지 않으면 루프백 바인드에서만 열린다(그 확인은 [`start_http_server`] 가 한다).
+/// 2. **`Origin` 금지**: 헤더가 있으면 403. 브라우저에서 온 요청이라는 뜻이고, 웹페이지가
+///    `fetch(..., mode:'no-cors')` 로 몰래 두드리는 길을 막는다. CORS preflight(`OPTIONS`)도 같이 막힌다.
+/// 3. **`Host` 확인**: 바인드 주소나 `localhost` 가 아니면 400. DNS rebinding 으로 남의 이름을 태워
+///    보내는 요청을 걸러 낸다.
+struct AccessPolicy {
+    /// 요구할 토큰. `None` 이면 검사하지 않는다(루프백 전용).
+    token: Option<String>,
+    /// 받아들일 `Host` 값들 (소문자, 포트 포함/미포함 양쪽).
+    allowed_hosts: Vec<String>,
+}
+
+impl AccessPolicy {
+    fn new(bind: &str, token: Option<&str>) -> Self {
+        let token = token.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
+        let host = nl_core::pipeline::host_of_bind(bind).to_ascii_lowercase();
+        let port = bind.rsplit_once(':').map(|(_, p)| p.to_owned()).unwrap_or_default();
+        let mut allowed_hosts = vec![host.clone()];
+        // 루프백은 이름으로도 온다. 어느 쪽이든 "내 컴퓨터" 를 가리키므로 같이 받는다.
+        if nl_core::pipeline::is_loopback_bind(bind) {
+            allowed_hosts.extend(["localhost".into(), "127.0.0.1".into(), "::1".into(), "[::1]".into()]);
+        }
+        // 포트가 붙은 형태도 받는다.
+        if !port.is_empty() {
+            let with_port: Vec<String> = allowed_hosts.iter().map(|h| format!("{h}:{port}")).collect();
+            allowed_hosts.extend(with_port);
+        }
+        allowed_hosts.sort();
+        allowed_hosts.dedup();
+        Self { token, allowed_hosts }
+    }
+
+    /// 요청을 받아들일지. 거절이면 `(상태 코드, 사유)`.
+    fn check(&self, origin: Option<&str>, host: Option<&str>, auth: Option<&str>, nl_token: Option<&str>)
+        -> Result<(), (u16, String)>
+    {
+        // 브라우저에서 온 요청은 받지 않는다. 사람이 연 페이지가 몰래 부르는 길을 막는다.
+        if let Some(o) = origin {
+            return Err((403, format!("브라우저에서 온 요청은 받지 않는다 (Origin: {o})")));
+        }
+        // Host 가 바인드와 다르면 남의 이름을 태워 온 요청이다 (DNS rebinding).
+        if let Some(h) = host {
+            let h = h.trim().to_ascii_lowercase();
+            if !self.allowed_hosts.contains(&h) {
+                return Err((
+                    400,
+                    format!("Host 가 이 서버의 주소와 다르다 ({h}). 받는 이름: {}", self.allowed_hosts.join(", ")),
+                ));
+            }
+        }
+        // 토큰.
+        let Some(want) = &self.token else { return Ok(()) };
+        let given = auth
+            .and_then(|a| a.trim().strip_prefix("Bearer ").or_else(|| a.trim().strip_prefix("bearer ")))
+            .map(str::trim)
+            .or(nl_token.map(str::trim));
+        match given {
+            Some(g) if constant_time_eq(g.as_bytes(), want.as_bytes()) => Ok(()),
+            Some(_) => Err((401, "토큰이 맞지 않는다".into())),
+            None => Err((
+                401,
+                "토큰이 필요하다 (Authorization: Bearer <token> 또는 X-NL-Token: <token>)".into(),
+            )),
+        }
+    }
+}
+
+/// 길이와 내용을 시간 차이 없이 비교한다. 토큰을 한 글자씩 맞혀 나가는 공격을 막는다.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// 수신 스레드 → 틱 루프. 값과 아직 응답하지 않은 요청을 함께 넘긴다.
 struct HttpIncoming {
     value: Value,
@@ -311,7 +409,15 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// 서버 소켓을 열고 수신 스레드를 띄운다.
-fn start_http_server(bind: &str, path: &str) -> Result<HttpServerState, String> {
+fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<HttpServerState, String> {
+    let policy = AccessPolicy::new(bind, token);
+    // 인증 없이 바깥에 여는 것은 거부한다. 이 서버는 파이프라인을 구동하므로,
+    // 열어 두면 그 주소에 닿는 누구나 모델을 돌리고 (싱크에 따라) 입력까지 보낼 수 있다.
+    if policy.token.is_none() && !nl_core::pipeline::is_loopback_bind(bind) {
+        return Err(format!(
+            "{bind} 은 바깥에서 닿는 주소라 토큰 없이 열 수 없다              (HttpServer 노드에 token 을 넣거나 127.0.0.1 에 묶어라)"
+        ));
+    }
     let server = tiny_http::Server::http(bind)
         .map(Arc::new)
         .map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
@@ -321,7 +427,7 @@ fn start_http_server(bind: &str, path: &str) -> Result<HttpServerState, String> 
     let (s2, r2, srv2, want) = (stop.clone(), ready.clone(), server.clone(), normalize_path(path));
     let handle = std::thread::Builder::new()
         .name("nl-http-server".into())
-        .spawn(move || http_server_loop(&srv2, &want, &tx, &s2, &r2))
+        .spawn(move || http_server_loop(&srv2, &want, &policy, &tx, &s2, &r2))
         .map_err(|e| format!("HTTP 수신 스레드 생성 실패: {e}"))?;
     Ok(HttpServerState { rx, pending: VecDeque::new(), server, ready, stop, handle: Some(handle) })
 }
@@ -336,9 +442,11 @@ fn normalize_path(p: &str) -> String {
     with_slash.trim_end_matches('/').to_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn http_server_loop(
     server: &tiny_http::Server,
     want_path: &str,
+    policy: &AccessPolicy,
     tx: &Sender<HttpIncoming>,
     stop: &AtomicBool,
     ready: &AtomicBool,
@@ -358,6 +466,19 @@ fn http_server_loop(
         };
         if got_path != want_path {
             let _ = respond_json(request, 404, &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {want_path})"));
+            continue;
+        }
+
+        // 누가 보냈는지부터 본다. 인증·출처 확인은 준비 상태보다 앞이다 —
+        // 아직 준비되지 않았다는 사실조차 아무에게나 알려 줄 이유가 없다.
+        let deny = policy.check(
+            header_value(&request, "origin").as_deref(),
+            header_value(&request, "host").as_deref(),
+            header_value(&request, "authorization").as_deref(),
+            header_value(&request, "x-nl-token").as_deref(),
+        );
+        if let Err((status, why)) = deny {
+            let _ = respond_json(request, status, &why);
             continue;
         }
 
@@ -870,14 +991,16 @@ fn run_loop(
     // ── 준비: 인바운드 HTTP 서버. 노드마다 소켓 하나를 연다.
     let mut servers: HashMap<PNodeId, HttpServerState> = HashMap::new();
     for id in &order {
-        let PNodeKind::Source { source: Source::HttpServer { bind, path } } = &pipeline.nodes[id].kind else {
+        let PNodeKind::Source { source: Source::HttpServer { bind, path, token } } = &pipeline.nodes[id].kind
+        else {
             continue;
         };
-        match start_http_server(bind, path) {
+        match start_http_server(bind, path, token.as_deref()) {
             Ok(srv) => {
                 let _ = etx.send(RunnerEvent::Log(format!(
-                    "HTTP 서버 http://{bind}{} 열림",
-                    normalize_path(path)
+                    "HTTP 서버 http://{bind}{} 열림 ({})",
+                    normalize_path(path),
+                    if token.as_ref().is_some_and(|t| !t.trim().is_empty()) { "토큰 필요" } else { "루프백 전용" }
                 )));
                 servers.insert(*id, srv);
             }
@@ -1411,7 +1534,7 @@ fn eval_source(
         Source::Manual => Ok(manual_inputs.remove(&id)),
 
         // 미응답 요청이 없을 때만 다음 요청을 꺼낸다 ([`HttpServerState`] 의 "요청 하나씩 규칙" 참고).
-        Source::HttpServer { bind, path } => {
+        Source::HttpServer { bind, path, .. } => {
             let Some(srv) = servers.get_mut(&id) else {
                 return Err(format!("http://{bind}{} 서버가 열려 있지 않다", normalize_path(path)));
             };
@@ -2454,8 +2577,18 @@ mod tests {
     }
 
     fn http_server_node(p: &mut Pipeline, bind: &str, path: &str) -> PNodeId {
+        http_server_node_with(p, bind, path, None)
+    }
+
+    fn http_server_node_with(p: &mut Pipeline, bind: &str, path: &str, token: Option<&str>) -> PNodeId {
         p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::HttpServer { bind: bind.into(), path: path.into() } },
+            PNodeKind::Source {
+                source: Source::HttpServer {
+                    bind: bind.into(),
+                    path: path.into(),
+                    token: token.map(str::to_string),
+                },
+            },
             [0.0, 0.0],
         ))
     }
@@ -2666,7 +2799,7 @@ mod tests {
     #[test]
     fn requests_before_ready_get_503_and_are_not_queued() {
         let addr = free_addr();
-        let mut srv = start_http_server(&addr, "/infer").expect("서버를 열지 못했다");
+        let mut srv = start_http_server(&addr, "/infer", None).expect("서버를 열지 못했다");
         assert!(!srv.ready.load(Ordering::SeqCst), "처음에는 준비 전이다");
 
         let url = format!("http://{addr}/infer");
@@ -2888,6 +3021,220 @@ mod tests {
         let head_text = String::from_utf8_lossy(&raw).into_owned();
         assert!(head_text.starts_with("HTTP/1.1 200"), "{head_text}");
         assert!(head_text.to_ascii_lowercase().contains("image/png"), "{}", &head_text[..head_text.len().min(300)]);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    // ── 접근 정책 ──
+
+    #[test]
+    fn a_token_is_accepted_from_either_header() {
+        let p = AccessPolicy::new("127.0.0.1:8799", Some("s3cret"));
+        assert!(p.check(None, None, Some("Bearer s3cret"), None).is_ok());
+        assert!(p.check(None, None, Some("bearer s3cret"), None).is_ok(), "소문자 bearer 도 받는다");
+        assert!(p.check(None, None, None, Some("s3cret")).is_ok(), "X-NL-Token 도 받는다");
+        // 앞뒤 공백은 무시한다.
+        assert!(p.check(None, None, Some("Bearer  s3cret "), None).is_ok());
+    }
+
+    #[test]
+    fn a_missing_or_wrong_token_is_401() {
+        let p = AccessPolicy::new("127.0.0.1:8799", Some("s3cret"));
+        assert_eq!(p.check(None, None, None, None).unwrap_err().0, 401);
+        assert_eq!(p.check(None, None, Some("Bearer nope"), None).unwrap_err().0, 401);
+        assert_eq!(p.check(None, None, None, Some("nope")).unwrap_err().0, 401);
+        // Basic 인증은 토큰이 아니다.
+        assert_eq!(p.check(None, None, Some("Basic abc"), None).unwrap_err().0, 401);
+        // 안내 문구에 어느 헤더를 쓰라는지 적혀 있다.
+        let (_, why) = p.check(None, None, None, None).unwrap_err();
+        assert!(why.contains("X-NL-Token"), "{why}");
+    }
+
+    #[test]
+    fn no_token_means_no_check() {
+        let p = AccessPolicy::new("127.0.0.1:8799", None);
+        assert!(p.check(None, None, None, None).is_ok());
+        // 빈 토큰은 없는 것과 같다.
+        assert!(AccessPolicy::new("127.0.0.1:8799", Some("   ")).check(None, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn a_browser_origin_is_always_refused() {
+        for token in [None, Some("s3cret")] {
+            let p = AccessPolicy::new("127.0.0.1:8799", token);
+            let (code, why) = p
+                .check(Some("https://evil.example"), Some("127.0.0.1:8799"), Some("Bearer s3cret"), None)
+                .unwrap_err();
+            assert_eq!(code, 403, "{why}");
+            assert!(why.contains("브라우저"), "{why}");
+        }
+        // null Origin(샌드박스 iframe)도 막힌다.
+        let p = AccessPolicy::new("127.0.0.1:8799", None);
+        assert_eq!(p.check(Some("null"), None, None, None).unwrap_err().0, 403);
+    }
+
+    #[test]
+    fn a_foreign_host_header_is_refused() {
+        let p = AccessPolicy::new("127.0.0.1:8799", None);
+        // 바인드 주소와 localhost 는 받는다 (포트가 붙든 말든).
+        for ok in ["127.0.0.1:8799", "127.0.0.1", "localhost:8799", "localhost", "LOCALHOST"] {
+            assert!(p.check(None, Some(ok), None, None).is_ok(), "{ok} 가 거부됐다");
+        }
+        // 남의 이름을 태워 온 요청은 막는다 (DNS rebinding).
+        for bad in ["evil.example", "evil.example:8799", "192.168.0.5:8799"] {
+            let (code, why) = p.check(None, Some(bad), None, None).unwrap_err();
+            assert_eq!(code, 400, "{bad}: {why}");
+            assert!(why.contains("Host"), "{why}");
+        }
+        // Host 가 아예 없으면(HTTP/1.0) 통과시킨다 — 브라우저는 언제나 붙인다.
+        assert!(p.check(None, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn a_non_loopback_bind_allows_its_own_host_only() {
+        let p = AccessPolicy::new("0.0.0.0:8799", Some("t"));
+        assert!(p.check(None, Some("0.0.0.0:8799"), None, Some("t")).is_ok());
+        // 루프백이 아니면 localhost 를 덤으로 받지 않는다.
+        assert_eq!(p.check(None, Some("localhost:8799"), None, Some("t")).unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_bytes() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"), "길이가 다르면 다르다");
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    /// 인증 없이 바깥 주소에 여는 것은 준비 단계에서 막힌다.
+    #[test]
+    fn opening_a_public_port_without_a_token_is_refused() {
+        // `HttpServerState` 는 Debug 가 아니라 `unwrap_err` 를 못 쓴다.
+        let Err(err) = start_http_server("0.0.0.0:0", "/x", None) else {
+            panic!("토큰 없이 0.0.0.0 에 열렸다");
+        };
+        assert!(err.contains("토큰 없이 열 수 없다"), "{err}");
+        // 토큰이 있으면 열린다 (0 번 포트라 실제로 바인드된다).
+        // `HttpServerState` 는 Debug 가 아니라 `expect` 를 못 쓴다.
+        let Ok(mut ok) = start_http_server("0.0.0.0:0", "/x", Some("t")) else {
+            panic!("토큰이 있으면 열려야 한다");
+        };
+        ok.shutdown();
+        // 루프백은 토큰 없이도 열린다.
+        let Ok(mut lo) = start_http_server("127.0.0.1:0", "/x", None) else {
+            panic!("루프백은 열려야 한다");
+        };
+        lo.shutdown();
+    }
+
+    /// 토큰이 걸린 서버에 실제 요청을 보내 401 → 200 을 확인한다.
+    #[test]
+    fn a_tokened_server_refuses_and_then_accepts() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("보안 API");
+        p.tick_hz = 120.0;
+        let server = http_server_node_with(&mut p, &addr, "/infer", Some("s3cret"));
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpauth"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
+                .is_some()
+        );
+        let url = format!("http://{addr}/infer");
+
+        // 토큰 없이 → 401.
+        let res = crate::http::call("POST", &url, &BTreeMap::new(), Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 401, "본문: {}", res.body);
+
+        // 틀린 토큰 → 401.
+        let mut bad = BTreeMap::new();
+        bad.insert("Authorization".to_string(), "Bearer nope".to_string());
+        let res = crate::http::call("POST", &url, &bad, Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 401);
+
+        // 맞는 토큰 → 200.
+        let mut good = BTreeMap::new();
+        good.insert("Authorization".to_string(), "Bearer s3cret".to_string());
+        let res = crate::http::call("POST", &url, &good, Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+
+        // X-NL-Token 으로도 된다.
+        let mut alt = BTreeMap::new();
+        alt.insert("X-NL-Token".to_string(), "s3cret".to_string());
+        let res = crate::http::call("POST", &url, &alt, Some("2"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 브라우저에서 온 것처럼 `Origin` 을 붙이면 토큰이 맞아도 막힌다.
+    #[test]
+    fn a_request_with_an_origin_header_is_refused_end_to_end() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("보안 API");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httporigin"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
+                .is_some()
+        );
+        let url = format!("http://{addr}/infer");
+
+        let mut headers = BTreeMap::new();
+        headers.insert("Origin".to_string(), "https://evil.example".to_string());
+        let res = crate::http::call("POST", &url, &headers, Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 403, "본문: {}", res.body);
+
+        // Origin 이 없으면 그대로 200.
+        let res = crate::http::call("POST", &url, &BTreeMap::new(), Some("1"), Duration::from_secs(5)).unwrap();
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 남의 이름을 태워 온 `Host` 는 400.
+    #[test]
+    fn a_rebound_host_header_is_refused_end_to_end() {
+        let addr = free_addr();
+        let mut p = Pipeline::new("보안 API");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httphost"), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
+                .is_some()
+        );
+
+        // `http::call` 은 URI 에서 Host 를 만든다. 남의 이름을 태우려면 소켓으로 직접 보낸다.
+        use std::io::Write as _;
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = "1";
+        let head = format!(
+            "POST /infer HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        sock.write_all(head.as_bytes()).unwrap();
+        sock.write_all(body.as_bytes()).unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert!(text.starts_with("HTTP/1.1 400"), "{}", &text[..text.len().min(200)]);
 
         h.stop();
         assert!(h.wait_done(Duration::from_secs(2)));

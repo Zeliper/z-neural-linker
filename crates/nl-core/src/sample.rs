@@ -90,7 +90,11 @@ pub fn api_pipeline(base: u128, model: ModelId, payload: PayloadId) -> Pipeline 
     pl.tick_hz = 60.0;
     let server = pnode(
         base + 1,
-        PNodeKind::Source { source: Source::HttpServer { bind: API_BIND.into(), path: API_PATH.into() } },
+        PNodeKind::Source {
+            // 샘플은 루프백(127.0.0.1)에만 묶으므로 토큰 없이도 열린다. 바깥에서 닿는 주소로 바꾸려면
+            // 토큰을 함께 넣어야 한다 — 그러지 않으면 실행기가 거부한다.
+            source: Source::HttpServer { bind: API_BIND.into(), path: API_PATH.into(), token: None },
+        },
         "요청",
         0,
         120.0,
@@ -427,9 +431,11 @@ mod tests {
                 .find(|n| matches!(n.kind, PNodeKind::Source { source: Source::HttpServer { .. } }))
                 .unwrap_or_else(|| panic!("{name}: HTTP 서버 노드가 없다"));
             match &server.kind {
-                PNodeKind::Source { source: Source::HttpServer { bind, path } } => {
+                PNodeKind::Source { source: Source::HttpServer { bind, path, token } } => {
                     assert_eq!(bind, API_BIND);
                     assert_eq!(path, API_PATH);
+                    assert!(token.is_none(), "샘플은 루프백이라 토큰 없이 연다");
+                    assert!(crate::pipeline::is_loopback_bind(bind), "샘플 주소가 루프백이 아니다");
                 }
                 _ => unreachable!(),
             }

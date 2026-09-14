@@ -33,7 +33,16 @@ pub enum Source {
     /// **인바운드** HTTP 서버. 배포된 앱을 바깥 프로그램이 호출할 수 있게 연다.
     /// 들어온 요청 본문이 값이 되고, 짝이 되는 [`Sink::HttpReply`] 가 응답을 돌려준다.
     /// `bind` 는 `"127.0.0.1:8787"` 처럼 주소:포트, `path` 는 `"/infer"` 처럼 받을 경로다.
-    HttpServer { bind: String, path: String },
+    ///
+    /// `token` 이 있으면 요청마다 `Authorization: Bearer <token>` 이나 `X-NL-Token: <token>` 을 요구한다.
+    /// 없으면 **루프백 주소에 묶였을 때만** 열린다 — 바깥에서 닿는 주소에 인증 없이 여는 것은 실행기가 거부한다.
+    /// 이 서버는 파이프라인을 구동하므로, 마우스·키보드 싱크가 붙어 있으면 인증이 곧 원격 조작 방지선이다.
+    HttpServer {
+        bind: String,
+        path: String,
+        #[serde(default)]
+        token: Option<String>,
+    },
 }
 
 /// 마우스·키보드 액션. 모델 출력(클래스 인덱스)에 대응시킨다.
@@ -167,6 +176,34 @@ pub struct Link {
     pub id: LinkId,
     pub from: PNodeId,
     pub to: PNodeId,
+}
+
+/// `bind` 주소가 루프백(바깥에서 닿을 수 없는 곳)인가.
+///
+/// `127.0.0.0/8`, `::1`, `localhost` 를 루프백으로 본다. 나머지(`0.0.0.0` 포함)는 아니다.
+/// 인증 없는 [`Source::HttpServer`] 를 열어도 되는지 가르는 기준이라 실행기와 검증기가 같은 답을 써야 한다.
+pub fn is_loopback_bind(bind: &str) -> bool {
+    let host = host_of_bind(bind);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// `"127.0.0.1:8787"` → `"127.0.0.1"`, `"[::1]:8787"` → `"::1"`. 포트가 없으면 통째로.
+pub fn host_of_bind(bind: &str) -> &str {
+    let t = bind.trim();
+    if let Some(rest) = t.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match t.rsplit_once(':') {
+        // IPv6 를 대괄호 없이 쓴 경우(`::1`)는 콜론이 여럿이라 자르면 안 된다.
+        Some((head, _)) if !head.contains(':') => head,
+        _ => t,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
