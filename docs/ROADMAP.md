@@ -116,19 +116,26 @@
 
 - [x] HTTP 서버 TLS — `Source::HttpServer` 에 인증서를 주면 https 로 연다(rustls + ring, 시스템 OpenSSL 불필요).
       토큰 규칙은 TLS 와 무관하게 그대로다 — `1e87de1`
-- [ ] `nl tls-cert` 로 자체 서명 인증서 만들기 — **io 담당 진행 중**. 지금은 PEM 을 손으로 준비해야 한다
-- [ ] 레이어: `Lstm`·`Gru`·`MultiHeadAttention` — **병합 대기** (`agent/engine` `360f26e`).
-      `[L, D]` 를 받아 `return_sequence` 에 따라 `[L, H]` 나 마지막 상태 `[H]` 를 내고, 어텐션은 `[L, D] → [L, D]` 다.
-      burn 의 `nn` 모듈 대신 파라미터 텐서 + 게이트 수식으로 직접 구현했다
+- [x] `nl tls-cert` 로 자체 서명 인증서 만들기, `nl run|build --tls-cert/--tls-key` 주입,
+      배포판 인증서 탐색(작업 폴더 → 실행 파일 폴더) — `3bc25a8`
+- [x] 레이어: `Lstm`·`Gru`·`MultiHeadAttention` — `[L, D]` 를 받아 `return_sequence` 에 따라 `[L, H]` 나
+      마지막 상태 `[H]` 를 내고, 어텐션은 `[L, D] → [L, D]` 다. burn 의 `nn` 모듈 대신 파라미터 텐서 +
+      게이트 수식으로 직접 구현했다 — `f085770`. 빌더 인스펙터 편집기는 `91fecd2`
+- [ ] `Binding::ModelOutput` 의 `field` 로 다출력 갈라 보내기 — **엔진 담당 작업 중**.
+      지금은 같은 모델을 가리키는 위젯이 모두 같은 값을 받는다. 런타임 배선은 이미 있다 — `695689b`
 - [ ] Transformer 블록·Residual 템플릿. **미착수** (`Embedding` 과 `Transform::Tokenize` 는 들어왔다 — `89cee6e`)
-- [ ] `Binding::ModelOutput` 의 `field` 로 다출력 갈라 보내기. 지금은 같은 모델을 가리키는 위젯이
-      모두 같은 값을 받는다 — 모델이 출력을 여럿 낼 때 필요하다
 - [ ] 모델 레지스트리: 실행 기록 비교(지표 표), 버전 태그, 가중치 내보내기/가져오기. **미착수**
 - [ ] ONNX 가져오기(tract 로 추론 전용) / 내보내기(검토). **미착수**
 - [ ] 학습 상황 프리셋: 분류·회귀·화면 상태 분류·행동 복제 템플릿. **미착수**
 
-## M4 — 협업·서버형 배포 · **미착수**
+## M4 — 협업·서버형 배포 · **절반**
 
-- [ ] `--headless` 런타임의 HTTP/WS 서빙을 다중 모델·다중 파이프라인으로 넓히기
+서버형 배포는 됐고 협업은 아직이다.
+
+- [x] 배포 앱을 상시 서버로 운영하기 — systemd 사용자 유닛 템플릿과 `install.sh --service` (`e7a5a12`),
+      고정 작업 폴더 `--work-dir`/`NL_WORK_DIR` (`d45abdf`). 인증서는 `<작업 폴더>/local/` 에 둔다.
+      실측: 서비스 기동 → `curl` 추론 200 → 재시작 → `SIGTERM` 정상 종료, https 포함
+- [x] Windows 런타임도 같은 경로로 돈다 — wine 에서 헤드리스 기동 후 HTTP 추론 200 확인
+- [ ] `--headless` 서빙을 다중 모델·다중 파이프라인으로 넓히기. **미착수**
       (단일 파이프라인 서빙은 M1 에서 됐다 — `373e4bd`)
-- [ ] 프로젝트 동기화 서버 (trust-pms `pms-server` 계열, op 경로 재사용)
+- [ ] 프로젝트 동기화 서버 (trust-pms `pms-server` 계열, op 경로 재사용). **미착수**
