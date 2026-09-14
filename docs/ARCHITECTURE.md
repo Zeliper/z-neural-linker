@@ -174,7 +174,7 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 - 실행 순서는 core 의 위상정렬 결과를 그대로 쓴다. Dropout/BatchNorm 은 `train: bool` 로 분기.
 - **순환 레이어의 비용과 한계.** `Lstm`/`Gru` 는 시각마다 게이트 커널을 새로 띄우는 구조라 한 스텝 값이 길이에 비례해서 는다.
   LSTM(은닉 64, 배치 32, 임베딩 32, `return_sequence: false`) 순전파+역전파 **스텝당** 시간 — 6회 측정의 최소값이고
-  공용 개발 머신이라 절대값보다 비율을 보는 편이 낫다:
+  공용 개발 머신이라 절대값보다 비율을 보는 편이 낫다(다시 재려면 `scripts/bench.sh`, 아래 "성능 기준값"):
 
   | 시퀀스 길이 | 32 | 128 | 512 |
   |---|---|---|---|
@@ -287,6 +287,40 @@ cargo test  -p nl-engine --features onnx-import      # 왕복 테스트 둘이 �
 - `Transform::Tokenize { vocab, max_len }`(core 의 `payload.rs`)는 문자 단위 토크나이저다 — `Text` 필드를 Embedding 입력으로
   바꾼다. `vocab` 의 문자 하나가 인덱스 하나이고 **인덱스는 1부터**, 0 은 패딩 겸 미지 문자다(그래서 Embedding 의 `vocab` 은
   글자 수 + 1 이상이어야 한다). 결과는 길이 `max_len` 정수 텐서이고 **인코드 전용**이다.
+
+### 성능 기준값
+
+`scripts/bench.sh` 가 릴리스 빌드로 여러 번 재 중앙값을 `dist-local/bench/<시각>-<pid>.json` 에
+남기고 직전 결과와 비교한다. ±20% 를 넘는 항목만 표로 찍고 **종료 코드는 늘 0** 이다 —
+이 기계는 다른 작업과 함께 쓰고 부하가 2에서 55까지 흔들려서, 그 숫자로 빌드를 세우면
+아무도 표를 안 보게 된다.
+
+```sh
+scripts/bench.sh               # CPU, 3회
+scripts/bench.sh --gpu         # GPU 경로까지 (오래 걸린다)
+scripts/bench.sh --rounds 5 --filter bench_lstm
+```
+
+아래는 개발 PC(i7-9750H 12스레드, Linux) 의 **CPU 실측 최소값**이다. 부하 16 에서 잰 것이고,
+같은 코드가 부하 33 에서는 두 배 넘게 찍힌다 — 절대값보다 **항목 사이 비율**과 **회귀 여부**를 보라.
+
+| 항목 | 값 | 무엇을 재는가 |
+|---|---|---|
+| `xor_1000x200_epoch` | 61 ms | 작은 MLP 한 에포크 (1000 샘플, 배치 32) |
+| `cnn_quadrants_epoch` | 211 ms | 8×8 CNN 한 에포크 (1000 샘플) — 배치 업로드 비용이 드러난다 |
+| `lstm_len32_step` | 50 ms | LSTM 한 스텝 (은닉 64, 배치 32) |
+| `lstm_len128_step` | 249 ms | 위와 같고 길이만 128 |
+| `lstm_len512_step` | 2.3 초 | 위와 같고 길이만 512 — **길이 수백이 상한인 이유** |
+| `onnx_export_mlp` | 0.2 ms | 학습된 MLP 를 ONNX 로 (학습 시간 제외) |
+| `onnx_export_cnn` | 0.2 ms | CNN 쪽. 가중치가 커도 protobuf 조립은 싸다 |
+| `probe_cpu` | 108 ms | `probe(Cpu)` — burn 초기화가 섞인 첫 호출이다 |
+
+GPU(`--gpu`)는 `resolve_auto_cold` 가 더해진다. 첫 `resolve(Auto)` 는 셰이더 컴파일 때문에
+수십 초가 걸리므로 **UI 스레드에서 부르면 안 된다**(`resolve_cached` 를 쓴다).
+
+새 벤치를 더할 때는 `crates/nl-engine/tests/bench.rs`(학습 밖) 나 `tests/engine.rs`(학습)에
+`NL_BENCH=1` 게이트로 넣고 `BENCHJSON {"name":…,"unit":…,"value":…}` 한 줄을 찍으면 스크립트가
+자동으로 집계한다.
 
 ## nl-io
 
