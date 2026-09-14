@@ -85,12 +85,13 @@ use crate::input::{self, InputSim};
 use crate::screen::Capturer;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use nl_core::payload::PayloadSpec;
-use nl_core::{DevicePref, InputAction, Logic, PNodeId, PNodeKind, Pipeline, Project, Sink, Source, WidgetId};
+use nl_core::{DevicePref, InputAction, Logic, PNodeId, PNodeKind, Pipeline, Project, Region, Sink, Source, WidgetId};
 use nl_engine::{HostTensor, Session, Value};
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1294,6 +1295,183 @@ fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
     }
 }
 
+// ───────────────────────────── 화면 캡처 스레드 ─────────────────────────────
+
+/// 캡처 한 장을 기다리는 최대 시간을 넘어서면 스레드가 스스로 정지 플래그를 다시 본다.
+/// 대기는 이만큼씩 끊어 자므로 `stop` 이 곧바로 먹는다.
+const CAPTURE_SLEEP_SLICE: Duration = Duration::from_millis(20);
+/// 드롭한 프레임 수를 이 간격으로 묶어 한 줄만 보고한다. 매 장 보고하면 로그가 캡처보다 시끄럽다.
+const CAPTURE_DROP_REPORT: Duration = Duration::from_secs(1);
+
+/// 화면 캡처 **전용 스레드**. fps 간격으로 찍어 최신 한 장만 들고 있는다.
+///
+/// 틱 루프에서 직접 찍으면 느린 백엔드가 파이프라인 전체를 멈춘다. xdg-desktop-portal 은
+/// 한 장에 300ms 를 넘기는데, 그 동안 타이머도 HTTP 응답도 같이 밀린다 — 30분 부하 점검에서
+/// 500ms 타이머가 실제로 810ms 간격으로 뛰었다. 캡처를 밖으로 빼면 틱은 최신 프레임만 집어 간다.
+///
+/// **`Recorder` 와 `Capturer` 를 공유하지 않는다.** 각자 하나씩 만든다 — 백엔드 연결은 상태를
+/// 가지고 있어 두 곳에서 번갈아 쓰면 프레임이 섞이거나 포털 세션이 꼬인다.
+struct CaptureThread {
+    /// 가장 최근 프레임. 틱이 집어 가면서 비운다.
+    latest: Arc<Mutex<Option<crate::screen::Frame>>>,
+    /// 틱이 집어 가기 전에 새 프레임으로 덮인 횟수.
+    dropped: Arc<AtomicU64>,
+    /// 마지막 캡처 오류. 틱이 한 번 읽어 가면 비운다.
+    error: Arc<Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
+    /// 스레드가 실제로 끝났는지. 정지 뒤 잔여 스레드 확인에 쓴다.
+    finished: Arc<AtomicBool>,
+}
+
+/// 프레임 출처를 만드는 함수. 시험이 느린 가짜를 끼울 때 쓴다.
+#[cfg(test)]
+type FrameSourceFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn crate::record::FrameSource>> + Send + Sync>;
+
+/// 시험에서만 쓰는 캡처 출처 교체 자리. 제품 빌드에는 아예 없다.
+#[cfg(test)]
+static TEST_FRAME_SOURCE: Mutex<Option<FrameSourceFactory>> = Mutex::new(None);
+
+impl CaptureThread {
+    /// 실제 화면을 찍는 스레드를 띄운다.
+    fn start(region: Region, fps: f32) -> Self {
+        #[cfg(test)]
+        {
+            let injected = TEST_FRAME_SOURCE.lock().clone();
+            if let Some(make) = injected {
+                return Self::start_with(region, fps, move || make());
+            }
+        }
+        Self::start_with(region, fps, || {
+            // **`Recorder` 와 나눠 쓰지 않는다.** 백엔드 연결은 상태를 가지고 있어서
+            // 두 곳이 번갈아 쓰면 프레임이 섞이거나 포털 세션이 꼬인다. 각자 하나씩 연다.
+            let cap = Capturer::new()?;
+            Ok(Box::new(CapturerSource { cap }) as Box<dyn crate::record::FrameSource>)
+        })
+    }
+
+    /// 프레임 출처를 갈아 끼울 수 있는 형태. 시험이 느린 가짜 캡처를 넣는다.
+    fn start_with<F>(region: Region, fps: f32, make: F) -> Self
+    where
+        F: FnOnce() -> anyhow::Result<Box<dyn crate::record::FrameSource>> + Send + 'static,
+    {
+        let fps = fps.clamp(0.01, MAX_TICK_HZ);
+        let period = Duration::from_secs_f32(1.0 / fps);
+        let latest = Arc::new(Mutex::new(None));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let error = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let (l, d, e, s, f) = (
+            latest.clone(),
+            dropped.clone(),
+            error.clone(),
+            stop.clone(),
+            finished.clone(),
+        );
+        let spawned = std::thread::Builder::new().name("nl-capture".into()).spawn(move || {
+            // 끝나는 길이 여럿이라 플래그는 어느 길로 나가든 서게 한다.
+            let _guard = FinishedGuard(f);
+            let mut src = match make() {
+                Ok(src) => src,
+                Err(err) => {
+                    *e.lock() = Some(format!("화면 캡처를 열지 못했다: {err:#}"));
+                    return;
+                }
+            };
+            while !s.load(Ordering::SeqCst) {
+                let at = Instant::now();
+                match src.grab(&region) {
+                    Ok(frame) => {
+                        // 틱이 아직 안 집어 갔으면 그 장은 버린다 — 밀린 프레임을 쌓아
+                        // 메모리를 늘리느니 **가장 새것 하나**만 들고 있는 편이 맞다.
+                        let mut slot = l.lock();
+                        if slot.is_some() {
+                            d.fetch_add(1, Ordering::Relaxed);
+                        }
+                        *slot = Some(frame);
+                    }
+                    Err(err) => *e.lock() = Some(format!("화면 캡처 실패: {err:#}")),
+                }
+                // 남은 주기만큼 잔다. stop 을 자주 본다.
+                let mut left = period.saturating_sub(at.elapsed());
+                while !left.is_zero() && !s.load(Ordering::SeqCst) {
+                    let slice = left.min(CAPTURE_SLEEP_SLICE);
+                    std::thread::sleep(slice);
+                    left -= slice;
+                }
+            }
+        });
+        if let Err(err) = spawned {
+            *error.lock() = Some(format!("화면 캡처 스레드를 만들지 못했다: {err}"));
+            finished.store(true, Ordering::SeqCst);
+        }
+        Self {
+            latest,
+            dropped,
+            error,
+            stop,
+            finished,
+        }
+    }
+
+    /// 최신 프레임을 가져오고 자리를 비운다.
+    fn take_frame(&self) -> Option<crate::screen::Frame> {
+        self.latest.lock().take()
+    }
+
+    /// 마지막 오류를 가져오고 비운다.
+    fn take_error(&self) -> Option<String> {
+        self.error.lock().take()
+    }
+
+    /// 지금까지 버린 프레임 수를 가져오고 0 으로 되돌린다.
+    fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
+
+    /// 끝내라고 알리기만 한다. **기다리지 않는다** — 진행 중인 캡처가 300ms 넘게 걸려도
+    /// 정지가 그만큼 밀리면 안 되기 때문이다. 스레드는 플래그를 보고 스스로 끝난다.
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// 스레드가 끝났는지. 잔여 스레드 확인용.
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for CaptureThread {
+    fn drop(&mut self) {
+        // 핸들을 들고 있지 않으므로 스레드는 떼어진 채로 스스로 끝난다.
+        self.signal_stop();
+    }
+}
+
+/// 어느 길로 나가든 "끝났다" 를 세워 준다.
+struct FinishedGuard(Arc<AtomicBool>);
+
+impl Drop for FinishedGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 실제 화면 캡처를 [`crate::record::FrameSource`] 로 감싼 것.
+struct CapturerSource {
+    cap: Capturer,
+}
+
+impl crate::record::FrameSource for CapturerSource {
+    fn backend_label(&self) -> Option<String> {
+        self.cap.backend().map(|b| b.label().to_owned())
+    }
+    fn grab(&mut self, region: &Region) -> anyhow::Result<crate::screen::Frame> {
+        self.cap.capture(region)
+    }
+}
+
 // ───────────────────────────── 노드별 상태 ─────────────────────────────
 
 #[derive(Default)]
@@ -1302,8 +1480,10 @@ struct NodeState {
     next: Option<Instant>,
     /// Timer 가 낸 틱 수.
     count: u64,
-    /// 화면 캡처 연결 (재사용).
-    capturer: Option<Capturer>,
+    /// 화면 캡처 전용 스레드. 틱은 여기서 최신 프레임만 집어 간다.
+    capture: Option<CaptureThread>,
+    /// 드롭 프레임 수를 마지막으로 보고한 시각.
+    last_drop_report: Option<Instant>,
     /// 진행 중인 HTTP 호출. 틱 루프를 막지 않으려고 별도 스레드에서 돈다.
     pending_http: Option<Receiver<anyhow::Result<HttpResponse>>>,
     /// stdin 줄 수신.
@@ -1805,6 +1985,7 @@ fn run_loop(
                         &mut widget_inputs,
                         &mut manual_inputs,
                         &mut servers,
+                        etx,
                     ) {
                         Ok(Some(v)) => {
                             emit_value(etx, id, &v, st, tick_start);
@@ -1893,6 +2074,19 @@ fn run_loop(
         }
     }
 
+    // 캡처 스레드에는 **알리기만** 한다. 진행 중인 한 장이 300ms 넘게 걸려도 정지가 그만큼
+    // 밀리면 안 되기 때문이다. 스레드는 플래그를 보고 스스로 끝나고, 핸들을 들고 있지 않으므로
+    // 떼어진 채 정리된다.
+    for st in states.values() {
+        if let Some(cap) = &st.capture {
+            cap.signal_stop();
+            if !cap.is_finished() {
+                // 여기서 기다리지 않는다. 왜 프로세스가 곧바로 사라지지 않는지 궁금할 때를 위해
+                // 흔적만 남긴다 — 진행 중인 한 장(포털이면 300ms 넘음)을 마치고 끝난다.
+                log::debug!("화면 캡처 스레드가 진행 중인 한 장을 마치고 스스로 끝난다");
+            }
+        }
+    }
     // WebSocket 스레드를 정리하고 나간다. 읽기 타임아웃이 WS_READ_TIMEOUT 이라 곧 끝난다.
     ws_pool.shutdown();
     // 대기 중인 HTTP 요청에 503 으로 답하고 소켓을 닫는다.
@@ -2063,6 +2257,8 @@ fn eval_source(
     widget_inputs: &mut HashMap<WidgetId, Value>,
     manual_inputs: &mut HashMap<PNodeId, Value>,
     servers: &mut HashMap<PNodeId, HttpServerState>,
+    // 화면 캡처가 버린 프레임 수처럼 소스가 직접 알려야 하는 것에 쓴다.
+    etx: &Sender<RunnerEvent>,
 ) -> Result<Option<Value>, String> {
     match source {
         Source::Timer { interval_ms } => {
@@ -2076,16 +2272,28 @@ fn eval_source(
         }
 
         Source::ScreenCapture { region, fps } => {
-            let fps = fps.clamp(0.01, MAX_TICK_HZ);
-            if !due(st, now, Duration::from_secs_f32(1.0 / fps)) {
-                return Ok(None);
+            // 캡처는 **전용 스레드**가 fps 간격으로 찍는다. 여기서는 최신 한 장을 집어 갈 뿐이라
+            // 포털처럼 느린 백엔드여도 틱 루프가 멈추지 않는다. 주기도 그쪽이 지킨다.
+            let cap = st.capture.get_or_insert_with(|| CaptureThread::start(*region, *fps));
+
+            // 버린 프레임은 1초에 한 줄로만 알린다. 매 장 알리면 로그가 캡처보다 시끄럽다.
+            let due_report = st
+                .last_drop_report
+                .is_none_or(|t| now.duration_since(t) >= CAPTURE_DROP_REPORT);
+            if due_report {
+                st.last_drop_report = Some(now);
+                let dropped = cap.take_dropped();
+                if dropped > 0 {
+                    let _ = etx.send(RunnerEvent::Log(format!(
+                        "화면 캡처: 오래된 프레임 {dropped}장을 버렸다 (틱이 따라가지 못한다)"
+                    )));
+                }
             }
-            if st.capturer.is_none() {
-                st.capturer = Some(Capturer::new().map_err(|e| format!("화면 캡처를 열지 못했다: {e:#}"))?);
+
+            if let Some(err) = cap.take_error() {
+                return Err(err);
             }
-            let cap = st.capturer.as_mut().expect("바로 위에서 만들었다");
-            let f = cap.capture(region).map_err(|e| format!("화면 캡처 실패: {e:#}"))?;
-            Ok(Some(Value::Image {
+            Ok(cap.take_frame().map(|f| Value::Image {
                 width: f.width,
                 height: f.height,
                 rgba: f.rgba,
@@ -2332,34 +2540,77 @@ fn first_line(s: &str) -> String {
 
 // ───────────────────────────── 모델 ─────────────────────────────
 
+/// 값 하나를 모델에 넣고 결과를 값 하나로 받는다.
+///
+/// 입출력이 여럿이면 페이로드 필드 이름을 키로 쓰는 JSON 객체가 된다. 그 규약은 엔진의
+/// [`nl_engine::encode_inputs`] / [`nl_engine::decode_outputs`] 가 단독으로 정한다 —
+/// 여기서 따로 풀면 HTTP 추론 API 와 파이프라인이 서로 다른 모양을 보게 된다.
+///
+/// **필드가 하나면 예전과 바이트 단위로 같다.** 엔진이 그 경우 값을 감싸지 않고 그대로 내보낸다.
 fn run_model(sess: &mut Session, spec: Option<&PayloadSpec>, v: &Value) -> Result<Value, String> {
-    let input = encode_input(spec, v)?;
-    let outs = sess.run(&[input]).map_err(|e| format!("추론 실패: {e:#}"))?;
-    let first = outs
-        .into_iter()
-        .next()
-        .ok_or_else(|| "모델이 출력을 내지 않았다".to_string())?;
-    match spec.and_then(|s| s.outputs.first()) {
-        Some(field) => nl_engine::decode(field, &first).map_err(|e| format!("출력 디코딩 실패: {e:#}")),
-        None => Ok(Value::Tensor(first)),
+    let inputs = encode_inputs(spec, v)?;
+    let outs = sess.run(&inputs).map_err(|e| format!("추론 실패: {e:#}"))?;
+    if outs.is_empty() {
+        return Err("모델이 출력을 내지 않았다".to_string());
+    }
+    match spec {
+        Some(spec) => nl_engine::decode_outputs(spec, &outs).map_err(|e| format!("출력 디코딩 실패: {e:#}")),
+        // 페이로드가 없으면 디코더도 없다. 텐서를 그대로 내보낸다 (예전과 같다).
+        None => Ok(Value::Tensor(
+            outs.into_iter().next().expect("바로 위에서 비어 있지 않음을 봤다"),
+        )),
     }
 }
 
-/// 페이로드가 있으면 `inputs[0]` 의 인코더를, 없으면 텐서/숫자 값을 배치 1 텐서로 그대로 쓴다.
-fn encode_input(spec: Option<&PayloadSpec>, v: &Value) -> Result<HostTensor, String> {
-    if let Some(field) = spec.and_then(|s| s.inputs.first()) {
-        return nl_engine::encode(field, v).map_err(|e| format!("입력 인코딩 실패: {e:#}"));
+/// 페이로드가 있으면 필드별 인코더를, 없으면 텐서/숫자 값을 배치 1 텐서 하나로 그대로 쓴다.
+///
+/// 입력 필드가 여럿일 때 엔진은 JSON **객체**만 받는다. 파이프라인에서는 배열로 오는 것이
+/// 자연스러운 자리가 있어(예: `[a, b]`), 여기서 필드 순서대로 객체로 바꿔 준다.
+/// 순서 규약은 `payload.inputs` = `Graph::input_nodes()` 다.
+fn encode_inputs(spec: Option<&PayloadSpec>, v: &Value) -> Result<Vec<HostTensor>, String> {
+    if let Some(spec) = spec {
+        let adapted = array_to_object(spec, v)?;
+        let value = adapted.as_ref().unwrap_or(v);
+        return nl_engine::encode_inputs(spec, value).map_err(|e| format!("입력 인코딩 실패: {e:#}"));
     }
-    match v {
+    let one = match v {
         // 이미 배치 차원을 포함한 것으로 본다.
-        Value::Tensor(t) => Ok(t.clone()),
-        Value::Numbers(n) => Ok(HostTensor::new(vec![1, n.len()], n.clone())),
-        Value::Number(x) => Ok(HostTensor::new(vec![1, 1], vec![*x as f32])),
-        other => Err(format!(
-            "페이로드가 없으면 텐서·숫자 값만 모델에 넣을 수 있다 (받은 값: {})",
-            kind_name(other)
-        )),
+        Value::Tensor(t) => t.clone(),
+        Value::Numbers(n) => HostTensor::new(vec![1, n.len()], n.clone()),
+        Value::Number(x) => HostTensor::new(vec![1, 1], vec![*x as f32]),
+        other => {
+            return Err(format!(
+                "페이로드가 없으면 텐서·숫자 값만 모델에 넣을 수 있다 (받은 값: {})",
+                kind_name(other)
+            ))
+        }
+    };
+    Ok(vec![one])
+}
+
+/// 다입력 모델에 배열이 오면 필드 순서대로 객체로 바꾼다. 그럴 일이 아니면 `None`.
+///
+/// 필드가 하나면 손대지 않는다 — 그 하나가 배열 자체를 받는 경우가 훨씬 흔하다.
+fn array_to_object(spec: &PayloadSpec, v: &Value) -> Result<Option<Value>, String> {
+    if spec.inputs.len() < 2 {
+        return Ok(None);
     }
+    let items: Vec<serde_json::Value> = match v {
+        Value::Json(serde_json::Value::Array(a)) => a.clone(),
+        Value::Numbers(n) => n.iter().map(|x| serde_json::json!(f64::from(*x))).collect(),
+        _ => return Ok(None),
+    };
+    if items.len() != spec.inputs.len() {
+        let names: Vec<&str> = spec.inputs.iter().map(|f| f.name.as_str()).collect();
+        return Err(format!(
+            "입력 필드가 {}개인데 값이 {}개다 (필드 순서: {names:?})",
+            spec.inputs.len(),
+            items.len()
+        ));
+    }
+    let map: serde_json::Map<String, serde_json::Value> =
+        spec.inputs.iter().map(|f| f.name.clone()).zip(items).collect();
+    Ok(Some(Value::Json(serde_json::Value::Object(map))))
 }
 
 // ───────────────────────────── 로직 ─────────────────────────────
@@ -3147,6 +3398,229 @@ mod tests {
         assert!(wait_for(&h, Duration::from_secs(1), |e| matches!(e, RunnerEvent::Stopped)).is_some());
     }
 
+    // ── 다입출력 모델 ──────────────────────────────────────────────────
+
+    /// 입력 1개, Output 2개짜리 작은 모델과 출력 필드 2개짜리 페이로드.
+    ///
+    /// 가중치는 주지 않는다 — `Session::load(_, None, _)` 가 무작위로 채운다. 여기서 보는 것은
+    /// 숫자가 아니라 **모양**(필드 이름을 키로 하는 객체)이다.
+    fn two_output_project() -> (Project, nl_core::ModelId, nl_core::PayloadId) {
+        use nl_core::model::{Node, Port};
+        use nl_core::payload::{Field, FieldKind};
+        use nl_core::{Act, LayerKind, ModelDef, PayloadSpec};
+
+        let mut payload = PayloadSpec::new("둘");
+        payload.inputs.push(Field::new("x", FieldKind::Vector { len: 2 }));
+        payload.outputs.push(Field::new("a", FieldKind::Vector { len: 2 }));
+        payload.outputs.push(Field::new("b", FieldKind::Vector { len: 3 }));
+
+        let mut def = ModelDef::new("두 갈래");
+        let input = def
+            .graph
+            .add_node(Node::new(LayerKind::Input { shape: vec![2] }, [0.0, 0.0]));
+        let hidden = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
+            [1.0, 0.0],
+        ));
+        let act = def
+            .graph
+            .add_node(Node::new(LayerKind::Activation { act: Act::Relu }, [2.0, 0.0]));
+        // 두 갈래로 갈라져 각자 Output 으로 간다.
+        let head_a = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+            [3.0, -1.0],
+        ));
+        // **이름이 순서를 정한다.** `Graph::output_nodes()` 가 이름순으로 정렬하므로,
+        // 이름을 비워 두면 무작위 id 순이 되어 페이로드 필드와 어긋난다 (여기서 실제로 겪었다).
+        let mut node_a = Node::new(LayerKind::Output, [4.0, -1.0]);
+        node_a.name = "a".into();
+        let out_a = def.graph.add_node(node_a);
+        let head_b = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 3,
+                bias: true,
+            },
+            [3.0, 1.0],
+        ));
+        let mut node_b = Node::new(LayerKind::Output, [4.0, 1.0]);
+        node_b.name = "b".into();
+        let out_b = def.graph.add_node(node_b);
+        for (from, to) in [
+            (input, hidden),
+            (hidden, act),
+            (act, head_a),
+            (head_a, out_a),
+            (act, head_b),
+            (head_b, out_b),
+        ] {
+            def.graph.add_edge(from, Port::new(to, 0)).expect("연결");
+        }
+        def.payload = Some(payload.id);
+        def.weights = None;
+
+        let mut project = Project::new("p");
+        let (mid, pid) = (def.id, payload.id);
+        project.models.insert(mid, def);
+        project.payloads.insert(pid, payload);
+        (project, mid, pid)
+    }
+
+    /// 출력이 여럿이면 `Manual → Model → Log` 가 필드 이름을 키로 하는 객체를 낸다.
+    #[test]
+    fn a_two_output_model_yields_a_json_object() {
+        let (project, mid, pid) = two_output_project();
+        let mut p = Pipeline::new("둘");
+        p.tick_hz = 60.0;
+        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
+        let m = p.add_node(PNode::new(
+            PNodeKind::Model {
+                model: mid,
+                payload: Some(pid),
+            },
+            [1.0, 0.0],
+        ));
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [2.0, 0.0]));
+        p.add_link(src, m).unwrap();
+        p.add_link(m, log).unwrap();
+
+        let h = Runner::new(project, p, tmp_dir("twoout"), DevicePref::Cpu)
+            .start()
+            .unwrap();
+        h.inputs
+            .send(RunnerInput::Manual {
+                node: src,
+                value: Value::Numbers(vec![0.5, -0.5]),
+            })
+            .unwrap();
+
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(10),
+            |e| matches!(e, RunnerEvent::Value { node, .. } if *node == m),
+        )
+        .expect("모델 값이 오지 않았다");
+        let RunnerEvent::Value { value, .. } = ev else {
+            panic!("값이 아니다")
+        };
+        let Value::Json(serde_json::Value::Object(obj)) = &value else {
+            panic!("객체가 아니다: {value:?}")
+        };
+        assert_eq!(obj.len(), 2, "키가 둘이어야 한다: {obj:?}");
+        let a = obj.get("a").expect("a 키").as_array().expect("a 는 배열");
+        let b = obj.get("b").expect("b 키").as_array().expect("b 는 배열");
+        assert_eq!(a.len(), 2, "a 길이");
+        assert_eq!(b.len(), 3, "b 길이");
+
+        // Log 싱크는 그 객체를 JSON 으로 그대로 찍는다.
+        let logged = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Log(t) if t.contains("\"a\"") && t.contains("\"b\"")),
+        );
+        assert!(logged.is_some(), "Log 가 객체를 찍지 않았다");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// HTTP 로 부르면 같은 객체가 응답 본문이 된다.
+    #[test]
+    fn a_two_output_model_answers_http_with_an_object() {
+        let (project, mid, pid) = two_output_project();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, ANY_ADDR, "/infer");
+        let m = p.add_node(PNode::new(
+            PNodeKind::Model {
+                model: mid,
+                payload: Some(pid),
+            },
+            [1.0, 0.0],
+        ));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [2.0, 0.0],
+        ));
+        p.add_link(server, m).unwrap();
+        p.add_link(m, reply).unwrap();
+
+        let h = Runner::new(project, p, tmp_dir("twoout-http"), DevicePref::Cpu)
+            .start()
+            .unwrap();
+        let addr = wait_server_up(&h);
+        // 모델이 올라오기 전 요청은 503 이다. 200 이 될 때까지 잠깐 다시 시도한다.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut res = None;
+        while Instant::now() < deadline {
+            match crate::http::call(
+                "POST",
+                &format!("http://{addr}/infer"),
+                &BTreeMap::new(),
+                Some("[0.5, -0.5]"),
+                Duration::from_secs(10),
+            ) {
+                Ok(r) if r.status == 200 => {
+                    res = Some(r);
+                    break;
+                }
+                Ok(r) => res = Some(r),
+                Err(_) => {}
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let res = res.expect("요청이 한 번도 닿지 않았다");
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+        let body = res.json().expect("JSON 이 아니다");
+        let obj = body.as_object().expect("객체가 아니다");
+        assert_eq!(obj.len(), 2, "{body}");
+        assert_eq!(obj["a"].as_array().expect("a").len(), 2);
+        assert_eq!(obj["b"].as_array().expect("b").len(), 3);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 입력 필드가 여럿이면 배열로도 받는다 (필드 순서). 개수가 다르면 노드 오류.
+    #[test]
+    fn multi_input_accepts_an_object_or_an_array_in_field_order() {
+        use nl_core::payload::{Field, FieldKind};
+        use nl_core::PayloadSpec;
+        let mut spec = PayloadSpec::new("둘입력");
+        spec.inputs.push(Field::new("l", FieldKind::Vector { len: 2 }));
+        spec.inputs.push(Field::new("r", FieldKind::Vector { len: 2 }));
+
+        // 배열은 필드 순서대로 객체가 된다.
+        let arr = Value::Json(serde_json::json!([[1.0, 2.0], [3.0, 4.0]]));
+        let made = array_to_object(&spec, &arr).unwrap().expect("바뀌어야 한다");
+        let Value::Json(serde_json::Value::Object(obj)) = &made else {
+            panic!("객체가 아니다")
+        };
+        assert_eq!(obj["l"], serde_json::json!([1.0, 2.0]));
+        assert_eq!(obj["r"], serde_json::json!([3.0, 4.0]));
+
+        // 개수가 다르면 필드 이름을 알려 주며 거절한다.
+        let short = Value::Json(serde_json::json!([[1.0, 2.0]]));
+        let err = array_to_object(&spec, &short).unwrap_err();
+        assert!(err.contains("2개인데 값이 1개"), "{err}");
+        assert!(err.contains("\"l\""), "필드 순서를 안 알려 준다: {err}");
+
+        // 객체로 오면 손대지 않고 엔진에 넘긴다.
+        let objv = Value::Json(serde_json::json!({"l": [1.0, 2.0], "r": [3.0, 4.0]}));
+        assert!(array_to_object(&spec, &objv).unwrap().is_none());
+
+        // 필드가 하나뿐이면 배열을 건드리지 않는다 — 그 하나가 배열을 받는 경우가 흔하다.
+        let one = PayloadSpec::tabular("하나", 2, 2);
+        assert!(array_to_object(&one, &arr).unwrap().is_none());
+    }
+
     #[test]
     fn cyclic_nodes_are_reported_not_executed() {
         let mut p = Pipeline::new("cycle");
@@ -3234,6 +3708,219 @@ mod tests {
 
     fn st() -> NodeState {
         NodeState::default()
+    }
+
+    // ── 화면 캡처 스레드 ───────────────────────────────────────────────
+
+    /// 한 장에 오래 걸리는 가짜 캡처. 포털 백엔드를 흉내 낸다.
+    struct SlowSource {
+        cost: Duration,
+        n: u32,
+    }
+
+    impl crate::record::FrameSource for SlowSource {
+        fn backend_label(&self) -> Option<String> {
+            Some("slow-fake".into())
+        }
+        fn grab(&mut self, _region: &Region) -> anyhow::Result<crate::screen::Frame> {
+            std::thread::sleep(self.cost);
+            self.n += 1;
+            Ok(crate::screen::Frame {
+                width: 2,
+                height: 2,
+                rgba: vec![(self.n % 256) as u8; 16],
+            })
+        }
+    }
+
+    fn slow_capture(fps: f32, cost_ms: u64) -> CaptureThread {
+        CaptureThread::start_with(
+            Region {
+                monitor: 0,
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            fps,
+            move || {
+                Ok(Box::new(SlowSource {
+                    cost: Duration::from_millis(cost_ms),
+                    n: 0,
+                }) as Box<dyn crate::record::FrameSource>)
+            },
+        )
+    }
+
+    /// 느린 캡처가 **틱을 막지 않는다**. 프레임은 스레드가 찍어 두고 틱은 집어 가기만 한다.
+    #[test]
+    fn a_slow_capture_does_not_block_the_caller() {
+        let cap = slow_capture(10.0, 300);
+        // 캡처 한 장이 300ms 인데, 집어 가는 쪽은 곧바로 돌아와야 한다.
+        let start = Instant::now();
+        for _ in 0..50 {
+            let _ = cap.take_frame();
+        }
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "집어 가는 데 {:?} 걸렸다 — 캡처를 기다린 것으로 보인다",
+            start.elapsed()
+        );
+        // 300ms 뒤에는 한 장이 와 있어야 한다.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(cap.take_frame().is_some(), "프레임이 오지 않았다");
+    }
+
+    /// 틱이 집어 가지 않으면 오래된 프레임은 버리고 최신 한 장만 남는다.
+    #[test]
+    fn old_frames_are_dropped_not_queued() {
+        let cap = slow_capture(50.0, 10);
+        std::thread::sleep(Duration::from_millis(400));
+        // 여러 장 찍혔지만 들고 있는 것은 하나뿐이다.
+        assert!(cap.take_frame().is_some());
+        assert!(cap.take_frame().is_none(), "두 장 이상을 쌓아 두고 있다");
+        assert!(cap.take_dropped() > 0, "버린 장 수를 세지 않았다");
+        // 한 번 가져가면 0 으로 돌아간다 (보고가 누적되지 않게).
+        assert_eq!(cap.take_dropped(), 0);
+    }
+
+    /// 진행 중인 캡처가 있어도 정지 신호는 곧바로 돌아오고, 스레드는 스스로 끝난다.
+    #[test]
+    fn stopping_does_not_wait_for_a_capture_in_flight() {
+        let cap = slow_capture(2.0, 600);
+        // 캡처가 한창일 때 세운다.
+        std::thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        cap.signal_stop();
+        let signalled = start.elapsed();
+        assert!(
+            signalled < Duration::from_millis(100),
+            "정지 신호에 {signalled:?} 걸렸다"
+        );
+        // 진행 중이던 한 장이 끝나면 스레드는 알아서 사라진다 — 남겨 두지 않는다.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !cap.is_finished() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(cap.is_finished(), "캡처 스레드가 남았다");
+    }
+
+    /// 캡처 출처를 바꾸는 시험끼리 겹치지 않게 하나씩 돌린다 (전역 자리를 쓴다).
+    fn with_slow_source<T>(cost_ms: u64, body: impl FnOnce() -> T) -> T {
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _guard = ONE_AT_A_TIME.lock();
+        *TEST_FRAME_SOURCE.lock() = Some(Arc::new(move || {
+            Ok(Box::new(SlowSource {
+                cost: Duration::from_millis(cost_ms),
+                n: 0,
+            }) as Box<dyn crate::record::FrameSource>)
+        }));
+        let out = body();
+        *TEST_FRAME_SOURCE.lock() = None;
+        out
+    }
+
+    /// **핵심 시험**: 300ms 짜리 캡처가 붙어 있어도 500ms 타이머가 제 주기를 지킨다.
+    ///
+    /// 예전에는 캡처가 틱 스레드에서 돌아 500ms 타이머가 810ms 간격으로 밀렸다
+    /// (30분 부하 점검에서 측정). 캡처를 전용 스레드로 뺀 뒤의 상태를 여기서 못 박는다.
+    #[test]
+    fn a_slow_capture_does_not_disturb_the_timer_period() {
+        let jitter_p99 = with_slow_source(300, || {
+            let mut p = Pipeline::new("지터");
+            p.tick_hz = 60.0;
+            let timer = p.add_node(PNode::new(
+                PNodeKind::Source {
+                    source: Source::Timer { interval_ms: 500 },
+                },
+                [0.0, 0.0],
+            ));
+            let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+            p.add_link(timer, log).unwrap();
+            // 같은 파이프라인에 느린 캡처를 건다. 초당 두 장이라 틱마다 걸린다.
+            let cap = p.add_node(PNode::new(
+                PNodeKind::Source {
+                    source: Source::ScreenCapture {
+                        region: Region {
+                            monitor: 0,
+                            x: 0,
+                            y: 0,
+                            width: 2,
+                            height: 2,
+                        },
+                        fps: 2.0,
+                    },
+                },
+                [0.0, 1.0],
+            ));
+            let caplog = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 1.0]));
+            p.add_link(cap, caplog).unwrap();
+
+            let h = Runner::new(Project::new("p"), p, tmp_dir("jitter"), DevicePref::Cpu)
+                .start()
+                .unwrap();
+
+            // 타이머가 값을 낸 시각을 모은다.
+            let mut at: Vec<Instant> = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(7);
+            while Instant::now() < deadline && at.len() < 12 {
+                match h.events.recv_timeout(Duration::from_millis(200)) {
+                    Ok(RunnerEvent::Value { node, .. }) if node == timer => at.push(Instant::now()),
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+            let stop_start = Instant::now();
+            h.stop();
+            let stopped = h.wait_done(Duration::from_secs(3));
+            let stop_took = stop_start.elapsed();
+            assert!(stopped, "멈추지 않았다");
+            // 진행 중인 캡처(300ms)를 기다리지 않아야 한다.
+            assert!(
+                stop_took < Duration::from_millis(100),
+                "정지에 {stop_took:?} 걸렸다 — 캡처를 기다린 것으로 보인다"
+            );
+
+            assert!(at.len() >= 8, "타이머 표본이 {}개뿐이다", at.len());
+            // 첫 발화는 시작 직후라 주기가 아니다. 빼고 본다.
+            let mut jitter: Vec<i64> = at
+                .windows(2)
+                .skip(1)
+                .map(|w| w[1].duration_since(w[0]).as_millis() as i64 - 500)
+                .map(i64::abs)
+                .collect();
+            jitter.sort_unstable();
+            let p99 = jitter[(jitter.len() * 99 / 100).min(jitter.len() - 1)];
+            eprintln!("타이머 지터: 중앙값 {}ms p99 {}ms", jitter[jitter.len() / 2], p99);
+            p99
+        });
+        assert!(jitter_p99 < 50, "느린 캡처가 타이머를 밀었다 (지터 p99 {jitter_p99}ms)");
+    }
+
+    /// 캡처 백엔드를 못 열면 오류가 한 번 올라오고 스레드는 끝난다.
+    #[test]
+    fn a_capture_that_cannot_start_reports_once() {
+        let cap = CaptureThread::start_with(
+            Region {
+                monitor: 0,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            1.0,
+            || anyhow::bail!("백엔드 없음"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut got = None;
+        while Instant::now() < deadline && got.is_none() {
+            got = cap.take_error();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let msg = got.expect("오류가 오지 않았다");
+        assert!(msg.contains("열지 못했다"), "{msg}");
+        assert!(cap.take_error().is_none(), "오류를 두 번 준다");
+        assert!(cap.is_finished(), "열기에 실패했으면 스레드가 끝나야 한다");
     }
 
     #[test]
@@ -3396,10 +4083,11 @@ mod tests {
 
     #[test]
     fn encode_input_without_payload_accepts_numbers_only() {
-        let t = encode_input(None, &Value::Numbers(vec![1.0, 2.0])).unwrap();
-        assert_eq!(t.shape, vec![1, 2]);
-        assert_eq!(encode_input(None, &Value::Number(3.0)).unwrap().shape, vec![1, 1]);
-        assert!(encode_input(None, &Value::Text("x".into())).is_err());
+        let t = encode_inputs(None, &Value::Numbers(vec![1.0, 2.0])).unwrap();
+        assert_eq!(t.len(), 1, "페이로드가 없으면 텐서 하나다");
+        assert_eq!(t[0].shape, vec![1, 2]);
+        assert_eq!(encode_inputs(None, &Value::Number(3.0)).unwrap()[0].shape, vec![1, 1]);
+        assert!(encode_inputs(None, &Value::Text("x".into())).is_err());
     }
 
     #[test]
@@ -3410,8 +4098,9 @@ mod tests {
         let mut widgets = HashMap::new();
         manual.insert(id, Value::Number(1.0));
         let mut servers = HashMap::new();
+        let (etx, _erx) = crossbeam_channel::unbounded();
         let mut call = |s: &mut NodeState, m: &mut HashMap<PNodeId, Value>, w: &mut HashMap<WidgetId, Value>| {
-            eval_source(&Source::Manual, id, s, Instant::now(), w, m, &mut servers).unwrap()
+            eval_source(&Source::Manual, id, s, Instant::now(), w, m, &mut servers, &etx).unwrap()
         };
         assert_eq!(call(&mut s, &mut manual, &mut widgets), Some(Value::Number(1.0)));
         assert_eq!(
@@ -3427,6 +4116,7 @@ mod tests {
         let src = Source::WebSocket { url: "ws://x".into() };
         let (mut m, mut w) = (HashMap::new(), HashMap::new());
         let mut servers = HashMap::new();
+        let (etx, _erx) = crossbeam_channel::unbounded();
         let e = eval_source(
             &src,
             PNodeId::from_u128(1),
@@ -3435,6 +4125,7 @@ mod tests {
             &mut w,
             &mut m,
             &mut servers,
+            &etx,
         )
         .unwrap_err();
         assert!(e.contains("ws://x"), "{e}");

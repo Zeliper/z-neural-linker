@@ -42,13 +42,13 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 |---|---|---|
 | `nl-core` | 프로젝트 문서 모델, 레이어 그래프, 형상 추론, 페이로드/데이터셋/파이프라인/GUI 레이아웃 스펙, op·undo·diff, 번들 포맷 | serde 만 |
 | `nl-engine` | burn 기반 **런타임 정의 그래프** 인터프리터, 장치 선택(CPU ndarray / GPU wgpu), 학습 루프(스레드 + 이벤트 채널), 체크포인트(safetensors), 추론 세션 | nl-core, burn |
-| `nl-io` | 화면 캡처(Linux: libwayshot·xdg-desktop-portal·x11rb, 그 밖: xcap), 입력 시뮬레이션(enigo), HTTP 호출·**자체 인바운드 HTTP 서버(`httpd`)**, WebSocket(tungstenite+rustls), 화면 녹화기(`Recorder`), 자원 조회(sysinfo), **파이프라인 실행기 `Runner`** | nl-core, nl-engine |
+| [`nl-io`](../crates/nl-io/README.md) | 화면 캡처(Linux: libwayshot·xdg-desktop-portal·x11rb, 그 밖: xcap), 입력 시뮬레이션(enigo), HTTP 호출·**자체 인바운드 HTTP 서버(`httpd`)**, WebSocket(tungstenite+rustls), 화면 녹화기(`Recorder`), 자원 조회(sysinfo), **파이프라인 실행기 `Runner`** | nl-core, nl-engine |
 | `nl-gui` | 빌더 미리보기와 런타임이 **같은 픽셀을 그리도록** 공유하는 egui 요소: `GuiLayout` 렌더러(`render_layout`), 위젯 상태(`GuiState`)·이벤트(`GuiEvent`), 편집/실행 두 모드(`RenderMode`), 한글 폰트·테마 | nl-core, nl-engine, egui |
 | `nl-bundle` | `.nlapp` zip 읽기/쓰기, 런타임 바이너리 첨부, 배포 아카이브(tar.gz/zip), Windows 설치 프로그램(Inno Setup) 생성, 아이콘 변환(PNG→ICO), 업데이트 매니페스트 생성, 외부 도구 설치·크로스 빌드 계획 | nl-core, nl-update, zip, image |
 | `nl-update` | 자동 업데이트 코어: 매니페스트 확인(https 강제·서명 필수·신선도·동일 오리진), 스트리밍 다운로드 + sha256, 적용 직전 재검증 후 교체 — **GUI 무의존**. 서명 키 도구는 예제 대상 `nl-keygen` | serde, semver, ureq, minisign-verify |
 | `nl-app` | 빌더 GUI | 위 전부 + eframe |
 | `nl-runtime` | 배포판 실행기(단일 바이너리 + 번들) | nl-core, nl-engine, nl-io, nl-gui, nl-bundle, nl-update, eframe |
-| `nl-cli` | `nl` 명령줄 도구 — inspect·devices·train·infer·run·record·build·sample. 스크립트·CI 용이라 종료 코드가 계약이다. **실행 파일 이름은 `nl`** (크레이트 이름과 다르다) | 위 전부 (GUI 제외) |
+| [`nl-cli`](../crates/nl-cli/README.md) | `nl` 명령줄 도구 — inspect·devices·train·infer·run·record·build·tls-cert·sample. 스크립트·CI 용이라 종료 코드가 계약이다. **실행 파일 이름은 `nl`** (크레이트 이름과 다르다) | 위 전부 (GUI 제외) |
 | `tools/uitest` | 헤드리스 sway GUI 테스트 하네스 + 시나리오 러너·골든 이미지 비교 (trust-pms 이식) | — |
 
 ## nl-core
