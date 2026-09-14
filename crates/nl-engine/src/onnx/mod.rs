@@ -114,6 +114,14 @@ pub fn export(model: &ModelDef, weights: &Path, out: &Path, opts: ExportOptions)
         );
     }
 
+    // 없는 파일은 여기서 먼저 잡는다. `weights::load_for` 의 오류에는 절대 경로가 들어가는데,
+    // 그 메시지가 로그·화면에 그대로 나가면 사용자 폴더 구조가 새어 나간다.
+    if !weights.is_file() {
+        bail!(
+            "가중치 파일이 없습니다: {} — 먼저 학습하거나 다른 체크포인트를 지정하세요",
+            shown(weights)
+        );
+    }
     let params = weights::load_for(weights, Some(model.id))
         .with_context(|| format!("가중치를 읽을 수 없습니다: {}", shown(weights)))?;
 
@@ -143,21 +151,50 @@ pub fn check(model: &ModelDef) -> ExportReport {
     }
 }
 
+/// 아직 내보낼 수 없는 레이어. **지금은 없다** — 20종 전부 매핑되어 있다.
+///
+/// 새 `LayerKind` 가 core 에 들어오면 [`supported`] 의 match 가 컴파일 오류를 내서,
+/// 조용히 빠뜨린 모델이 나가는 일이 없게 한다.
 fn unsupported_layers(model: &ModelDef, _rep: &ShapeReport) -> Vec<String> {
     let mut v: Vec<String> = model
         .graph
         .nodes
         .values()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                LayerKind::Lstm { .. } | LayerKind::Gru { .. } | LayerKind::MultiHeadAttention { .. }
-            )
-        })
+        .filter(|n| !supported(&n.kind))
         .map(|n| format!("{} ({})", n.display_name(), n.kind.spec().label))
         .collect();
     v.sort();
+    v.dedup();
     v
+}
+
+/// 이 레이어를 ONNX 로 옮길 수 있는가.
+///
+/// **모든 변형을 빠짐없이 적는다.** `_ => false` 로 두면 새 레이어가 core 에 들어왔을 때
+/// 컴파일러가 알려 주지 않고, 사용자는 "왜 이 레이어만 빠지지" 를 런타임에 알게 된다.
+fn supported(kind: &LayerKind) -> bool {
+    match kind {
+        LayerKind::Input { .. }
+        | LayerKind::Output
+        | LayerKind::Linear { .. }
+        | LayerKind::Conv2d { .. }
+        | LayerKind::MaxPool2d { .. }
+        | LayerKind::AvgPool2d { .. }
+        | LayerKind::GlobalAvgPool
+        | LayerKind::Flatten
+        | LayerKind::Reshape { .. }
+        | LayerKind::Activation { .. }
+        | LayerKind::Dropout { .. }
+        | LayerKind::BatchNorm { .. }
+        | LayerKind::LayerNorm { .. }
+        | LayerKind::Add
+        | LayerKind::Mul
+        | LayerKind::Concat { .. }
+        | LayerKind::Embedding { .. }
+        | LayerKind::Lstm { .. }
+        | LayerKind::Gru { .. }
+        | LayerKind::MultiHeadAttention { .. } => true,
+    }
 }
 
 fn label(model: &ModelDef, id: NodeId) -> String {
@@ -186,6 +223,51 @@ fn write_atomic(out: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, out)?;
     Ok(())
+}
+
+// ───────────────────────────── 순환 셀 ─────────────────────────────
+
+/// 순환 셀 종류. 게이트 순서 변환표를 들고 있다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Cell {
+    Lstm,
+    Gru,
+}
+
+/// 순환 가중치를 ONNX 로 옮길 때 늘 함께 다니는 셋.
+struct RnnLayout<'o> {
+    /// 방향 목록. 정방향(`false`) 먼저 — ONNX 방향 축도 0 이 정방향이다.
+    dirs: &'o [bool],
+    hidden: usize,
+    /// ONNX 게이트 블록 `i` 번째가 우리 블록 몇 번째인지.
+    order: &'o [usize],
+}
+
+impl RnnLayout<'_> {
+    /// `gates · hidden` — W/R 의 행 수이자 편향 절반의 길이.
+    fn rows(&self) -> usize {
+        self.order.len() * self.hidden
+    }
+}
+
+impl Cell {
+    fn op(self) -> &'static str {
+        match self {
+            Cell::Lstm => "LSTM",
+            Cell::Gru => "GRU",
+        }
+    }
+
+    /// ONNX 의 게이트 블록 `i` 번째가 우리 블록 몇 번째인지.
+    ///
+    /// LSTM: 우리(PyTorch) `i,f,g,o` → ONNX `i,o,f,c`. `g` 와 `c` 는 같은 게이트다.
+    /// GRU: 우리 `r,z,n` → ONNX `z,r,h`. 앞 둘을 맞바꾼다.
+    fn gate_order(self) -> &'static [usize] {
+        match self {
+            Cell::Lstm => &[0, 3, 1, 2],
+            Cell::Gru => &[1, 0, 2],
+        }
+    }
 }
 
 // ───────────────────────────── 그래프 조립 ─────────────────────────────
@@ -308,6 +390,18 @@ impl<'a> Builder<'a> {
             .context("상류 노드가 아직 처리되지 않았습니다 (위상 순서 오류)")
     }
 
+    /// 입력 슬롯 `slot` 상류의 **샘플 형상**(배치 제외).
+    fn in_sample(&self, id: NodeId, slot: usize) -> Result<Vec<usize>> {
+        let from = self
+            .model
+            .graph
+            .inputs_of(id)
+            .get(&slot)
+            .copied()
+            .with_context(|| format!("{} 의 입력 {}번이 비어 있습니다", label(self.model, id), slot + 1))?;
+        Ok(self.shape_of(from)?.sample())
+    }
+
     fn shape_of(&self, id: NodeId) -> Result<&Shape> {
         self.rep
             .shape(id)
@@ -356,6 +450,19 @@ impl<'a> Builder<'a> {
         self.nodes.push(pb::NodeProto {
             input: inputs,
             output: vec![out],
+            name,
+            op_type: op.into(),
+            attribute: attrs,
+            ..Default::default()
+        });
+    }
+
+    /// 출력이 여럿인 연산자(`LSTM`·`GRU`)용. 안 쓰는 출력은 빈 이름으로 둔다.
+    fn push_multi(&mut self, op: &str, inputs: Vec<String>, outputs: Vec<String>, attrs: Vec<pb::AttributeProto>) {
+        let name = format!("{op}_{}", self.nodes.len());
+        self.nodes.push(pb::NodeProto {
+            input: inputs,
+            output: outputs,
             name,
             op_type: op.into(),
             attribute: attrs,
@@ -588,12 +695,221 @@ impl<'a> Builder<'a> {
                 out
             }
 
-            LayerKind::Lstm { .. } | LayerKind::Gru { .. } | LayerKind::MultiHeadAttention { .. } => {
-                bail!("{} 은 아직 ONNX 로 내보낼 수 없습니다", label(self.model, id))
-            }
+            LayerKind::Lstm {
+                hidden,
+                bidirectional,
+                return_sequence,
+            } => self.recurrent(id, kind, Cell::Lstm, *hidden, *bidirectional, *return_sequence)?,
+
+            LayerKind::Gru {
+                hidden,
+                bidirectional,
+                return_sequence,
+            } => self.recurrent(id, kind, Cell::Gru, *hidden, *bidirectional, *return_sequence)?,
+
+            LayerKind::MultiHeadAttention { heads, .. } => self.attention(id, kind, *heads)?,
         };
         self.values.insert(id, out);
         Ok(())
+    }
+
+    // ── 순환 레이어 ──
+
+    /// `Lstm`/`Gru` → ONNX `LSTM`/`GRU`.
+    ///
+    /// 우리 구현과 ONNX 사이에 **세 가지가 동시에 다르다** — 하나라도 빠뜨리면 오류 없이 값만 틀린다.
+    ///
+    /// 1. **게이트 순서.** 우리는 PyTorch 를 따라 `i,f,g,o`(LSTM)·`r,z,n`(GRU) 이고
+    ///    ONNX 는 `i,o,f,c`·`z,r,h` 다. `hidden` 크기 블록 단위로 재배열한다([`Cell::gate_order`]).
+    /// 2. **가중치 방향.** 우리 `weight_ih` 는 `[D, gates·H]`(burn 의 `x @ w`)이고
+    ///    ONNX `W` 는 `[방향, gates·H, D]`(`Xt · Wᵀ`)다. 전치한 뒤 방향 축을 붙인다.
+    /// 3. **배치 축 위치.** 우리는 `[B, L, D]`(batch-first), ONNX 기본은 `layout=0` 즉 `[L, B, D]` 다.
+    ///    `layout=1` 을 선언하는 길도 있지만 **앞뒤에 `Transpose` 를 두는 쪽**을 쓴다 —
+    ///    `layout` 은 opset 14 부터라 읽는 쪽을 가리고, `Transpose` 는 어디서나 돈다.
+    ///
+    /// 편향은 우리가 `bias_ih`·`bias_hh` 를 따로 두는데 ONNX `B` 도 `[Wb, Rb]` 를 이어 붙인
+    /// `[방향, 2·gates·H]` 라 구조가 같다 — 각각 재배열해 잇는다.
+    fn recurrent(
+        &mut self,
+        id: NodeId,
+        kind: &LayerKind,
+        cell: Cell,
+        hidden: usize,
+        bidirectional: bool,
+        return_sequence: bool,
+    ) -> Result<String> {
+        let x = self.input_of(id, 0)?;
+        let sample = self.in_sample(id, 0)?;
+        if sample.len() != 2 {
+            bail!(
+                "{} 의 입력은 [L, D] 여야 합니다 (지금 {sample:?})",
+                label(self.model, id)
+            );
+        }
+        let d_in = sample[1];
+        // 정방향 먼저 — ONNX 의 방향 축도 0 이 정방향이다.
+        let dirs: Vec<bool> = if bidirectional { vec![false, true] } else { vec![false] };
+        let n_dir = dirs.len();
+        let lay = RnnLayout {
+            dirs: &dirs,
+            hidden,
+            order: cell.gate_order(),
+        };
+
+        let w = self.rnn_matrix(id, crate::exec::P_WEIGHT_IH, &lay, d_in, "W")?;
+        let r = self.rnn_matrix(id, crate::exec::P_WEIGHT_HH, &lay, hidden, "R")?;
+        let b = self.rnn_bias(id, &lay)?;
+
+        // [B, L, D] → [L, B, D]
+        let seq_first = self.op1("Transpose", vec![x], "rnn_in", vec![ints("perm", &[1, 0, 2])]);
+
+        let mut attrs = vec![
+            int("hidden_size", hidden as i64),
+            string("direction", if bidirectional { "bidirectional" } else { "forward" }),
+        ];
+        if cell == Cell::Gru {
+            // **필수.** ONNX 기본값 0 은 리셋을 h(t-1) 에 먼저 곱하는 쪽인데, 우리 구현은
+            // `n = tanh(gi_n + r ⊙ gh_n)` 이고 `gh_n` 이 bias_hh 를 이미 포함하므로 1 쪽이다.
+            // 빠뜨리면 읽는 쪽이 오류 없이 다른 값을 낸다.
+            attrs.push(int("linear_before_reset", 1));
+        }
+
+        let ins = vec![seq_first, w, r, b];
+        let (raw, perm, merged): (String, &[i64], Vec<i64>) = if return_sequence {
+            // Y: [L, 방향, B, H] → [B, L, 방향, H] → [B, L, 방향·H]
+            let y = self.fresh("rnn_seq");
+            self.push_multi(cell.op(), ins, vec![y.clone()], attrs);
+            (y, &[2, 0, 1, 3], vec![0, 0, (n_dir * hidden) as i64])
+        } else {
+            // Y_h: [방향, B, H] → [B, 방향, H] → [B, 방향·H].
+            // Y(첫 출력)는 쓰지 않으므로 빈 이름을 준다 — ONNX 가 정한 선택적 출력 표기다.
+            let yh = self.fresh("rnn_last");
+            self.push_multi(cell.op(), ins, vec![String::new(), yh.clone()], attrs);
+            (yh, &[1, 0, 2], vec![0, (n_dir * hidden) as i64])
+        };
+
+        let moved = self.op1("Transpose", vec![raw], "rnn_bt", vec![ints("perm", perm)]);
+        let shape = self.const_i64("rnn_shape", &merged);
+        let out = self.out_name(id, kind);
+        self.push("Reshape", vec![moved, shape], out.clone(), vec![]);
+        Ok(out)
+    }
+
+    /// `weight_ih`/`weight_hh` 를 ONNX `W`/`R` 로. 결과는 `[방향, gates·H, in]`.
+    fn rnn_matrix(&mut self, id: NodeId, base: &str, lay: &RnnLayout<'_>, n_in: usize, hint: &str) -> Result<String> {
+        let rows = lay.rows();
+        let mut data = Vec::with_capacity(lay.dirs.len() * rows * n_in);
+        for &dir in lay.dirs {
+            let key = crate::exec::rnn_name(id, base, dir);
+            let t = self.rnn_param(&key, id, &[n_in, rows])?;
+            data.extend(transpose_and_reorder(&t.data, n_in, rows, lay.hidden, lay.order));
+        }
+        let name = self.fresh(hint);
+        self.initializers
+            .push(float_tensor(&name, &[lay.dirs.len(), rows, n_in], &data));
+        Ok(name)
+    }
+
+    /// `bias_ih`·`bias_hh` 를 ONNX `B` 로. 결과는 `[방향, 2·gates·H]` = `[Wb, Rb]`.
+    fn rnn_bias(&mut self, id: NodeId, lay: &RnnLayout<'_>) -> Result<String> {
+        let width = lay.rows();
+        let mut data = Vec::with_capacity(lay.dirs.len() * width * 2);
+        for &dir in lay.dirs {
+            for base in [crate::exec::P_BIAS_IH, crate::exec::P_BIAS_HH] {
+                let key = crate::exec::rnn_name(id, base, dir);
+                let t = self.rnn_param(&key, id, &[width])?;
+                data.extend(reorder_blocks(&t.data, lay.hidden, lay.order));
+            }
+        }
+        let name = self.fresh("B");
+        self.initializers
+            .push(float_tensor(&name, &[lay.dirs.len(), width * 2], &data));
+        Ok(name)
+    }
+
+    /// 순환 파라미터 하나를 형상까지 확인해 꺼낸다.
+    fn rnn_param(&self, key: &str, id: NodeId, want: &[usize]) -> Result<&'a HostTensor> {
+        let t = self.params.get(key).with_context(|| {
+            format!(
+                "가중치에 '{key}' 가 없습니다 ({}) — 체크포인트가 이 그래프의 것인지 확인하세요",
+                label(self.model, id)
+            )
+        })?;
+        if t.shape != want {
+            bail!("'{key}' 의 형상이 {:?} 인데 {want:?} 를 기대했습니다", t.shape);
+        }
+        Ok(t)
+    }
+
+    // ── 어텐션 ──
+
+    /// `MultiHeadAttention` → 표준 연산자로 분해.
+    ///
+    /// ONNX 의 `Attention` 은 opset 23 이라 17 에서는 못 쓴다. `com.microsoft` 쪽 확장은
+    /// ONNX Runtime 전용이라 이식성이 없다. 그래서 `exec.rs` 의 `self_attention` 과 **같은 순서로**
+    /// MatMul·Reshape·Transpose·Softmax 를 늘어놓는다.
+    ///
+    /// `dropout` 은 추론에서 항등이라 내보내지 않는다.
+    fn attention(&mut self, id: NodeId, kind: &LayerKind, heads: usize) -> Result<String> {
+        let x = self.input_of(id, 0)?;
+        let sample = self.in_sample(id, 0)?;
+        if sample.len() != 2 {
+            bail!(
+                "{} 의 입력은 [L, D] 여야 합니다 (지금 {sample:?})",
+                label(self.model, id)
+            );
+        }
+        let d = sample[1];
+        if heads == 0 || d % heads != 0 {
+            bail!("특징 차원 {d} 가 헤드 수 {heads} 로 나누어떨어지지 않습니다");
+        }
+        let head_dim = d / heads;
+
+        // 배치·길이는 기호일 수 있으므로 0 (= 그 자리 입력 차원 그대로) 을 쓴다.
+        let split = self.const_i64("attn_split", &[0, 0, heads as i64, head_dim as i64]);
+        let q = self.attn_head(id, &x, "q", &split)?;
+        let k = self.attn_head(id, &x, "k", &split)?;
+        let v = self.attn_head(id, &x, "v", &split)?;
+
+        // [B, heads, L, hd] × [B, heads, hd, L] → [B, heads, L, L]
+        let kt = self.op1("Transpose", vec![k], "attn_kt", vec![ints("perm", &[0, 1, 3, 2])]);
+        let scores = self.op1("MatMul", vec![q, kt], "attn_scores", vec![]);
+        let scale = self.const_f32("attn_scale", (head_dim as f64).sqrt() as f32);
+        let scaled = self.op1("Div", vec![scores, scale], "attn_scaled", vec![]);
+        let probs = self.op1("Softmax", vec![scaled], "attn_probs", vec![int("axis", -1)]);
+
+        // [B, heads, L, hd] → [B, L, heads, hd] → [B, L, D]
+        let ctx = self.op1("MatMul", vec![probs, v], "attn_ctx", vec![]);
+        let back = self.op1("Transpose", vec![ctx], "attn_back", vec![ints("perm", &[0, 2, 1, 3])]);
+        let merge = self.const_i64("attn_merge", &[0, 0, d as i64]);
+        let merged = self.op1("Reshape", vec![back, merge], "attn_merged", vec![]);
+
+        let ow = self.param(id, "out_weight")?;
+        let ob = self.param(id, "out_bias")?;
+        let proj = self.op1("MatMul", vec![merged, ow], "attn_out", vec![]);
+        let out = self.out_name(id, kind);
+        self.push("Add", vec![proj, ob], out.clone(), vec![]);
+        Ok(out)
+    }
+
+    /// q·k·v 투영 하나를 `[B, heads, L, head_dim]` 까지 만든다.
+    fn attn_head(&mut self, id: NodeId, x: &str, part: &str, split: &str) -> Result<String> {
+        let w = self.param(id, &format!("{part}_weight"))?;
+        let b = self.param(id, &format!("{part}_bias"))?;
+        let mm = self.op1("MatMul", vec![x.to_string(), w], &format!("attn_{part}"), vec![]);
+        let add = self.op1("Add", vec![mm, b], &format!("attn_{part}_b"), vec![]);
+        let re = self.op1(
+            "Reshape",
+            vec![add, split.to_string()],
+            &format!("attn_{part}_r"),
+            vec![],
+        );
+        Ok(self.op1(
+            "Transpose",
+            vec![re],
+            &format!("attn_{part}_h"),
+            vec![ints("perm", &[0, 2, 1, 3])],
+        ))
     }
 
     fn activation(&mut self, id: NodeId, kind: &LayerKind, x: String, act: Act) -> Result<String> {
@@ -637,6 +953,42 @@ fn float_tensor(name: &str, shape: &[usize], data: &[f32]) -> pb::TensorProto {
         name: name.into(),
         // raw_data 는 리틀엔디안이다. ONNX 규격이 그렇게 정해 두었다.
         raw_data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ..Default::default()
+    }
+}
+
+/// `[n_in, rows]` 를 `[rows, n_in]` 으로 전치하면서 `hidden` 크기 게이트 블록을 재배열한다.
+///
+/// `order[i]` = ONNX 의 `i` 번째 블록이 우리 쪽 몇 번째 블록인가.
+fn transpose_and_reorder(src: &[f32], n_in: usize, rows: usize, hidden: usize, order: &[usize]) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows * n_in];
+    for (dst_blk, &src_blk) in order.iter().enumerate() {
+        for h in 0..hidden {
+            let dst_row = dst_blk * hidden + h;
+            let src_col = src_blk * hidden + h;
+            for d in 0..n_in {
+                // 우리 쪽은 [n_in, rows] 행 우선이라 (d, src_col) 이 d*rows + src_col.
+                out[dst_row * n_in + d] = src[d * rows + src_col];
+            }
+        }
+    }
+    out
+}
+
+/// 편향처럼 1차원인 것의 게이트 블록만 재배열한다.
+fn reorder_blocks(src: &[f32], hidden: usize, order: &[usize]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(src.len());
+    for &src_blk in order {
+        out.extend_from_slice(&src[src_blk * hidden..(src_blk + 1) * hidden]);
+    }
+    out
+}
+
+fn string(name: &str, v: &str) -> pb::AttributeProto {
+    pb::AttributeProto {
+        name: name.into(),
+        r#type: pb::attribute_proto::AttributeType::String as i32,
+        s: v.as_bytes().to_vec(),
         ..Default::default()
     }
 }
@@ -690,7 +1042,14 @@ mod tests {
     }
 
     #[test]
-    fn check_flags_recurrent_and_attention_layers() {
+    fn every_palette_layer_can_be_exported() {
+        // `supported()` 의 match 는 모든 변형을 빠짐없이 적으므로 새 레이어가 core 에 들어오면
+        // 컴파일이 깨진다. 이 테스트는 그 목록이 실제로 **전부 true** 인지를 본다 —
+        // 누군가 새 레이어를 false 로 두고 잊는 것을 잡는다.
+        for kind in LayerKind::palette() {
+            assert!(supported(&kind), "{} 이 미지원으로 남아 있습니다", kind.spec().label);
+        }
+
         let ok = chain(vec![
             LayerKind::Input { shape: vec![4] },
             LayerKind::Linear {
@@ -700,26 +1059,65 @@ mod tests {
         ]);
         assert!(check(&ok).unsupported.is_empty());
 
-        let mut bad = ModelDef::new("순환");
-        let g = &mut bad.graph;
+        // 순환·어텐션도 이제 지원 범위 안이다 (3~4 단계에서 들어왔다).
+        let mut seq = ModelDef::new("순환");
+        let g = &mut seq.graph;
         let i = g.add_node(Node::new(LayerKind::Input { shape: vec![4] }, [0.0, 0.0]));
         let e = g.add_node(Node::new(LayerKind::Embedding { vocab: 8, dim: 4 }, [0.0, 0.0]));
-        let mut lstm = Node::new(
+        let l = g.add_node(Node::new(
             LayerKind::Lstm {
                 hidden: 3,
-                bidirectional: false,
+                bidirectional: true,
                 return_sequence: false,
             },
             [0.0, 0.0],
-        );
-        lstm.name = "기억".into();
-        let l = g.add_node(lstm);
+        ));
         g.add_edge(i, Port::new(e, 0));
         g.add_edge(e, Port::new(l, 0));
-        let rep = check(&bad);
-        assert_eq!(rep.unsupported.len(), 1);
-        assert!(rep.unsupported[0].contains("기억"), "{:?}", rep.unsupported);
-        assert!(rep.unsupported[0].contains("LSTM"), "{:?}", rep.unsupported);
+        assert!(check(&seq).unsupported.is_empty());
+    }
+
+    #[test]
+    fn gate_order_tables_are_permutations() {
+        // 재배열표가 순열이 아니면 가중치가 조용히 뒤섞인다.
+        for cell in [Cell::Lstm, Cell::Gru] {
+            let mut seen: Vec<usize> = cell.gate_order().to_vec();
+            let n = seen.len();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(
+                seen,
+                (0..n).collect::<Vec<_>>(),
+                "{cell:?} 의 게이트 순서표가 순열이 아닙니다"
+            );
+        }
+        assert_eq!(Cell::Lstm.gate_order().len(), 4);
+        assert_eq!(Cell::Gru.gate_order().len(), 3);
+    }
+
+    #[test]
+    fn transpose_and_reorder_moves_gate_blocks_and_flips_the_axes() {
+        // [n_in=2, rows=4] (게이트 2개 × hidden 2) → [4, 2] 로 전치하면서 블록을 뒤집는다.
+        let src = vec![
+            // d=0: [g0h0, g0h1, g1h0, g1h1]
+            1.0, 2.0, 3.0, 4.0, //
+            // d=1
+            5.0, 6.0, 7.0, 8.0,
+        ];
+        let out = transpose_and_reorder(&src, 2, 4, 2, &[1, 0]);
+        // ONNX 블록 0 = 우리 블록 1 = 열 2,3 → 행 0,1 이 [3,7], [4,8]
+        assert_eq!(out, vec![3.0, 7.0, 4.0, 8.0, 1.0, 5.0, 2.0, 6.0]);
+
+        // 항등 순서면 순수 전치다.
+        let plain = transpose_and_reorder(&src, 2, 4, 2, &[0, 1]);
+        assert_eq!(plain, vec![1.0, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0]);
+    }
+
+    #[test]
+    fn reorder_blocks_only_moves_whole_gates() {
+        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 게이트 3개 × hidden 2
+        assert_eq!(reorder_blocks(&src, 2, &[1, 0, 2]), vec![3.0, 4.0, 1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(reorder_blocks(&src, 2, &[0, 1, 2]), src);
     }
 
     #[test]
@@ -753,8 +1151,9 @@ mod tests {
     }
 
     #[test]
-    fn export_refuses_unsupported_layers_before_touching_weights() {
-        let dir = std::env::temp_dir().join(format!("nl-onnx-unsup-{}", std::process::id()));
+    fn a_missing_weights_file_is_reported_by_name_only() {
+        // 오류 메시지에 사용자 절대 경로가 섞이면 안 된다 (로그·화면에 그대로 나간다).
+        let dir = std::env::temp_dir().join(format!("nl-onnx-noweights-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let def = chain(vec![
             LayerKind::Input { shape: vec![6] },
@@ -775,9 +1174,9 @@ mod tests {
             )
             .unwrap_err()
         );
-        // 가중치 파일이 없는데도 그쪽 오류가 아니라 미지원 오류가 나야 한다 (순서 확인).
-        assert!(e.contains("내보낼 수 없는 레이어"), "{e}");
-        assert!(e.contains("GRU"), "{e}");
+        assert!(e.contains("없음.safetensors"), "파일 이름은 알려 줘야 한다: {e}");
+        assert!(!e.contains(&dir.display().to_string()), "절대 경로가 새어 나왔다: {e}");
+        assert!(!dir.join("out.onnx").exists(), "실패했는데 파일을 남겼다");
         std::fs::remove_dir_all(&dir).ok();
     }
 

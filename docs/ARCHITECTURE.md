@@ -226,12 +226,34 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 - `Dropout` 은 노드를 만들지 않고 상류 이름을 물려준다(추론에서 항등). `Concat` 의 축은 우리가 샘플 기준이라
   **+1** 보정한다. `Embedding` 은 우리 인덱스가 f32 라 `Cast(INT64)` → `Gather(axis=0)` 다.
   배치는 기본이 `dim_param = "B"` 기호라 어떤 배치 크기로도 돈다(`Batch::Fixed(n)` 로 박을 수도 있다).
-- **`Lstm`·`Gru`·`MultiHeadAttention` 은 아직 안 된다.** 게이트 순서(우리는 PyTorch 의 `i,f,g,o`/`r,z,n`,
-  ONNX 는 `i,o,f,c`/`z,r,h`)와 레이아웃 변환이 필요하다. 그 셋이 있으면 `ExportReport::unsupported` 에 담기고
-  **내보내기 자체가 실패한다** — 조용히 빠뜨린 모델은 값이 틀린 채로 돌기 때문이다. `onnx::check()` 로 미리 볼 수 있다.
+- **순환 레이어(`Lstm`·`Gru`)는 세 가지가 동시에 다르다.** 하나라도 빠뜨리면 오류 없이 값만 틀린다.
+  1. **게이트 순서** — 우리는 PyTorch 를 따라 `i,f,g,o`(LSTM)·`r,z,n`(GRU), ONNX 는 `i,o,f,c`·`z,r,h` 다.
+     `hidden` 크기 블록 단위로 각각 `[0,3,1,2]`·`[1,0,2]` 로 재배열한다. LSTM 의 `g` 와 ONNX 의 `c` 는 같은 게이트다.
+  2. **가중치 방향** — 우리 `weight_ih` 는 `[D, gates·H]`(burn 의 `x @ w`), ONNX `W` 는 `[방향, gates·H, D]`(`Xt·Wᵀ`)다.
+     전치한 뒤 방향 축을 붙인다. 편향은 우리가 `bias_ih`·`bias_hh` 를 따로 두고 ONNX `B` 도 `[Wb, Rb]` 를 이어 붙인
+     `[방향, 2·gates·H]` 라 구조가 같다.
+  3. **배치 축 위치** — 우리는 `[B, L, D]`(batch-first), ONNX 기본 `layout=0` 은 `[L, B, D]` 다.
+     **`layout=0` + 앞뒤 `Transpose`** 를 쓴다(아래).
+  `return_sequence` 면 `Y` `[L, 방향, B, H]` 를, 아니면 `Y_h` `[방향, B, H]` 를 받아 `Transpose`+`Reshape` 로
+  우리 형상에 맞춘다. 안 쓰는 출력은 빈 이름으로 둔다(ONNX 가 정한 선택적 출력 표기). 양방향은
+  `direction="bidirectional"` 에 정방향·역방향 가중치를 방향 축으로 쌓는다.
+- **GRU 는 `linear_before_reset=1` 이 필수다.** ONNX 기본값 0 은 리셋을 `h(t-1)` 에 먼저 곱하는 쪽인데, 우리 구현은
+  `n = tanh(gi_n + r ⊙ gh_n)` 이고 `gh_n` 이 `bias_hh` 를 이미 포함하므로 1 쪽이다. **빠뜨려도 파일은 정상이고
+  읽는 쪽도 오류를 내지 않는다 — 값만 달라진다.** 왕복 테스트에서 실제로 이걸 0 으로 바꿔 보면 출력이 0.021 어긋난다.
+- **어텐션은 분해한다.** 표준 `Attention` 은 opset 23 이고 `com.microsoft` 쪽은 ONNX Runtime 전용이라 둘 다 못 쓴다.
+  `exec.rs` 의 `self_attention` 과 같은 순서로 q·k·v 투영(`MatMul`+`Add`) → `Reshape`/`Transpose` 헤드 분리 →
+  `MatMul`·`Div(√head_dim)`·`Softmax`·`MatMul` → `Transpose`/`Reshape` 결합 → out 투영을 늘어놓는다.
+  `Reshape` 의 목표 형상에는 배치·길이 자리에 **0**(그 자리 입력 차원 그대로)을 써서 기호 차원을 지킨다.
+  학습용 `dropout` 은 추론에서 항등이라 내보내지 않는다.
+- **tract 의 실제 동작을 확인했다.** `layout=1`(batch-first)도 읽고 `layout=0` 과 **같은 값**을 낸다 —
+  그래도 `layout` 속성은 opset 14 부터라 읽는 쪽을 가리므로 `Transpose` 두 개를 쓰는 쪽이 이식성이 낫다.
+  `linear_before_reset` 도 tract 가 제대로 해석한다(0 으로 바꾸면 결과가 달라지는 것으로 확인).
+  출력 이름을 빈 문자열로 둔 선택적 출력(`Y` 를 버리고 `Y_h` 만 받기)도 그대로 받아들인다.
 - **검증은 왕복이다.** `tests/onnx.rs` 가 학습 → 내보내기 → `tract-onnx` 로 읽기 → 우리 `Session` 과 1e-4 이내 비교를
   한다. `tract-onnx` 는 **dev-dependency 라 배포 바이너리에 들어가지 않는다**. 우리 코드끼리 비교하면 규약을 잘못
-  이해한 경우를 못 잡으니 바깥 구현이어야 의미가 있다.
+  이해한 경우를 못 잡으니 바깥 구현이어야 의미가 있다. 순환 레이어는 단방향·양방향 × `return_sequence` 네 경우를
+  모두 돌고, 어텐션과 `templates` 의 트랜스포머 블록 전체도 함께 본다. 배치는 2 로 잡는다 — 1 이면 배치 축이
+  뒤섞이는 실수를 놓친다.
 - protobuf 메시지 정의(`onnx/pb.rs`)는 **생성 결과를 커밋**해 둔다 — 빌드에 `protoc` 도 코드 생성도 필요 없다
   (tract 가 쓰는 방식과 같다). 재생성 절차는 `scripts/onnxgen/README.md` 에 있고 순수 Rust(`protox` + `prost-build`)다.
 

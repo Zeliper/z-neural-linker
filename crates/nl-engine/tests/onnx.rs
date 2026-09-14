@@ -450,3 +450,187 @@ fn memory_sequence_csv(dir: &Path, rows: usize, len: usize, vocab: usize) -> Dat
         },
     )
 }
+
+// ───────────────────────────── 순환 · 어텐션 ─────────────────────────────
+
+/// `Input[L] → Embedding(vocab, dim) → <중간> → Flatten → Linear(2)` 모델.
+///
+/// `return_sequence` 면 중간 출력이 `[L, H]` 라 Flatten 이 필요하고, 아니면 `[H]` 라
+/// Flatten 이 그냥 통과한다 — 두 경우를 같은 뼈대로 본다.
+fn seq_model(len: usize, vocab: usize, dim: usize, middle: LayerKind) -> ModelDef {
+    let mut def = chain(vec![
+        LayerKind::Input { shape: vec![len] },
+        LayerKind::Embedding { vocab, dim },
+        middle,
+        LayerKind::Flatten,
+        linear(2),
+    ]);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.val_split = 0.0;
+    def
+}
+
+/// 시퀀스 모델을 학습 → 내보내기 → tract 와 비교한다.
+fn seq_round_trip(tag: &str, len: usize, vocab: usize, middle: LayerKind) -> onnx::ExportReport {
+    let dir = temp_dir(tag);
+    let ds = memory_sequence_csv(&dir, 96, len, vocab);
+    let def = seq_model(len, vocab, 8, middle);
+    let (def, ckpt) = train_and_checkpoint(def, ds, &dir, 2);
+    let out = dir.join("model.onnx");
+    let report = onnx::export(&def, &ckpt, &out, ExportOptions::default())
+        .unwrap_or_else(|e| panic!("{tag}: 내보내기 실패: {e:#}"));
+    assert!(report.unsupported.is_empty());
+
+    // 배치 2 — 배치 축이 뒤섞이는 실수를 잡으려면 1 보다 커야 한다.
+    let data: Vec<f32> = (0..2 * len).map(|i| ((i * 5) % vocab) as f32).collect();
+    let x = HostTensor::new(vec![2, len], data);
+    let mut s = Session::load(&def, Some(&ckpt), DevicePref::Cpu).expect("세션");
+    let ours = s.run(std::slice::from_ref(&x)).expect("우리 추론");
+    assert_same(tag, &ours[0].data, &tract_run(&out, &x), 1e-4);
+    std::fs::remove_dir_all(&dir).ok();
+    report
+}
+
+#[test]
+fn lstm_round_trips_in_all_four_shapes() {
+    // 단방향/양방향 × return_sequence 두 경우.
+    for bidirectional in [false, true] {
+        for return_sequence in [false, true] {
+            let tag = format!(
+                "lstm-{}-{}",
+                if bidirectional { "bi" } else { "uni" },
+                if return_sequence { "seq" } else { "last" }
+            );
+            seq_round_trip(
+                &tag,
+                6,
+                10,
+                LayerKind::Lstm {
+                    hidden: 5,
+                    bidirectional,
+                    return_sequence,
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn gru_round_trips_in_all_four_shapes() {
+    // GRU 는 `linear_before_reset=1` 을 빠뜨리면 여기서만 틀린다 — 오류가 아니라 값이 다르다.
+    for bidirectional in [false, true] {
+        for return_sequence in [false, true] {
+            let tag = format!(
+                "gru-{}-{}",
+                if bidirectional { "bi" } else { "uni" },
+                if return_sequence { "seq" } else { "last" }
+            );
+            seq_round_trip(
+                &tag,
+                6,
+                10,
+                LayerKind::Gru {
+                    hidden: 5,
+                    bidirectional,
+                    return_sequence,
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn multi_head_attention_round_trips() {
+    // D=8, heads=2 → head_dim 4. 헤드 분리·결합 순서가 틀리면 값이 어긋난다.
+    seq_round_trip("mha", 6, 10, LayerKind::MultiHeadAttention { heads: 2, dropout: 0.0 });
+    // 헤드 하나짜리도 (reshape 가 항등에 가까워지는 경계).
+    seq_round_trip("mha1", 5, 10, LayerKind::MultiHeadAttention { heads: 1, dropout: 0.0 });
+}
+
+#[test]
+fn attention_dropout_is_dropped_from_the_exported_graph() {
+    // 학습 때만 쓰는 dropout 이 추론 그래프에 남으면 값이 흔들린다.
+    let report = seq_round_trip(
+        "mha-drop",
+        5,
+        10,
+        LayerKind::MultiHeadAttention { heads: 2, dropout: 0.5 },
+    );
+    // 어텐션이 만드는 노드 수는 dropout 과 무관해야 한다.
+    let plain = seq_round_trip(
+        "mha-nodrop",
+        5,
+        10,
+        LayerKind::MultiHeadAttention { heads: 2, dropout: 0.0 },
+    );
+    assert_eq!(report.nodes, plain.nodes, "dropout 이 노드를 남겼습니다");
+}
+
+#[test]
+fn transformer_block_template_round_trips() {
+    // nl_core::templates 의 트랜스포머 블록 전체 — LayerNorm·어텐션·잔차·GELU 가 한 그래프에 있다.
+    let dir = temp_dir("tpl-transformer");
+    let (len, vocab, d_model) = (6usize, 10usize, 8usize);
+
+    let mut def = ModelDef::new("트랜스포머");
+    let g = &mut def.graph;
+    let input = add(g, LayerKind::Input { shape: vec![len] });
+    let emb = add(g, LayerKind::Embedding { vocab, dim: d_model });
+    link(g, input, emb);
+
+    let params = nl_core::templates::TemplateParams::TransformerBlock {
+        d_model,
+        heads: 2,
+        ff_mult: 2,
+    };
+    let (nodes, edges) =
+        nl_core::templates::instantiate(nl_core::templates::TRANSFORMER_BLOCK, [0.0, 0.0], &params).expect("템플릿");
+    let open = nl_core::templates::open_inputs(&nodes, &edges);
+    let block_out = nodes.last().unwrap().id;
+    for n in nodes {
+        g.add_node(n);
+    }
+    for e in edges {
+        g.edges.insert(e.id, e);
+    }
+    for p in open {
+        assert!(g.add_edge(emb, p).is_some(), "블록 입력 연결");
+    }
+
+    let flat = add(g, LayerKind::Flatten);
+    link(g, block_out, flat);
+    let head = add(g, linear(2));
+    link(g, flat, head);
+    let out_node = add(g, LayerKind::Output);
+    link(g, head, out_node);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.val_split = 0.0;
+
+    let ds = memory_sequence_csv(&dir, 96, len, vocab);
+    let (def, ckpt) = train_and_checkpoint(def, ds, &dir, 2);
+    let onnx_path = dir.join("transformer.onnx");
+    onnx::export(&def, &ckpt, &onnx_path, ExportOptions::default()).expect("내보내기");
+
+    let data: Vec<f32> = (0..2 * len).map(|i| ((i * 3) % vocab) as f32).collect();
+    let x = HostTensor::new(vec![2, len], data);
+    let mut s = Session::load(&def, Some(&ckpt), DevicePref::Cpu).expect("세션");
+    let ours = s.run(std::slice::from_ref(&x)).expect("우리 추론");
+    assert_same("트랜스포머 블록", &ours[0].data, &tract_run(&onnx_path, &x), 1e-4);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn recurrent_export_no_longer_reports_unsupported() {
+    // 20종 전부 매핑됐다 — check() 가 아무것도 못 잡아야 한다.
+    let def = seq_model(
+        4,
+        8,
+        6,
+        LayerKind::Lstm {
+            hidden: 3,
+            bidirectional: true,
+            return_sequence: true,
+        },
+    );
+    assert!(onnx::check(&def).unsupported.is_empty());
+}

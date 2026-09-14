@@ -125,10 +125,12 @@
       지금은 같은 모델을 가리키는 위젯이 모두 같은 값을 받는다. 런타임 배선은 이미 있다 — `695689b`
 - [ ] Transformer 블록·Residual 템플릿. **미착수** (`Embedding` 과 `Transform::Tokenize` 는 들어왔다 — `89cee6e`)
 - [ ] 모델 레지스트리: 실행 기록 비교(지표 표), 버전 태그, 가중치 내보내기/가져오기. **미착수**
-- [~] ONNX **내보내기** — opset 17 로 쓴다. `nl_engine::onnx::export`, `nl export-onnx <프로젝트> --model …`.
-      `Lstm`·`Gru`·`MultiHeadAttention` 만 아직 빠져 있고(게이트 순서·레이아웃 변환) 나머지 17종은 된다.
-      검증은 `tract-onnx`(dev-dependency)로 왕복 비교 — 학습 → 내보내기 → 다시 읽기 → 1e-4 이내 일치
-- [ ] ONNX 내보내기의 순환·어텐션 레이어. **미착수**
+- [x] ONNX **내보내기** — opset 17 로 쓴다. `nl_engine::onnx::export`, `nl export-onnx <프로젝트> --model …`.
+      **레이어 20종 전부** 된다. 순환 레이어는 게이트 순서 재배열(`[0,3,1,2]`/`[1,0,2]`)·가중치 전치·
+      `layout=0` + 앞뒤 `Transpose` 로, 어텐션은 표준 연산자 분해로 옮긴다(`Attention` 은 opset 23 이라 못 쓴다).
+      **GRU 는 `linear_before_reset=1` 이 필수** — 빠뜨리면 오류 없이 값만 틀린다.
+      검증은 `tract-onnx`(dev-dependency)로 왕복 비교 15개 — 학습 → 내보내기 → 다시 읽기 → 1e-4 이내 일치.
+      순환은 단방향/양방향 × `return_sequence` 네 경우를 모두 돌고 트랜스포머 템플릿 블록 전체도 본다
 - [ ] ONNX **가져오기**(tract 로 추론 전용). **미착수 · 선택 기능으로 둔다** —
       tract 를 넣으면 배포 바이너리가 **+34 MiB(+46%)** 라 기본 꺼진 카고 feature(`onnx-import`)로만 넣는다.
       실측과 매핑 근거는 `docs/research/onnx-2026-09-14.md`
