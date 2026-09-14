@@ -64,12 +64,21 @@ fn run(opts: Options) -> anyhow::Result<ExitCode> {
     };
     let device = opts.device.unwrap_or(bundle.manifest.default_device);
     if opts.headless {
-        run_headless(bundle, device, opts.run_for.map(Duration::from_secs_f64), !opts.no_update)?;
+        run_headless(
+            bundle,
+            device,
+            opts.run_for.map(Duration::from_secs_f64),
+            !opts.no_update,
+        )?;
     } else {
         run_gui(bundle, device, !opts.no_update)?;
     }
     Ok(ExitCode::SUCCESS)
 }
+
+/// `.nlapp` 파일 크기 상한. 압축된 상태로 메모리에 통째로 올라가므로 여기서 한 번 막는다.
+/// 압축을 푼 뒤의 상한은 `nl_bundle::MAX_BUNDLE_BYTES` 가 따로 본다.
+const MAX_BUNDLE_FILE_BYTES: u64 = 2_000_000_000;
 
 /// 인자로 받은 파일이 있으면 그것을, 없으면 자기 실행 파일의 첨부 번들을 읽는다.
 /// 인자로 받은 파일이 번들이 첨부된 실행 파일이어도 그대로 열린다.
@@ -79,8 +88,17 @@ fn load_bundle(path: Option<&Path>) -> anyhow::Result<Option<Bundle>> {
             if let Some(b) = nl_bundle::read_attached(p)? {
                 return Ok(Some(b));
             }
-            let bytes = std::fs::read(p)
-                .map_err(|e| anyhow::anyhow!("번들 파일을 읽지 못했습니다 ({}): {e}", p.display()))?;
+            // 통째로 메모리에 올리므로 먼저 크기를 본다 — 파일 하나로 프로세스를 죽이지 못하게.
+            let size = std::fs::metadata(p)
+                .map_err(|e| anyhow::anyhow!("번들 파일을 읽지 못했습니다 ({}): {e}", p.display()))?
+                .len();
+            anyhow::ensure!(
+                size <= MAX_BUNDLE_FILE_BYTES,
+                "번들 파일이 너무 큽니다 ({size} 바이트, 상한 {MAX_BUNDLE_FILE_BYTES} 바이트): {}",
+                p.display()
+            );
+            let bytes =
+                std::fs::read(p).map_err(|e| anyhow::anyhow!("번들 파일을 읽지 못했습니다 ({}): {e}", p.display()))?;
             Ok(Some(Bundle::from_zip(&bytes)?))
         }
         None => {
@@ -104,7 +122,10 @@ fn run_gui(bundle: Bundle, device: DevicePref, updates: bool) -> anyhow::Result<
             .with_min_inner_size([320.0, 240.0]),
         renderer: eframe::Renderer::Glow,
         // Wayland 에서 vsync 대기가 이벤트 루프를 통째로 막는 문제가 있어 끈다 (trust-pms 교훈).
-        glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            vsync: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -122,12 +143,7 @@ fn run_gui(bundle: Bundle, device: DevicePref, updates: bool) -> anyhow::Result<
     result.map_err(|e| anyhow::anyhow!("창을 열지 못했습니다: {e}"))
 }
 
-fn run_headless(
-    bundle: Bundle,
-    device: DevicePref,
-    run_for: Option<Duration>,
-    updates: bool,
-) -> anyhow::Result<()> {
+fn run_headless(bundle: Bundle, device: DevicePref, run_for: Option<Duration>, updates: bool) -> anyhow::Result<()> {
     let work = WorkDir::create()?;
     app::prepare_workspace(&bundle, work.path())?;
     let Some(pipeline) = app::entry_pipeline(&bundle.project, &bundle.manifest) else {
@@ -143,7 +159,10 @@ fn run_headless(
         device.label()
     );
     match run_for {
-        Some(d) => println!("{:.1}초 뒤 자동 종료합니다 (Ctrl+C 로 먼저 종료 가능).", d.as_secs_f64()),
+        Some(d) => println!(
+            "{:.1}초 뒤 자동 종료합니다 (Ctrl+C 로 먼저 종료 가능).",
+            d.as_secs_f64()
+        ),
         None => println!("Ctrl+C 로 종료합니다."),
     }
     let deadline = run_for.map(|d| std::time::Instant::now() + d);
@@ -158,15 +177,27 @@ fn run_headless(
     if bundle.manifest.arm_input {
         println!("{}", app::ARM_INPUT_NOTICE);
     }
-    let handle =
-        app::spawn_runner(&bundle.project, &pipeline, work.path(), device, bundle.manifest.arm_input)?;
+    let handle = app::spawn_runner(
+        &bundle.project,
+        &pipeline,
+        work.path(),
+        device,
+        bundle.manifest.arm_input,
+    )?;
     let mut asked_to_stop = false;
     loop {
         drain_update(&mut update);
         let timed_out = deadline.is_some_and(|t| std::time::Instant::now() >= t);
         if (signals::interrupted() || timed_out) && !asked_to_stop {
             asked_to_stop = true;
-            println!("{}", if timed_out { "실행 시간이 끝났습니다. 파이프라인을 정지합니다." } else { "종료 신호를 받았습니다. 파이프라인을 정지합니다." });
+            println!(
+                "{}",
+                if timed_out {
+                    "실행 시간이 끝났습니다. 파이프라인을 정지합니다."
+                } else {
+                    "종료 신호를 받았습니다. 파이프라인을 정지합니다."
+                }
+            );
             handle.stop();
         }
         match handle.events.recv_timeout(Duration::from_millis(200)) {

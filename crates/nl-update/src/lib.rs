@@ -14,13 +14,16 @@
 
 pub mod apply;
 pub mod download;
+pub mod freshness;
 pub mod signature;
 pub mod updater;
+pub mod url;
 
-pub use apply::{apply, apply_to, replace_binary, Applied};
+pub use apply::{apply, apply_to, current_exe, replace_binary, Applied};
 pub use download::{download, prune_downloads, sha256_hex, Progress};
 pub use signature::{signature_url, verify_manifest};
 pub use updater::{Event, State, Updater};
+pub use url::{host_of, origin_of, plain_http_allowed, require_https, same_origin, ALLOW_HTTP_ENV};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -34,6 +37,9 @@ pub const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 매니페스트 본문 상한. 이보다 큰 응답은 매니페스트가 아니다.
+///
+/// **압축을 푼 뒤의 크기**에 건다. ureq 의 `limit` 은 리더 사슬 가장 안쪽이라 압축 바이트에만 걸리고,
+/// 1 MB 짜리 gzip 은 1 GB 로 부푼다. 서명 검증보다 앞 단계라 키가 있어도 막히지 않으므로 여기서 센다.
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// 자산 종류. 적용 방법을 정한다.
@@ -58,11 +64,22 @@ pub struct Asset {
 }
 
 /// `latest.json` 의 내용.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub notes: String,
+    /// 발행 시각 (RFC 3339, 예: `2026-09-14T08:51:00Z`). **서명 대상 안에 있다.**
+    ///
+    /// 정품 서명이 붙은 옛 매니페스트를 다시 들려주는 재생 공격을 막는다 —
+    /// [`freshness::MAX_AGE`] 보다 오래되면 거절한다. 비어 있으면 [`check_signed`] 가 거절한다.
+    #[serde(default)]
+    pub published_at: String,
+    /// 자산을 받아도 되는 추가 호스트. **비어 있으면 매니페스트와 같은 오리진만 허용한다.**
+    ///
+    /// CDN 을 따로 쓰는 배포에서만 채운다. 서명 대상 안이라 공격자가 늘릴 수 없다.
+    #[serde(default)]
+    pub allowed_asset_hosts: Vec<String>,
     /// `linux-x86_64` 같은 대상 키 → 자산.
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
@@ -73,6 +90,37 @@ impl Manifest {
         serde_json::from_slice(bytes).context("매니페스트 형식이 잘못됐습니다")
     }
 
+    /// 발행 시각이 있고 너무 오래되지도 미래이지도 않은가.
+    ///
+    /// 서명을 검증한 **뒤에** 부른다 — 검증 전 값은 공격자가 정한 것이라 볼 의미가 없다.
+    pub fn check_freshness(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.published_at.trim().is_empty(),
+            "매니페스트에 published_at 이 없습니다 — 재생 공격을 가려낼 수 없어 거절합니다"
+        );
+        freshness::check_age(&self.published_at, freshness::now_unix())
+    }
+
+    /// 이 매니페스트가 가리키는 자산 주소가 믿어도 되는 호스트인가.
+    ///
+    /// 기본은 매니페스트와 같은 오리진. 다른 호스트는 [`Manifest::allowed_asset_hosts`] 에
+    /// 적혀 있어야 한다. 이렇게 막지 않으면 자산 주소로 내부망을 훑을 수 있다(응답 여부가
+    /// 실패 메시지로 새어 나간다).
+    pub fn check_asset_origin(&self, manifest_url: &str, asset_url: &str) -> anyhow::Result<()> {
+        if url::same_origin(manifest_url, asset_url) {
+            return Ok(());
+        }
+        let host = url::host_of(asset_url).context("자산 주소")?;
+        if self
+            .allowed_asset_hosts
+            .iter()
+            .any(|h| h.trim().eq_ignore_ascii_case(&host))
+        {
+            return Ok(());
+        }
+        anyhow::bail!("자산 호스트({host})가 매니페스트와 다르고 allowed_asset_hosts 에도 없습니다: {asset_url}")
+    }
+
     /// 현재 버전보다 새롭고 이 대상의 자산이 있으면 `Some`.
     /// 버전 문자열이 semver 가 아니면 조용히 `None` — 깨진 매니페스트로 엉뚱한 것을 설치하지 않는다.
     pub fn newer_for(&self, current: &semver::Version, target: &str) -> Option<Available> {
@@ -81,7 +129,12 @@ impl Manifest {
             return None;
         }
         let asset = self.assets.get(target)?.clone();
-        Some(Available { version, notes: self.notes.clone(), asset, target: target.to_string() })
+        Some(Available {
+            version,
+            notes: self.notes.clone(),
+            asset,
+            target: target.to_string(),
+        })
     }
 }
 
@@ -104,76 +157,101 @@ pub fn target_key() -> String {
 #[macro_export]
 macro_rules! current_version {
     () => {
-        ::semver::Version::parse(env!("CARGO_PKG_VERSION"))
-            .unwrap_or_else(|_| ::semver::Version::new(0, 0, 0))
+        ::semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| ::semver::Version::new(0, 0, 0))
     };
 }
 
+/// 최대 리다이렉트 횟수. 무한 리다이렉트와 https→http 강등 사슬을 막는다.
+const MAX_REDIRECTS: u32 = 3;
+
 /// 타임아웃이 설정된 ureq 에이전트. 큰 본문을 받을 때는 `recv_body` 를 따로 늘려 잡는다.
+///
+/// `https_only` 를 켜므로 **리다이렉트로도 평문 http 로 내려갈 수 없다.** 진입점의
+/// [`require_https`] 가 첫 주소를 막고, 이쪽이 그 뒤의 경로를 막는다.
+/// 루프백 http 시험은 `NL_ALLOW_HTTP=1` 일 때만 이 빗장을 함께 내린다.
 pub(crate) fn agent(global: Duration, recv_body: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .user_agent(concat!("neural-linker-update/", env!("CARGO_PKG_VERSION")))
         .timeout_connect(Some(CONNECT_TIMEOUT.min(global)))
         .timeout_global(Some(global))
         .timeout_recv_body(Some(recv_body))
+        .https_only(!plain_http_allowed())
+        .max_redirects(MAX_REDIRECTS)
         .build();
     ureq::Agent::new_with_config(config)
 }
 
-/// 매니페스트를 받아 현재 버전과 비교한다. 새 버전이 없으면 `Ok(None)`.
-/// 서명 검증까지 하려면 [`check_signed`] 를 쓴다.
-pub fn check(url: &str, current: &semver::Version, timeout: Duration) -> anyhow::Result<Option<Available>> {
-    check_signed(url, current, timeout, None)
-}
-
-/// [`check`] 에 minisign 서명 검증을 더한 것.
+/// 매니페스트를 받아 서명을 검증하고 현재 버전과 비교한다. 새 버전이 없으면 `Ok(None)`.
 ///
-/// `public_key` 가 있으면 `<url>.minisig` 를 함께 받아 검증하고, 검증에 실패하면 매니페스트를 아예 읽지 않는다.
-/// `None` 이면 검증을 건너뛰고 경고 로그만 남긴다.
+/// **공개키는 필수다.** `<url>.minisig` 를 함께 받아 검증하고, 검증에 실패하면 매니페스트를 아예 읽지 않는다.
+/// 검증 없이 확인하는 길은 없다 — 서명을 붙여 둔 배포에서 키만 지우면 검증이 사라지는 구멍을 없앤 것이다.
+/// 주소는 https 여야 한다([`require_https`]).
 pub fn check_signed(
     url: &str,
     current: &semver::Version,
     timeout: Duration,
-    public_key: Option<&str>,
+    public_key: &str,
 ) -> anyhow::Result<Option<Available>> {
-    let raw = fetch_manifest_bytes(url, timeout)?;
+    require_https(url).context("매니페스트 주소")?;
+    let sig_url = signature_url(url);
+    require_https(&sig_url).context("서명 주소")?;
 
-    match public_key {
-        Some(key) => {
-            let sig_url = signature_url(url);
-            let sig = fetch_text(&sig_url, timeout)
-                .with_context(|| format!("서명을 받지 못했습니다: {sig_url}"))?;
-            verify_manifest(&raw, &sig, Some(key)).context("매니페스트 서명 검증에 실패했습니다")?;
-        }
-        None => log::warn!("서명 공개키가 없어 매니페스트 검증을 건너뜁니다: {url}"),
-    }
+    let raw = fetch_manifest(url, timeout)?;
+    let sig = fetch_text(&sig_url, timeout).with_context(|| format!("서명을 받지 못했습니다: {sig_url}"))?;
+    verify_manifest(&raw, &sig, public_key).context("매니페스트 서명 검증에 실패했습니다")?;
 
     let manifest = Manifest::parse(&raw)?;
+    // 서명을 통과한 뒤에야 내용을 믿고 검사한다.
+    manifest.check_freshness().context("매니페스트 발행 시각")?;
+
     let target = target_key();
     let found = manifest.newer_for(current, &target);
-    if found.is_none() && !manifest.assets.contains_key(&target) {
+    if let Some(found) = &found {
+        manifest
+            .check_asset_origin(url, &found.asset.url)
+            .context("자산 호스트")?;
+        require_https(&found.asset.url).context("자산 주소")?;
+    } else if !manifest.assets.contains_key(&target) {
         log::info!("매니페스트에 이 플랫폼({target}) 자산이 없습니다");
     }
     Ok(found)
 }
 
-fn fetch_manifest_bytes(url: &str, timeout: Duration) -> anyhow::Result<Vec<u8>> {
+/// 매니페스트 원본 바이트를 받는다. **검증하지 않은 내용이다** — 이대로 믿고 쓰면 안 되고
+/// [`verify_manifest`] 를 반드시 거쳐야 한다. 서명 검증까지 한 번에 하려면 [`check_signed`] 를 쓴다.
+/// 공개된 이유는 서명 인프라를 붙이기 전 진단과 통합 시험 때문이다.
+pub fn fetch_manifest(url: &str, timeout: Duration) -> anyhow::Result<Vec<u8>> {
+    require_https(url).context("매니페스트 주소")?;
     let agent = agent(timeout, timeout);
-    let mut res =
-        agent.get(url).call().with_context(|| format!("매니페스트를 받지 못했습니다: {url}"))?;
-    let text = res
-        .body_mut()
-        .with_config()
-        .limit(MAX_MANIFEST_BYTES)
-        .read_to_string()
+    let mut res = agent
+        .get(url)
+        .call()
+        .with_context(|| format!("매니페스트를 받지 못했습니다: {url}"))?;
+    let body = read_capped(res.body_mut().with_config().limit(MAX_MANIFEST_BYTES).reader())
         .with_context(|| format!("매니페스트를 읽지 못했습니다: {url}"))?;
-    Ok(text.into_bytes())
+    Ok(body)
+}
+
+/// 압축을 푼 바이트를 상한까지만 읽는다. 상한을 **넘겼는지** 알아야 해서 한 바이트를 더 읽어 본다.
+///
+/// `read_to_string` 대신 이쪽을 쓰는 이유는 두 가지다. 상한이 압축 해제 후에 걸리고(gzip 폭탄),
+/// 서명 대상이 HTTP 계층의 문자셋 변환을 거치지 않은 원본 바이트가 된다.
+fn read_capped(reader: impl std::io::Read) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut limited = std::io::Read::take(reader, MAX_MANIFEST_BYTES + 1);
+    std::io::Read::read_to_end(&mut limited, &mut buf)?;
+    anyhow::ensure!(
+        buf.len() as u64 <= MAX_MANIFEST_BYTES,
+        "본문이 상한({MAX_MANIFEST_BYTES} 바이트)을 넘었습니다 — 압축 폭탄일 수 있습니다"
+    );
+    Ok(buf)
 }
 
 fn fetch_text(url: &str, timeout: Duration) -> anyhow::Result<String> {
     let agent = agent(timeout, timeout);
     let mut res = agent.get(url).call()?;
-    Ok(res.body_mut().with_config().limit(MAX_MANIFEST_BYTES).read_to_string()?)
+    let body = read_capped(res.body_mut().with_config().limit(MAX_MANIFEST_BYTES).reader())?;
+    String::from_utf8(body).context("본문이 UTF-8 이 아닙니다")
 }
 
 #[cfg(test)]
@@ -184,28 +262,65 @@ mod tests {
         let mut assets = BTreeMap::new();
         assets.insert(
             target.to_owned(),
-            Asset { url: "https://x/y".into(), sha256: "ab".into(), kind: AssetKind::Binary, size: 0 },
+            Asset {
+                url: "https://x/y".into(),
+                sha256: "ab".into(),
+                kind: AssetKind::Binary,
+                size: 0,
+            },
         );
-        Manifest { version: version.into(), notes: "고침".into(), assets }
+        Manifest {
+            version: version.into(),
+            notes: "고침".into(),
+            published_at: "2026-09-14T00:00:00Z".into(),
+            allowed_asset_hosts: Vec::new(),
+            assets,
+        }
     }
 
     #[test]
     fn newer_only_when_version_is_higher_and_asset_exists() {
         let cur = semver::Version::new(0, 1, 0);
-        assert!(manifest("0.1.0", "linux-x86_64").newer_for(&cur, "linux-x86_64").is_none(), "같은 버전");
-        assert!(manifest("0.0.9", "linux-x86_64").newer_for(&cur, "linux-x86_64").is_none(), "낮은 버전");
+        assert!(
+            manifest("0.1.0", "linux-x86_64")
+                .newer_for(&cur, "linux-x86_64")
+                .is_none(),
+            "같은 버전"
+        );
+        assert!(
+            manifest("0.0.9", "linux-x86_64")
+                .newer_for(&cur, "linux-x86_64")
+                .is_none(),
+            "낮은 버전"
+        );
 
-        let r = manifest("0.2.0", "linux-x86_64").newer_for(&cur, "linux-x86_64").unwrap();
+        let r = manifest("0.2.0", "linux-x86_64")
+            .newer_for(&cur, "linux-x86_64")
+            .unwrap();
         assert_eq!(r.version, semver::Version::new(0, 2, 0));
         assert_eq!(r.target, "linux-x86_64");
         assert_eq!(r.notes, "고침");
 
-        assert!(manifest("0.2.0", "linux-x86_64").newer_for(&cur, "windows-x86_64").is_none(), "대상 자산 없음");
-        assert!(manifest("무엇", "linux-x86_64").newer_for(&cur, "linux-x86_64").is_none(), "깨진 버전 문자열");
+        assert!(
+            manifest("0.2.0", "linux-x86_64")
+                .newer_for(&cur, "windows-x86_64")
+                .is_none(),
+            "대상 자산 없음"
+        );
+        assert!(
+            manifest("무엇", "linux-x86_64")
+                .newer_for(&cur, "linux-x86_64")
+                .is_none(),
+            "깨진 버전 문자열"
+        );
         // 프리릴리스는 같은 번호의 정식 버전보다 낮다.
-        assert!(manifest("0.1.0-beta.1", "linux-x86_64").newer_for(&cur, "linux-x86_64").is_none());
+        assert!(manifest("0.1.0-beta.1", "linux-x86_64")
+            .newer_for(&cur, "linux-x86_64")
+            .is_none());
         // 앞뒤 공백은 무시한다.
-        assert!(manifest(" 0.2.0 ", "linux-x86_64").newer_for(&cur, "linux-x86_64").is_some());
+        assert!(manifest(" 0.2.0 ", "linux-x86_64")
+            .newer_for(&cur, "linux-x86_64")
+            .is_some());
     }
 
     #[test]
@@ -216,7 +331,41 @@ mod tests {
         assert_eq!(m.assets["windows-x86_64"].size, 12);
         assert!(Manifest::parse(b"{").is_err());
         // 자산이 없어도, notes 가 없어도 읽힌다.
-        assert!(Manifest::parse(r#"{"version":"0.1.0"}"#.as_bytes()).unwrap().assets.is_empty());
+        assert!(Manifest::parse(r#"{"version":"0.1.0"}"#.as_bytes())
+            .unwrap()
+            .assets
+            .is_empty());
+    }
+
+    #[test]
+    fn a_manifest_without_a_published_at_is_refused() {
+        let mut m = manifest("0.2.0", "linux-x86_64");
+        m.published_at = "  ".into();
+        let err = m.check_freshness().unwrap_err().to_string();
+        assert!(err.contains("published_at"), "{err}");
+    }
+
+    #[test]
+    fn asset_hosts_are_pinned_to_the_manifest_origin() {
+        let mut m = manifest("0.2.0", "linux-x86_64");
+        let manifest_url = "https://updates.example/latest.json";
+
+        // 같은 오리진이면 그냥 통과.
+        m.check_asset_origin(manifest_url, "https://updates.example/files/app")
+            .unwrap();
+
+        // 다른 호스트는 기본으로 막힌다 — 내부망 주소를 훑는 통로가 된다.
+        let err = m
+            .check_asset_origin(manifest_url, "http://192.168.0.1/x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("allowed_asset_hosts"), "{err}");
+        assert!(m.check_asset_origin(manifest_url, "https://cdn.example/app").is_err());
+
+        // 서명 안에 적어 둔 호스트만 예외.
+        m.allowed_asset_hosts = vec!["CDN.example".into()];
+        m.check_asset_origin(manifest_url, "https://cdn.example/app").unwrap();
+        assert!(m.check_asset_origin(manifest_url, "https://other.example/app").is_err());
     }
 
     #[test]

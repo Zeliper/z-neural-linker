@@ -31,6 +31,8 @@ egui_extras = { workspace = true, features = ["image"] }
 egui.workspace = true
 egui_plot.workspace = true
 winit.workspace = true
+tempfile.workspace = true
+directories.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -40,4 +42,3 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
-tempfile.workspace = true

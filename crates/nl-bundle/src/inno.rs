@@ -41,11 +41,15 @@ impl InnoSetup {
 pub fn find_inno_setup() -> Option<InnoSetup> {
     if let Some(raw) = std::env::var_os("NL_ISCC") {
         let path = PathBuf::from(raw);
-        if path.is_file() {
+        // 절대 경로만 받는다. 상대 경로는 그때그때의 현재 폴더에 딸려 가 무엇이 실행될지 알 수 없다.
+        if !path.is_absolute() {
+            log::warn!("NL_ISCC 는 절대 경로여야 합니다 (무시합니다): {}", path.display());
+        } else if path.is_file() {
             let via_wine = !cfg!(windows) && is_exe_name(&path);
             return Some(InnoSetup { path, via_wine });
+        } else {
+            log::warn!("NL_ISCC 가 가리키는 파일이 없습니다: {}", path.display());
         }
-        log::warn!("NL_ISCC 가 가리키는 파일이 없습니다: {}", path.display());
     }
     first_existing(&iscc_candidates())
 }
@@ -55,7 +59,10 @@ fn first_existing(candidates: &[(PathBuf, bool)]) -> Option<InnoSetup> {
     candidates
         .iter()
         .find(|(path, _)| path.is_file())
-        .map(|(path, via_wine)| InnoSetup { path: path.clone(), via_wine: *via_wine })
+        .map(|(path, via_wine)| InnoSetup {
+            path: path.clone(),
+            via_wine: *via_wine,
+        })
 }
 
 /// `(경로, wine 경유 여부)` 후보를 우선순위 순으로.
@@ -80,8 +87,17 @@ fn iscc_candidates() -> Vec<(PathBuf, bool)> {
     if !cfg!(windows) && which("wine").is_some() {
         for prefix in wine_prefixes() {
             let drive_c = prefix.join("drive_c");
-            out.push((drive_c.join("Program Files (x86)").join("Inno Setup 6").join("ISCC.exe"), true));
-            out.push((drive_c.join("Program Files").join("Inno Setup 6").join("ISCC.exe"), true));
+            out.push((
+                drive_c
+                    .join("Program Files (x86)")
+                    .join("Inno Setup 6")
+                    .join("ISCC.exe"),
+                true,
+            ));
+            out.push((
+                drive_c.join("Program Files").join("Inno Setup 6").join("ISCC.exe"),
+                true,
+            ));
         }
     }
     out
@@ -99,13 +115,17 @@ fn wine_prefixes() -> Vec<PathBuf> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// `PATH` 안에서 실행 파일을 찾는다.
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
 }
 
 fn is_exe_name(path: &Path) -> bool {
@@ -114,10 +134,15 @@ fn is_exe_name(path: &Path) -> bool {
 
 // ───────────────────────────── AppId ─────────────────────────────
 
-/// 앱 이름으로 결정적인 Inno Setup `AppId` (중괄호 없는 대문자 UUID).
-/// 같은 이름이면 언제나 같은 값이라 새 버전이 이전 설치를 덮어쓴다.
-pub fn app_id(app_name: &str) -> String {
-    format_uuid(&uuid_v5(&NL_NAMESPACE, app_name.trim()))
+/// 앱 이름 + 발행자로 결정적인 Inno Setup `AppId` (중괄호 없는 대문자 UUID).
+///
+/// 같은 앱이면 언제나 같은 값이라 새 버전이 이전 설치를 덮어쓴다. **발행자까지 넣는 이유는**
+/// 이름만 베낀 악성 앱이 정품 설치를 "업그레이드"로 덮어쓰지 못하게 하기 위해서다.
+pub fn app_id(app_name: &str, publisher: &str) -> String {
+    format_uuid(&uuid_v5(
+        &NL_NAMESPACE,
+        &format!("{}\u{1f}{}", app_name.trim(), publisher.trim()),
+    ))
 }
 
 /// RFC 4122 UUID v5 (SHA-1 기반, 이름 기반 결정적).
@@ -137,19 +162,39 @@ pub fn uuid_v5(namespace: &[u8; 16], name: &str) -> [u8; 16] {
 /// `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX` (대문자). Inno Setup 이 쓰는 표기.
 pub fn format_uuid(bytes: &[u8; 16]) -> String {
     let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
-    format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 // ───────────────────────────── .iss 생성 ─────────────────────────────
 
-/// `.iss` 안에 넣을 값 이스케이프. Inno Setup 은 `{` 를 `{{` 로 적고, 줄바꿈은 지시문을 깨뜨린다.
-pub fn iss_escape(value: &str) -> String {
-    value.replace('{', "{{").replace(['\r', '\n'], " ").trim().to_string()
+/// `.iss` 값의 공통 정리. Inno Setup 은 `{` 를 `{{` 로 적고, 줄바꿈은 지시문을 깨뜨린다.
+///
+/// 제어문자는 전부 공백으로 접는다 — 개행 하나로 새 지시문이나 새 섹션을 만들 수 있기 때문이다.
+/// 입력단([`crate::check_app_name`])이 이미 개행을 거절하지만, 여기서 한 번 더 막는다.
+fn iss_common(value: &str) -> String {
+    let folded: String = value.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let escaped = folded.replace('{', "{{");
+    escaped.trim().chars().take(crate::MAX_NAME_CHARS).collect()
 }
 
-/// 큰따옴표로 감싸는 자리(`Source:`, `Filename:`)에 들어갈 값. Inno 는 `"` 를 `""` 로 적는다.
+/// 따옴표 **밖**에 놓이는 값(`AppName=`, `DefaultGroupName=`). 큰따옴표와 `#` 를 아예 지운다 —
+/// 이 자리에서는 `""` 이중화가 통하지 않고, `#` 는 ISPP 전처리기 지시문의 시작 글자다.
+pub fn iss_escape(value: &str) -> String {
+    iss_common(value).replace(['"', '#'], "")
+}
+
+/// 큰따옴표로 감싸는 자리(`Source:`, `Filename:`, `Name:`)에 들어갈 값. Inno 는 `"` 를 `""` 로 적는다.
+///
+/// 이중화하지 않으면 `데모"; Parameters: "…` 같은 이름이 따옴표를 닫고 파라미터를 덧붙인다.
 fn iss_quoted(value: &str) -> String {
-    iss_escape(value).replace('"', "\"\"")
+    iss_common(value).replace('"', "\"\"")
 }
 
 /// `{localappdata}\Programs\<이름>` 에 쓸 폴더 이름. Windows 경로에 못 쓰는 문자를 걷어낸다.
@@ -185,8 +230,9 @@ pub fn render_iss(app_name: &str, version: &str, publisher: &str, slug: &str, wi
         APP_ISS,
         "@",
         &[
-            ("@APP_ID@", &app_id(app_name)),
+            ("@APP_ID@", &app_id(app_name, publisher)),
             ("@APP_NAME@", &iss_escape(app_name)),
+            ("@APP_NAME_Q@", &iss_quoted(app_name)),
             ("@APP_DIR@", &iss_escape(&windows_dir_name(app_name))),
             ("@APP_VERSION@", &iss_escape(version)),
             ("@PUBLISHER@", &iss_escape(publisher)),
@@ -232,7 +278,10 @@ pub fn windows_installer(
     std::fs::write(&script, render_iss(app_name, version, publisher, &slug, with_icon))?;
 
     let Some(compiler) = find_inno_setup() else {
-        log::info!("Inno Setup 컴파일러가 없어 스크립트만 만들었습니다: {}", script.display());
+        log::info!(
+            "Inno Setup 컴파일러가 없어 스크립트만 만들었습니다: {}",
+            script.display()
+        );
         return Ok(None);
     };
 
@@ -246,7 +295,11 @@ pub fn windows_installer(
     move_file(&produced, &final_path)?;
 
     let bytes = std::fs::read(&final_path)?;
-    Ok(Some(Artifact { sha256: sha256_hex(&bytes), size: bytes.len() as u64, path: final_path }))
+    Ok(Some(Artifact {
+        sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        path: final_path,
+    }))
 }
 
 /// 스크립트가 있는 폴더를 작업 디렉터리로 삼아 컴파일러를 부른다.
@@ -263,11 +316,16 @@ fn compile(compiler: &InnoSetup, work_dir: &Path, script_name: &str) -> anyhow::
     };
     cmd.current_dir(work_dir);
 
-    let out = cmd.output().with_context(|| format!("컴파일러를 실행하지 못했습니다: {}", compiler.describe()))?;
+    let out = cmd
+        .output()
+        .with_context(|| format!("컴파일러를 실행하지 못했습니다: {}", compiler.describe()))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        anyhow::bail!("Inno Setup 컴파일 실패 (코드 {:?})\n{stdout}\n{stderr}", out.status.code());
+        anyhow::bail!(
+            "Inno Setup 컴파일 실패 (코드 {:?})\n{stdout}\n{stderr}",
+            out.status.code()
+        );
     }
     Ok(())
 }
@@ -303,15 +361,83 @@ mod tests {
     }
 
     #[test]
-    fn app_id_is_deterministic_and_name_specific() {
-        assert_eq!(app_id("내 앱"), app_id("내 앱"));
-        assert_eq!(app_id("내 앱"), app_id("  내 앱  "), "앞뒤 공백은 무시한다");
-        assert_ne!(app_id("내 앱"), app_id("다른 앱"));
-        let id = app_id("내 앱");
+    fn app_id_is_deterministic_and_specific_to_name_and_publisher() {
+        assert_eq!(app_id("내 앱", "나"), app_id("내 앱", "나"));
+        assert_eq!(
+            app_id("내 앱", "나"),
+            app_id("  내 앱  ", " 나 "),
+            "앞뒤 공백은 무시한다"
+        );
+        assert_ne!(app_id("내 앱", "나"), app_id("다른 앱", "나"));
+        // L18: 이름만 베껴도 발행자가 다르면 다른 설치로 취급된다.
+        assert_ne!(app_id("내 앱", "나"), app_id("내 앱", "사칭"));
+        // 구분자가 없으면 ("ab","c") 와 ("a","bc") 가 같아진다.
+        assert_ne!(app_id("ab", "c"), app_id("a", "bc"));
+
+        let id = app_id("내 앱", "나");
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "5", "UUID 버전은 5 여야 합니다: {id}");
-        assert!(matches!(&id[19..20], "8" | "9" | "A" | "B"), "RFC 4122 변형이 아닙니다: {id}");
-        assert!(id.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'), "{id}");
+        assert!(
+            matches!(&id[19..20], "8" | "9" | "A" | "B"),
+            "RFC 4122 변형이 아닙니다: {id}"
+        );
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'),
+            "{id}"
+        );
+    }
+
+    /// H8-c: 따옴표를 닫고 파라미터를 덧붙이는 이름이 스크립트를 바꾸지 못한다.
+    #[test]
+    fn a_quote_injecting_name_cannot_add_iss_parameters() {
+        let evil = r#"데모"; Parameters: "/x"#;
+        let iss = render_iss(evil, "0.1.0", "나", "demo", false);
+
+        // 인용 자리에서는 따옴표가 이중화돼 문자열 안에 갇힌다.
+        assert!(iss.contains(r#"Name: "{group}\데모""; Parameters: ""/x""#), "{iss}");
+        // 새 파라미터가 생기지 않는다 — `; Parameters:` 로 시작하는 조각이 없다.
+        for line in iss
+            .lines()
+            .filter(|l| l.starts_with("Name:") || l.starts_with("Filename:"))
+        {
+            let outside: String = line
+                .split('"')
+                .step_by(2) // 짝수 조각 = 따옴표 바깥
+                .collect();
+            assert!(!outside.contains("Parameters:"), "따옴표 밖으로 샜습니다: {line}");
+        }
+        // 비인용 자리에서는 따옴표를 아예 지운다.
+        let app_name_line = iss.lines().find(|l| l.starts_with("AppName=")).unwrap();
+        assert!(!app_name_line.contains('"'), "{app_name_line}");
+    }
+
+    #[test]
+    fn newlines_and_control_characters_cannot_add_iss_directives() {
+        let evil = "데모\n[Run]\nFilename: \"cmd.exe\"; Parameters: \"/c calc\"";
+        let iss = render_iss(evil, "0.1.0", "나", "demo", false);
+        // 주입한 글자는 값 안에 남지만 **줄의 시작**이 되지 못한다 — 지시문도 섹션도 늘지 않는다.
+        let clean = render_iss("데모", "0.1.0", "나", "demo", false);
+        let sections = |t: &str| t.lines().filter(|l| l.trim_start().starts_with('[')).count();
+        assert_eq!(sections(&iss), sections(&clean), "섹션이 늘었습니다: {iss}");
+        assert_eq!(iss.lines().count(), clean.lines().count(), "줄이 늘었습니다: {iss}");
+        assert_eq!(iss.lines().filter(|l| l.trim() == "[Run]").count(), 1, "{iss}");
+        let runs: Vec<&str> = iss.lines().filter(|l| l.starts_with("Filename:")).collect();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        // 주입한 글자는 따옴표가 이중화돼 문자열 **안**에 갇힌다.
+        let outside: String = runs[0].split('"').step_by(2).collect();
+        assert!(!outside.contains("cmd.exe"), "따옴표 밖으로 샜습니다: {}", runs[0]);
+        // 개행이 접혔으므로 AppName 은 한 줄이고 그 줄에만 흔적이 남는다.
+        let names: Vec<&str> = iss.lines().filter(|l| l.starts_with("AppName=")).collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].contains("cmd.exe"), "{}", names[0]);
+    }
+
+    #[test]
+    fn ispp_directive_characters_are_stripped_outside_quotes() {
+        let iss = render_iss("데모 #define X 1", "0.1.0", "나", "demo", false);
+        let line = iss.lines().find(|l| l.starts_with("AppName=")).unwrap();
+        assert!(!line.contains('#'), "{line}");
     }
 
     #[test]
@@ -320,6 +446,11 @@ mod tests {
         assert_eq!(iss_escape("줄\n바꿈"), "줄 바꿈");
         assert_eq!(iss_quoted("따\"옴표"), "따\"\"옴표");
         assert_eq!(iss_escape("  공백  "), "공백");
+        // 비인용 자리에서는 따옴표와 ISPP 지시문 글자를 지운다.
+        assert_eq!(iss_escape("따\"옴표"), "따옴표");
+        assert_eq!(iss_escape("가#나"), "가나");
+        // 인용 자리에서는 `#` 이 그대로다 — 문자열 안이라 지시문이 되지 않는다.
+        assert_eq!(iss_quoted("가#나"), "가#나");
     }
 
     #[test]
@@ -334,11 +465,24 @@ mod tests {
     #[test]
     fn rendered_iss_has_no_placeholders_and_quotes_paths() {
         let iss = render_iss("내 앱", "1.2.3", "Trust A&C", "app", true);
-        for token in ["@APP_ID@", "@APP_NAME@", "@APP_DIR@", "@APP_VERSION@", "@PUBLISHER@", "@APP_SLUG@",
-                      "@SETUP_ICON@", "@ICON_FILE@", "@ICON_REF@"] {
+        for token in [
+            "@APP_ID@",
+            "@APP_NAME@",
+            "@APP_NAME_Q@",
+            "@APP_DIR@",
+            "@APP_VERSION@",
+            "@PUBLISHER@",
+            "@APP_SLUG@",
+            "@SETUP_ICON@",
+            "@ICON_FILE@",
+            "@ICON_REF@",
+        ] {
             assert!(!iss.contains(token), "치환되지 않은 자리표시자 {token}: {iss}");
         }
-        assert!(iss.contains(&format!("AppId={{{{{}}}", app_id("내 앱"))), "{iss}");
+        assert!(
+            iss.contains(&format!("AppId={{{{{}}}", app_id("내 앱", "Trust A&C"))),
+            "{iss}"
+        );
         assert!(iss.contains("AppName=내 앱"));
         assert!(iss.contains("AppVersion=1.2.3"));
         assert!(iss.contains("AppPublisher=Trust A&C"));
@@ -421,7 +565,9 @@ mod tests {
         let exe = dir.path().join("built.exe");
         std::fs::write(&exe, b"MZ").unwrap();
         let out = dir.path().join("out");
-        assert!(windows_installer(&exe, "Demo App", "0.1.0", "p", &out, None).unwrap().is_none());
+        assert!(windows_installer(&exe, "Demo App", "0.1.0", "p", &out, None)
+            .unwrap()
+            .is_none());
         let stage = out.join("demo-app-installer");
         assert!(stage.join("demo-app.iss").is_file());
         assert!(!stage.join("demo-app.ico").exists());

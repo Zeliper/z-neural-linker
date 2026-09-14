@@ -19,7 +19,7 @@ pub const MANIFEST_FILE: &str = "latest.json";
 ///
 /// `artifacts` 는 `(대상 키, 산출물, 자산 종류)` 목록이다. 대상 키는 배포 앱이 `nl_update::target_key()`
 /// 로 만드는 값과 같아야 한다 (`linux-x86_64`, `windows-x86_64`).
-/// 자산 주소는 `base_url` 뒤에 산출물 파일 이름을 붙여 만든다.
+/// 자산 주소는 `base_url` 뒤에 산출물 파일 이름을 붙여 만든다. **`base_url` 은 https 여야 한다.**
 pub fn write_manifest(
     version: &str,
     notes: &str,
@@ -28,8 +28,7 @@ pub fn write_manifest(
     out_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let manifest = build_manifest(version, notes, artifacts, base_url)?;
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("폴더를 만들지 못했습니다: {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("폴더를 만들지 못했습니다: {}", out_dir.display()))?;
     let path = out_dir.join(MANIFEST_FILE);
     let json = serde_json::to_string_pretty(&manifest).context("매니페스트를 직렬화하지 못했습니다")?;
     std::fs::write(&path, format!("{json}\n"))
@@ -47,8 +46,9 @@ pub fn build_manifest(
     if artifacts.is_empty() {
         anyhow::bail!("매니페스트에 넣을 산출물이 없습니다");
     }
-    semver::Version::parse(version.trim())
-        .with_context(|| format!("버전이 semver 가 아닙니다: {version}"))?;
+    semver::Version::parse(version.trim()).with_context(|| format!("버전이 semver 가 아닙니다: {version}"))?;
+    // 평문 http 로 배포하면 중간자가 실행 파일을 갈아치울 수 있다. 만드는 쪽에서 먼저 막는다.
+    nl_update::require_https(base_url).context("배포 주소(base_url)")?;
 
     let mut assets: BTreeMap<String, Asset> = BTreeMap::new();
     for (target, artifact, kind) in artifacts {
@@ -67,7 +67,41 @@ pub fn build_manifest(
             anyhow::bail!("대상 키가 겹칩니다: {target} (이미 {} 가 있습니다)", old.url);
         }
     }
-    Ok(Manifest { version: version.trim().to_string(), notes: notes.to_string(), assets })
+    Ok(Manifest {
+        version: version.trim().to_string(),
+        notes: notes.to_string(),
+        // 발행 시각은 서명 대상 안에 들어가 재생 공격을 막는다. 배포 앱이 없으면 매니페스트를 거절한다.
+        published_at: now_rfc3339(),
+        // 자산은 매니페스트와 같은 오리진에 둔다 — CDN 을 쓰는 배포만 이 목록을 채운다.
+        allowed_asset_hosts: Vec::new(),
+        assets,
+    })
+}
+
+/// 지금을 RFC 3339 UTC 로. 날짜 크레이트를 새로 들이지 않으려고 최소 구현을 둔다
+/// (읽는 쪽은 `nl_update::freshness::parse_rfc3339`).
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant 의 civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 /// `https://h/app/0.2.0` + `app.tar.gz` → `https://h/app/0.2.0/app.tar.gz`.
@@ -80,7 +114,11 @@ mod tests {
     use super::*;
 
     fn artifact(name: &str, sha: &str, size: u64) -> Artifact {
-        Artifact { path: PathBuf::from("/out").join(name), sha256: sha.into(), size }
+        Artifact {
+            path: PathBuf::from("/out").join(name),
+            sha256: sha.into(),
+            size,
+        }
     }
 
     fn entries() -> Vec<(String, Artifact, AssetKind)> {
@@ -101,9 +139,14 @@ mod tests {
     #[test]
     fn written_manifest_is_readable_by_nl_update() {
         let dir = tempfile::tempdir().unwrap();
-        let path =
-            write_manifest("0.2.0", "고친 것", &entries(), "https://updates.example/app/0.2.0/", dir.path())
-                .unwrap();
+        let path = write_manifest(
+            "0.2.0",
+            "고친 것",
+            &entries(),
+            "https://updates.example/app/0.2.0/",
+            dir.path(),
+        )
+        .unwrap();
         assert_eq!(path.file_name().unwrap(), MANIFEST_FILE);
 
         let raw = std::fs::read(&path).unwrap();
@@ -113,7 +156,10 @@ mod tests {
         assert_eq!(parsed.assets.len(), 2);
 
         let linux = &parsed.assets["linux-x86_64"];
-        assert_eq!(linux.url, "https://updates.example/app/0.2.0/app-0.2.0-linux-x86_64.tar.gz");
+        assert_eq!(
+            linux.url,
+            "https://updates.example/app/0.2.0/app-0.2.0-linux-x86_64.tar.gz"
+        );
         assert_eq!(linux.sha256, "aa11", "sha256 은 소문자로 정규화한다");
         assert_eq!(linux.kind, AssetKind::Binary);
         assert_eq!(linux.size, 1234);
@@ -134,7 +180,9 @@ mod tests {
         assert_eq!(found.version, semver::Version::new(9, 9, 9));
         assert_eq!(found.asset.url, "https://h/a/app.bin");
         // 다른 플랫폼에는 주지 않는다.
-        assert!(manifest.newer_for(&semver::Version::new(0, 1, 0), "다른-플랫폼").is_none());
+        assert!(manifest
+            .newer_for(&semver::Version::new(0, 1, 0), "다른-플랫폼")
+            .is_none());
         // 같은 버전이면 새 것이 아니다.
         assert!(manifest.newer_for(&semver::Version::new(9, 9, 9), &target).is_none());
     }
@@ -149,17 +197,31 @@ mod tests {
     #[test]
     fn bad_input_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(write_manifest("0.2.0", "", &[], "https://h", dir.path()).is_err(), "산출물이 없음");
+        assert!(
+            write_manifest("0.2.0", "", &[], "https://h", dir.path()).is_err(),
+            "산출물이 없음"
+        );
         assert!(
             write_manifest("버전아님", "", &entries(), "https://h", dir.path()).is_err(),
             "semver 가 아닌 버전"
         );
 
         let dup = vec![
-            ("linux-x86_64".to_string(), artifact("a.bin", "aa", 1), AssetKind::Binary),
-            ("linux-x86_64".to_string(), artifact("b.bin", "bb", 2), AssetKind::Binary),
+            (
+                "linux-x86_64".to_string(),
+                artifact("a.bin", "aa", 1),
+                AssetKind::Binary,
+            ),
+            (
+                "linux-x86_64".to_string(),
+                artifact("b.bin", "bb", 2),
+                AssetKind::Binary,
+            ),
         ];
-        assert!(write_manifest("0.2.0", "", &dup, "https://h", dir.path()).is_err(), "대상 키 중복");
+        assert!(
+            write_manifest("0.2.0", "", &dup, "https://h", dir.path()).is_err(),
+            "대상 키 중복"
+        );
     }
 
     #[test]
@@ -168,5 +230,39 @@ mod tests {
         let path = write_manifest("0.2.0", "", &entries(), "https://h", dir.path()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.ends_with("}\n"), "{text}");
+    }
+
+    /// M7: 갓 만든 매니페스트는 받는 쪽의 신선도 검사를 통과해야 한다.
+    #[test]
+    fn a_fresh_manifest_passes_the_replay_check() {
+        let m = build_manifest("0.2.0", "고친 것", &entries(), "https://updates.example/app/0.2.0/").unwrap();
+        assert!(!m.published_at.is_empty(), "발행 시각이 비어 있습니다");
+        m.check_freshness().expect("방금 만든 매니페스트는 신선해야 합니다");
+        // RFC 3339 로 다시 읽힌다.
+        nl_update::freshness::parse_rfc3339(&m.published_at).expect("RFC 3339 로 읽혀야 합니다");
+    }
+
+    /// H4: 평문 http 로 배포하면 중간자가 실행 파일을 갈아치운다 — 만드는 쪽에서 먼저 막는다.
+    #[test]
+    fn a_plain_http_base_url_is_refused() {
+        for base in ["http://updates.example/app/", "ftp://h/x", "updates.example/app"] {
+            let err = build_manifest("0.2.0", "", &entries(), base).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(text.contains("배포 주소"), "{base} → {text}");
+        }
+    }
+
+    /// M8: 자산이 매니페스트와 같은 오리진에 놓인다.
+    #[test]
+    fn assets_land_on_the_manifest_origin() {
+        let base = "https://updates.example/app/0.2.0/";
+        let m = build_manifest("0.2.0", "", &entries(), base).unwrap();
+        let manifest_url = format!("{base}{MANIFEST_FILE}");
+        for asset in m.assets.values() {
+            m.check_asset_origin(&manifest_url, &asset.url)
+                .unwrap_or_else(|e| panic!("{} 가 거절됐습니다: {e:#}", asset.url));
+        }
+        // 기본값은 비어 있다 — CDN 을 쓰는 배포만 채운다.
+        assert!(m.allowed_asset_hosts.is_empty());
     }
 }

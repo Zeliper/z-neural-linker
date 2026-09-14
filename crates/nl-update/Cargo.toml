@@ -15,7 +15,11 @@ sha2.workspace = true
 ureq.workspace = true
 minisign-verify.workspace = true
 crossbeam-channel.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+minisign.workspace = true
 tiny_http.workspace = true

@@ -3,7 +3,8 @@
 ; 산출물: Output\@APP_SLUG@-setup-@APP_VERSION@.exe
 
 [Setup]
-; AppId 는 앱 이름에서 뽑은 UUID v5 라 같은 이름이면 언제나 같다 — 새 버전이 덮어쓰기로 설치된다.
+; AppId 는 앱 이름 + 발행자에서 뽑은 UUID v5 라 같은 앱이면 언제나 같다 — 새 버전이 덮어쓰기로 설치된다.
+; 발행자가 다르면 AppId 도 달라, 이름만 베낀 앱이 남의 설치를 업그레이드로 덮어쓰지 못한다.
 AppId={{@APP_ID@}
 AppName=@APP_NAME@
 AppVersion=@APP_VERSION@
@@ -33,12 +34,12 @@ Source: "@APP_SLUG@.exe"; DestDir: "{app}"; Flags: ignoreversion
 @ICON_FILE@
 
 [Icons]
-Name: "{group}\@APP_NAME@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@
-Name: "{autodesktop}\@APP_NAME@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@; Tasks: desktopicon
+Name: "{group}\@APP_NAME_Q@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@
+Name: "{autodesktop}\@APP_NAME_Q@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "바탕 화면 아이콘 만들기"; GroupDescription: "추가 작업:"
 
 [Run]
 ; 설치(및 조용한 업데이트) 뒤 앱을 다시 띄운다.
-Filename: "{app}\@APP_SLUG@.exe"; Description: "@APP_NAME@ 실행"; Flags: nowait postinstall runasoriginaluser
+Filename: "{app}\@APP_SLUG@.exe"; Description: "@APP_NAME_Q@ 실행"; Flags: nowait postinstall runasoriginaluser
