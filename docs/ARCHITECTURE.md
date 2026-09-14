@@ -71,6 +71,16 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   엔진은 검증 통과 그래프만 받는다(trust-pms 의 "문서를 깨뜨리지 않는다" 원칙).
 - 모든 새 필드는 `#[serde(default)]` — 옛 문서 그대로 로드. `FORMAT_VERSION` 상수와 `ProjectFile::from_json` 마이그레이션.
 
+### 레이어 템플릿 (`templates.rs`)
+- 팔레트에서 **한 번에** 넣는 노드 묶음이다. `list()` 가 `TemplateSpec { name, label, category, description, default_params }`
+  를 주고, `instantiate(name, at, &params)` 가 `(Vec<Node>, Vec<Edge>)` 를 새 id 로 만들어 돌려준다 — 문서에 넣는 것은 호출자가
+  `Op::UpsertNode`/`UpsertEdge` 로 하므로 undo 한 번에 묶인다. 현재 셋: `residual_block { width }`(Linear→ReLU→Linear+잔차),
+  `transformer_block { d_model, heads, ff_mult }`(pre-norm 어텐션 + 피드포워드, 잔차 둘), `conv_block { channels }`
+  (Conv2d→BatchNorm→ReLU→MaxPool).
+- **마지막 노드가 블록 출력이고, 엣지가 붙지 않은 입력 슬롯이 블록 입력**이다(`open_inputs`). 잔차가 있는 두 템플릿은 그 슬롯이
+  **둘**(본줄기와 우회로)이고 **둘 다 같은 상류에 이어야** 잔차 덧셈의 형상이 맞는다. `transformer_block` 이 `d_model` 을 따로
+  받는 것도 같은 이유다 — 피드포워드의 마지막 `Linear` 가 입력 폭으로 돌아와야 더할 수 있다.
+
 ### 형상 추론 (`shape.rs`)
 - `infer(graph, batch: Option<usize>) -> ShapeReport { shapes: BTreeMap<NodeId, Shape>, errors: Vec<GraphError> }`.
   위상정렬(Kahn) → 순환 노드는 `GraphError::Cycle` 로 격리, 슬롯 누락은 `MissingInput`, 규칙 위반은 `ShapeMismatch{expected, got}`.

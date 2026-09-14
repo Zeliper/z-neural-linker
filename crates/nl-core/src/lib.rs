@@ -11,6 +11,7 @@ pub mod payload;
 pub mod pipeline;
 pub mod sample;
 pub mod shape;
+pub mod templates;
 pub mod train;
 pub mod validate;
 
@@ -30,5 +31,6 @@ pub use sample::{
     api_pipeline, new_project, quadrants_cnn_project, xor_project, SampleFactory, API_BIND, API_PATH, SAMPLES,
 };
 pub use shape::{infer, Dim, GraphError, Shape, ShapeReport, MAX_RANK};
+pub use templates::{TemplateError, TemplateParams, TemplateSpec};
 pub use train::{DevicePref, EpochMetrics, Loss, LrSchedule, Metric, Optimizer, RunRecord, RunStatus, TrainConfig};
 pub use validate::{validate, Issue, Severity};
