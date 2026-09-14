@@ -1,11 +1,11 @@
 //! 배포 런타임의 eframe 앱: 상단 제어 바 + 번들 GUI 레이아웃 + 파이프라인 실행기 연결.
 
+use crate::update::UpdateUi;
 use nl_bundle::Bundle;
 use nl_core::gui::{Binding, BuiltinAction};
 use nl_core::{BundleManifest, DevicePref, GuiLayout, PNodeId, Pipeline, Project, WidgetId, WidgetKind};
 use nl_engine::{DeviceInfo, Value};
 use nl_gui::{GuiEvent, GuiState, RenderMode};
-use crate::update::UpdateUi;
 use nl_io::runner::RunnerInput;
 use nl_io::{Runner, RunnerEvent, RunnerHandle};
 use std::collections::VecDeque;
@@ -22,27 +22,35 @@ const REPAINT: Duration = Duration::from_millis(33);
 // ───────────────────────────── 임시 작업 폴더 ─────────────────────────────
 
 /// 번들 가중치를 풀어 두는 임시 폴더. 살아 있는 동안만 존재하고 `Drop` 에서 지워진다.
-pub struct WorkDir(PathBuf);
+///
+/// 이름은 무작위이고 권한은 0700 이다. 예전처럼 `temp_dir()/nl-runtime-<pid>` 를 쓰면 경로가
+/// 완전히 예측 가능해서, sticky 비트가 걸린 `/tmp` 에서 다른 로컬 사용자가 미리 그 폴더를 만들어
+/// 둘 수 있었다. 그러면 `remove_dir_all` 은 권한 부족으로 실패하고 `create_dir_all` 은
+/// "이미 있음" 으로 성공해, 가중치가 **공격자 소유 폴더**에 풀렸다.
+pub struct WorkDir(tempfile::TempDir);
 
 impl WorkDir {
     pub fn create() -> std::io::Result<Self> {
-        let dir = std::env::temp_dir().join(format!("nl-runtime-{}", std::process::id()));
-        // 같은 pid 가 재사용된 경우를 대비해 비우고 시작한다.
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir)?;
+        // tempdir 은 O_EXCL 로 만든다 — 선점된 폴더를 물려받는 일이 없다.
+        let dir = tempfile::Builder::new().prefix("nl-runtime-").tempdir()?;
+        set_owner_only(dir.path())?;
         Ok(Self(dir))
     }
     pub fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
 }
 
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.0) {
-            log::warn!("임시 폴더를 지우지 못했습니다 ({}): {e}", self.0.display());
-        }
-    }
+/// 소유자만 드나들 수 있게 한다. 번들 가중치가 같은 호스트의 다른 사용자에게 읽히지 않도록.
+#[cfg(unix)]
+fn set_owner_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// 번들의 가중치·에셋을 작업 폴더에 푼다. 모델이 프로젝트 상대 경로(`ModelDef::weights`)를 가리키면
@@ -51,8 +59,12 @@ pub fn prepare_workspace(bundle: &Bundle, dir: &Path) -> anyhow::Result<()> {
     bundle.materialize_weights(&dir.join("weights"))?;
     bundle.materialize_assets(&dir.join("assets"))?;
     for bm in &bundle.manifest.models {
-        let Some(bytes) = bundle.weights.get(&bm.weights_file) else { continue };
-        let Some(model) = bundle.project.models.get(&bm.model) else { continue };
+        let Some(bytes) = bundle.weights.get(&bm.weights_file) else {
+            continue;
+        };
+        let Some(model) = bundle.project.models.get(&bm.model) else {
+            continue;
+        };
         let Some(rel) = model.weights.as_deref() else { continue };
         if rel == format!("weights/{}", bm.weights_file) {
             continue;
@@ -115,8 +127,7 @@ pub fn spawn_runner(
 /// 상단 바 배지. 이 앱이 실제 마우스·키보드 입력을 보낼 수 있다는 표시.
 pub const ARM_INPUT_BADGE: &str = "⚠ 입력 무장";
 /// 무장 상태를 처음 알릴 때 쓰는 문장. 헤드리스와 GUI 가 같은 말을 쓴다.
-pub const ARM_INPUT_NOTICE: &str =
-    "이 앱은 마우스·키보드를 실제로 조작합니다 (빌드할 때 입력 무장을 켰습니다).";
+pub const ARM_INPUT_NOTICE: &str = "이 앱은 마우스·키보드를 실제로 조작합니다 (빌드할 때 입력 무장을 켰습니다).";
 
 /// 헤드리스·GUI 로그가 같은 문장을 쓰도록 이벤트를 한 줄로 만든다.
 pub fn describe_event(ev: &RunnerEvent) -> String {
@@ -130,7 +141,9 @@ pub fn describe_event(ev: &RunnerEvent) -> String {
         RunnerEvent::Widget { widget, value } => {
             format!("위젯 [{}] {}", widget.short(), nl_gui::format_value(Some(value)))
         }
-        RunnerEvent::ValuePreview { node, width, height, .. } => {
+        RunnerEvent::ValuePreview {
+            node, width, height, ..
+        } => {
             format!("미리보기 [{}] {width}×{height}", node.short())
         }
         RunnerEvent::Stats { tick, tick_ms, hz } => format!("틱 {tick} · {hz:.1}Hz · 틱당 {tick_ms:.1}ms"),
@@ -405,7 +418,9 @@ impl RuntimeApp {
         self.poll_update(&ctx);
         egui::Panel::top("nl_runtime_bar").show(ui, |ui| self.top_bar(ui));
         let events = egui::CentralPanel::default()
-            .show(ui, |ui| nl_gui::render_layout(ui, &self.layout, &mut self.gui, RenderMode::Run))
+            .show(ui, |ui| {
+                nl_gui::render_layout(ui, &self.layout, &mut self.gui, RenderMode::Run)
+            })
             .inner;
         self.handle_gui_events(events, &ctx);
         self.log_window(&ctx);
@@ -426,6 +441,10 @@ impl RuntimeApp {
         for ev in &events {
             if matches!(ev, nl_update::Event::Applied(_)) {
                 close = true;
+            }
+            // 적용이 끝나면 옛 내려받기를 치운다 — 방금 쓴 것만 남긴다.
+            if let nl_update::Event::Downloaded(path) = ev {
+                update.prune(path);
             }
             if let Some(line) = crate::update::describe(ev) {
                 lines.push(line);
@@ -455,55 +474,66 @@ impl RuntimeApp {
         let mut apply = false;
         let mut recheck = false;
 
-        egui::Window::new("업데이트").open(&mut open).default_size([420.0, 240.0]).show(ctx, |ui| {
-            match &state {
-                nl_update::State::Available(a) => {
-                    ui.heading(format!("새 버전 {}", a.version));
-                    ui.label(format!("지금 버전 {}", self.manifest.app_version));
-                    if !a.notes.is_empty() {
+        egui::Window::new("업데이트")
+            .open(&mut open)
+            .default_size([420.0, 240.0])
+            .show(ctx, |ui| {
+                match &state {
+                    nl_update::State::Available(a) => {
+                        ui.heading(format!("새 버전 {}", a.version));
+                        ui.label(format!("지금 버전 {}", self.manifest.app_version));
+                        if !a.notes.is_empty() {
+                            ui.separator();
+                            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                                ui.label(&a.notes);
+                            });
+                        }
                         ui.separator();
-                        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                            ui.label(&a.notes);
-                        });
+                        download = ui.button("내려받기").clicked();
                     }
-                    ui.separator();
-                    download = ui.button("내려받기").clicked();
-                }
-                nl_update::State::Downloading { received, total } => {
-                    ui.label("내려받는 중…");
-                    let progress = nl_update::Progress { received: *received, total: *total };
-                    match progress.fraction() {
-                        Some(f) => {
-                            ui.add(egui::ProgressBar::new(f).show_percentage());
-                        }
-                        None => {
-                            ui.label(format!("{received} 바이트"));
+                    nl_update::State::Downloading { received, total } => {
+                        ui.label("내려받는 중…");
+                        let progress = nl_update::Progress {
+                            received: *received,
+                            total: *total,
+                        };
+                        match progress.fraction() {
+                            Some(f) => {
+                                ui.add(egui::ProgressBar::new(f).show_percentage());
+                            }
+                            None => {
+                                ui.label(format!("{received} 바이트"));
+                            }
                         }
                     }
+                    nl_update::State::Downloaded { .. } => {
+                        ui.label("내려받았습니다.");
+                        ui.label("적용하면 앱이 종료되고 새 버전이 다시 시작됩니다.");
+                        ui.separator();
+                        apply = ui.button("지금 적용").clicked();
+                    }
+                    nl_update::State::Applying => {
+                        ui.spinner();
+                        ui.label("적용 중…");
+                    }
+                    nl_update::State::Applied(a) => {
+                        ui.label(a.message());
+                    }
+                    nl_update::State::Failed(e) => {
+                        ui.colored_label(ui.visuals().error_fg_color, e);
+                        ui.separator();
+                        recheck = ui.button("다시 확인").clicked();
+                    }
+                    nl_update::State::Disabled(why) => {
+                        // 보통은 여기까지 오지 않는다 — 공개키가 없으면 UpdateUi 가 아예 만들어지지 않는다.
+                        ui.colored_label(ui.visuals().warn_fg_color, "자동 업데이트를 쓸 수 없습니다");
+                        ui.label(why);
+                    }
+                    nl_update::State::Idle | nl_update::State::Checking | nl_update::State::UpToDate => {
+                        ui.label(state.message());
+                    }
                 }
-                nl_update::State::Downloaded { .. } => {
-                    ui.label("내려받았습니다.");
-                    ui.label("적용하면 앱이 종료되고 새 버전이 다시 시작됩니다.");
-                    ui.separator();
-                    apply = ui.button("지금 적용").clicked();
-                }
-                nl_update::State::Applying => {
-                    ui.spinner();
-                    ui.label("적용 중…");
-                }
-                nl_update::State::Applied(a) => {
-                    ui.label(a.message());
-                }
-                nl_update::State::Failed(e) => {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
-                    ui.separator();
-                    recheck = ui.button("다시 확인").clicked();
-                }
-                nl_update::State::Idle | nl_update::State::Checking | nl_update::State::UpToDate => {
-                    ui.label(state.message());
-                }
-            }
-        });
+            });
 
         if let Some(update) = &mut self.update {
             update.show = open;
@@ -569,8 +599,7 @@ impl RuntimeApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     toggle_logs = ui.button("⚙").on_hover_text("로그 창").clicked();
                     if let Some(badge) = &badge {
-                        toggle_update =
-                            ui.button(badge).on_hover_text("업데이트 창을 엽니다").clicked();
+                        toggle_update = ui.button(badge).on_hover_text("업데이트 창을 엽니다").clicked();
                     }
                 });
             });
@@ -602,13 +631,16 @@ impl RuntimeApp {
             return;
         }
         let mut open = true;
-        egui::Window::new("로그").open(&mut open).default_size([520.0, 280.0]).show(ctx, |ui| {
-            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                for line in self.log_lines() {
-                    ui.label(line);
-                }
+        egui::Window::new("로그")
+            .open(&mut open)
+            .default_size([520.0, 280.0])
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                    for line in self.log_lines() {
+                        ui.label(line);
+                    }
+                });
             });
-        });
         self.show_logs = open;
     }
 }
@@ -636,18 +668,22 @@ mod tests {
     fn demo_bundle(autostart: bool) -> Bundle {
         let mut project = Project::new("데모");
         let mut pipeline = Pipeline::new("주 파이프라인");
-        let sink = pipeline.add_node(PNode::new(
-            PNodeKind::Sink { sink: Sink::Log },
-            [0.0, 0.0],
-        ));
+        let sink = pipeline.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [0.0, 0.0]));
         let pid = pipeline.id;
         project.pipelines.insert(pid, pipeline);
 
         let mut layout = GuiLayout::default();
         layout.window.title = "데모 앱".into();
-        layout.add(Widget::new(WidgetKind::Label { text: "데모 라벨".into() }, [10.0, 10.0, 160.0, 20.0]));
+        layout.add(Widget::new(
+            WidgetKind::Label {
+                text: "데모 라벨".into(),
+            },
+            [10.0, 10.0, 160.0, 20.0],
+        ));
         let mut btn = Widget::new(WidgetKind::Button { text: "시작".into() }, [10.0, 40.0, 100.0, 28.0]);
-        btn.binding = Some(Binding::Action { action: BuiltinAction::StartPipeline });
+        btn.binding = Some(Binding::Action {
+            action: BuiltinAction::StartPipeline,
+        });
         layout.add(btn);
         let mut out = Widget::new(WidgetKind::Value { prefix: "값: ".into() }, [10.0, 80.0, 200.0, 30.0]);
         out.binding = Some(Binding::PipelineOutput { node: sink });
@@ -695,6 +731,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut bundle = demo_bundle(false);
         bundle.manifest.update_url = Some("https://updates.example/demo/latest.json".into());
+        bundle.manifest.update_public_key = Some("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3".into());
 
         let ui = UpdateUi::new(&bundle.manifest).expect("주소가 있으면 만들어진다");
         let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_update_ui(ui);
@@ -721,23 +758,38 @@ mod tests {
         };
 
         // 새 버전 → 배지가 뜨고 창이 열린다.
-        h.state_mut().update_ui_mut().unwrap().inject(Event::Available(available));
+        h.state_mut()
+            .update_ui_mut()
+            .unwrap()
+            .inject(Event::Available(available));
         h.state_mut().update_ui_mut().unwrap().show = true;
         h.run_steps(2);
-        assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 새 버전 0.2.0"));
+        assert_eq!(
+            h.state().update_ui().unwrap().badge().as_deref(),
+            Some("⬆ 새 버전 0.2.0")
+        );
 
         // 진행률 → 진행 막대.
-        h.state_mut().update_ui_mut().unwrap().inject(Event::Progress(Progress { received: 64, total: Some(128) }));
+        h.state_mut().update_ui_mut().unwrap().inject(Event::Progress(Progress {
+            received: 64,
+            total: Some(128),
+        }));
         h.run_steps(2);
         assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 내려받는 중"));
 
         // 다 받음 → "지금 적용" 버튼. 실제로 누르지는 않는다.
-        h.state_mut().update_ui_mut().unwrap().inject(Event::Downloaded(dir.path().join("app")));
+        h.state_mut()
+            .update_ui_mut()
+            .unwrap()
+            .inject(Event::Downloaded(dir.path().join("app")));
         h.run_steps(2);
         assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 적용 준비됨"));
 
         // 실패 → 배지는 사라지고 창에 오류가 남는다.
-        h.state_mut().update_ui_mut().unwrap().inject(Event::Failed("연결 실패".into()));
+        h.state_mut()
+            .update_ui_mut()
+            .unwrap()
+            .inject(Event::Failed("연결 실패".into()));
         h.run_steps(2);
         assert!(h.state().update_ui().unwrap().badge().is_none());
         assert!(
@@ -771,7 +823,8 @@ mod tests {
         let path = candidates.iter().find(|p| std::path::Path::new(p).is_file())?;
         let bytes = std::fs::read(path).ok()?;
         let mut defs = egui::FontDefinitions::default();
-        defs.font_data.insert("cjk".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        defs.font_data
+            .insert("cjk".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
             defs.families.entry(fam).or_default().push("cjk".into());
         }
@@ -814,9 +867,9 @@ mod tests {
         match probed {
             Ok(true) => true,
             Ok(false) => skip("wgpu 렌더가 이미지를 내지 못했습니다 (어댑터는 있으나 렌더 실패)"),
-            Err(_) => skip(
-                "wgpu 어댑터가 없습니다. Linux 라면 소프트웨어 래스터라이저(mesa 의 lavapipe)를 깔면 돕니다",
-            ),
+            Err(_) => {
+                skip("wgpu 어댑터가 없습니다. Linux 라면 소프트웨어 래스터라이저(mesa 의 lavapipe)를 깔면 돕니다")
+            }
         }
     }
 
@@ -836,6 +889,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut bundle = demo_bundle(true);
         bundle.manifest.update_url = Some("https://updates.example/demo/latest.json".into());
+        bundle.manifest.update_public_key = Some("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3".into());
 
         let ui = crate::update::UpdateUi::new(&bundle.manifest).expect("주소가 있으면 만들어진다");
         let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_update_ui(ui);
@@ -849,25 +903,33 @@ mod tests {
         h.run_steps(2);
 
         // 배지가 뜨도록 새 버전을 알리고, 상단 바 숫자는 고정값으로 박는다.
-        h.state_mut().update_ui_mut().unwrap().inject(nl_update::Event::Available(nl_update::Available {
-            version: semver::Version::new(0, 2, 0),
-            notes: "fixes".into(),
-            asset: nl_update::Asset {
-                url: "https://updates.example/demo/app".into(),
-                sha256: "ab".into(),
-                kind: nl_update::AssetKind::Binary,
-                size: 128,
-            },
-            target: nl_update::target_key(),
-        }));
+        h.state_mut()
+            .update_ui_mut()
+            .unwrap()
+            .inject(nl_update::Event::Available(nl_update::Available {
+                version: semver::Version::new(0, 2, 0),
+                notes: "fixes".into(),
+                asset: nl_update::Asset {
+                    url: "https://updates.example/demo/app".into(),
+                    sha256: "ab".into(),
+                    kind: nl_update::AssetKind::Binary,
+                    size: 128,
+                },
+                target: nl_update::target_key(),
+            }));
         h.run_steps(2);
         h.state_mut().inject_stats(30.0, 0.4);
         h.run_steps(1);
 
         assert!(h.state().is_running(), "실행 중 상태여야 상단 바에 통계가 뜬다");
-        assert_eq!(h.state().update_ui().unwrap().badge().as_deref(), Some("⬆ 새 버전 0.2.0"));
+        assert_eq!(
+            h.state().update_ui().unwrap().badge().as_deref(),
+            Some("⬆ 새 버전 0.2.0")
+        );
 
-        let options = egui_kittest::SnapshotOptions::new().threshold(0.7).max_failed_pixels(64);
+        let options = egui_kittest::SnapshotOptions::new()
+            .threshold(0.7)
+            .max_failed_pixels(64);
         h.try_snapshot_options("runtime-app", &options).unwrap();
     }
 
@@ -884,6 +946,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut bundle = demo_bundle(false);
         bundle.manifest.update_url = Some("https://updates.example/demo/latest.json".into());
+        bundle.manifest.update_public_key = Some("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3".into());
         let app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu).with_updates(false);
         assert!(app.update_ui().is_none(), "--no-update 면 확인조차 하지 않는다");
     }
@@ -900,7 +963,17 @@ mod tests {
     fn node_value_reaches_bound_widget() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = demo_bundle(false);
-        let node = bundle.project.pipelines.values().next().unwrap().nodes.keys().copied().next().unwrap();
+        let node = bundle
+            .project
+            .pipelines
+            .values()
+            .next()
+            .unwrap()
+            .nodes
+            .keys()
+            .copied()
+            .next()
+            .unwrap();
         let widget = bundle
             .project
             .gui
@@ -920,13 +993,40 @@ mod tests {
         let mut bundle = demo_bundle(false);
         let model = bundle.project.add_model("분류기");
         bundle.project.models.get_mut(&model).unwrap().weights = Some("runs/abc/model.safetensors".into());
-        bundle.manifest.models =
-            vec![nl_core::bundle::BundledModel { model, weights_file: "m.safetensors".into() }];
+        bundle.manifest.models = vec![nl_core::bundle::BundledModel {
+            model,
+            weights_file: "m.safetensors".into(),
+        }];
         bundle.weights.insert("m.safetensors".into(), vec![1, 2, 3]);
 
         prepare_workspace(&bundle, dir.path()).unwrap();
-        assert_eq!(std::fs::read(dir.path().join("weights/m.safetensors")).unwrap(), vec![1, 2, 3]);
-        assert_eq!(std::fs::read(dir.path().join("runs/abc/model.safetensors")).unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            std::fs::read(dir.path().join("weights/m.safetensors")).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("runs/abc/model.safetensors")).unwrap(),
+            vec![1, 2, 3]
+        );
+    }
+
+    /// M13: 작업 폴더는 이름을 예측할 수 없고 소유자만 드나들 수 있어야 한다.
+    #[test]
+    fn work_dir_is_unpredictable_and_owner_only() {
+        let a = WorkDir::create().unwrap();
+        let b = WorkDir::create().unwrap();
+        assert_ne!(a.path(), b.path(), "두 번 만들면 다른 경로여야 합니다");
+
+        // 옛 구현이 쓰던 pid 기반 이름이 아니다.
+        let predictable = std::env::temp_dir().join(format!("nl-runtime-{}", std::process::id()));
+        assert_ne!(a.path(), predictable.as_path());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(a.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{:o}", mode);
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //!
 //! UI 스레드는 프레임마다 [`Updater::poll`] 만 부르면 된다.
 
-use crate::{apply_to, check_signed, download, Applied, AssetKind, Available, Progress};
+use crate::{apply_to, check_signed, current_exe, download, require_https, Applied, AssetKind, Available, Progress};
 use crossbeam_channel::{Receiver, Sender};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,6 +13,8 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub enum Event {
     Checking,
+    /// 서명을 검증할 수 없어 업데이트를 끈다.
+    Disabled(String),
     /// 확인 끝: 새 버전 없음.
     UpToDate,
     Available(Available),
@@ -28,6 +30,9 @@ pub enum Event {
 pub enum State {
     #[default]
     Idle,
+    /// 공개키가 없어 업데이트를 쓸 수 없다. 서명을 검증할 수 없으면 확인 자체를 하지 않는다.
+    /// 호출자는 이 상태에서 업데이트 UI 를 아예 감춰야 한다.
+    Disabled(String),
     Checking,
     /// 확인했고 최신이다.
     UpToDate,
@@ -39,6 +44,9 @@ pub enum State {
     Downloaded {
         path: PathBuf,
         kind: AssetKind,
+        /// 서명된 매니페스트가 말한 해시. 적용 직전에 다시 맞춰 본다 —
+        /// 내려받은 뒤 적용을 누르기까지 몇 시간이 지날 수 있고 그 사이에 파일이 바뀔 수 있다.
+        sha256: String,
     },
     Applying,
     Applied(Applied),
@@ -51,15 +59,24 @@ impl State {
         matches!(self, State::Checking | State::Downloading { .. } | State::Applying)
     }
 
+    /// 업데이트를 쓸 수 없는 상태인가. UI 를 감출지 정하는 데 쓴다.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, State::Disabled(_))
+    }
+
     /// 사용자에게 보여 줄 한 줄.
     pub fn message(&self) -> String {
         match self {
             State::Idle => "확인한 적 없음".into(),
+            State::Disabled(why) => format!("업데이트 사용 불가: {why}"),
             State::Checking => "확인 중…".into(),
             State::UpToDate => "최신입니다".into(),
             State::Available(a) => format!("새 버전 v{} 사용 가능", a.version),
             State::Downloading { received, total } => {
-                let progress = Progress { received: *received, total: *total };
+                let progress = Progress {
+                    received: *received,
+                    total: *total,
+                };
                 match progress.fraction() {
                     Some(f) => format!("내려받는 중… {:.0}%", f * 100.0),
                     None => format!("내려받는 중… {received} 바이트"),
@@ -87,22 +104,44 @@ pub struct Updater {
 
 impl Updater {
     /// 매니페스트 주소는 호출자가 정한다 — 빌더와 배포 앱의 배포 채널이 다르다.
+    ///
+    /// 주소가 https 가 아니거나([`require_https`]) 공개키가 없으면 [`State::Disabled`] 로 시작하고
+    /// [`Updater::check`] 는 아무 일도 하지 않는다. 서명을 검증할 수 없는 채로 실행 파일을 바꿔치우는
+    /// 경로를 열어 두지 않기 위해서다.
     pub fn new(manifest_url: impl Into<String>, current: semver::Version) -> Self {
+        let manifest_url = manifest_url.into();
+        let state = match require_https(&manifest_url) {
+            Ok(()) => State::Disabled("서명 공개키가 없습니다".into()),
+            Err(e) => State::Disabled(format!("{e:#}")),
+        };
         Self {
-            manifest_url: manifest_url.into(),
+            manifest_url,
             current,
             public_key: None,
             timeout: crate::DEFAULT_CHECK_TIMEOUT,
-            state: State::Idle,
+            state,
             rx: None,
             last_available: None,
         }
     }
 
-    /// minisign 공개키. 주면 매니페스트 서명을 검증하고, 검증에 실패하면 자산을 내려받지 않는다.
+    /// minisign 공개키. **이것이 있어야 업데이트가 켜진다.** 없으면 [`State::Disabled`] 로 남는다.
+    /// 빈 문자열은 없는 것으로 본다.
     pub fn with_public_key(mut self, key: Option<impl Into<String>>) -> Self {
-        self.public_key = key.map(Into::into);
+        self.public_key = key.map(Into::into).filter(|k: &String| !k.trim().is_empty());
+        self.state = match self.blocked_reason() {
+            Some(why) => State::Disabled(why),
+            None => State::Idle,
+        };
         self
+    }
+
+    /// 업데이트를 막는 이유. 없으면 `None`.
+    fn blocked_reason(&self) -> Option<String> {
+        if let Err(e) = require_https(&self.manifest_url) {
+            return Some(format!("{e:#}"));
+        }
+        self.public_key.is_none().then(|| "서명 공개키가 없습니다".to_string())
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -122,8 +161,13 @@ impl Updater {
         &self.manifest_url
     }
 
+    /// 주소를 바꾼다. https 가 아니거나 공개키가 없으면 곧바로 [`State::Disabled`] 가 된다.
     pub fn set_manifest_url(&mut self, url: impl Into<String>) {
         self.manifest_url = url.into();
+        self.state = match self.blocked_reason() {
+            Some(why) => State::Disabled(why),
+            None => State::Idle,
+        };
     }
 
     /// 찾아낸 새 버전 (있으면).
@@ -148,12 +192,18 @@ impl Updater {
         if self.is_busy() {
             return;
         }
+        // 검증할 수 없으면 확인조차 하지 않는다. 여기서 막지 않으면 서명 없는 매니페스트를 믿게 된다.
+        if let Some(why) = self.blocked_reason() {
+            log::warn!("업데이트 확인을 건너뜁니다: {why}");
+            self.state = State::Disabled(why);
+            return;
+        }
+        let Some(key) = self.public_key.clone() else { return };
         let tx = self.arm(State::Checking);
-        let (url, current, key, timeout) =
-            (self.manifest_url.clone(), self.current.clone(), self.public_key.clone(), self.timeout);
+        let (url, current, timeout) = (self.manifest_url.clone(), self.current.clone(), self.timeout);
         spawn("nl-update-check", move || {
             let _ = tx.send(Event::Checking);
-            let ev = match check_signed(&url, &current, timeout, key.as_deref()) {
+            let ev = match check_signed(&url, &current, timeout, &key) {
                 Ok(Some(available)) => Event::Available(available),
                 Ok(None) => Event::UpToDate,
                 Err(e) => Event::Failed(format!("{e:#}")),
@@ -164,8 +214,13 @@ impl Updater {
 
     /// 찾아낸 자산을 `dir` 에 내려받는다 (백그라운드). `Available` 상태가 아니면 아무 일도 하지 않는다.
     pub fn download(&mut self, dir: PathBuf) {
-        let Some(available) = self.available().cloned() else { return };
-        let tx = self.arm(State::Downloading { received: 0, total: None });
+        let Some(available) = self.available().cloned() else {
+            return;
+        };
+        let tx = self.arm(State::Downloading {
+            received: 0,
+            total: None,
+        });
         spawn("nl-update-download", move || {
             let (ptx, prx) = crossbeam_channel::unbounded::<Progress>();
             let forward = tx.clone();
@@ -187,16 +242,18 @@ impl Updater {
     /// 내려받은 자산을 적용한다 (백그라운드). `Downloaded` 상태가 아니면 아무 일도 하지 않는다.
     /// 성공하면 호출자가 앱을 끝내야 한다.
     pub fn apply(&mut self) {
-        let State::Downloaded { path, kind } = self.state.clone() else { return };
+        let State::Downloaded { path, kind, sha256 } = self.state.clone() else {
+            return;
+        };
         let tx = self.arm(State::Applying);
         spawn("nl-update-apply", move || {
             let _ = tx.send(Event::Applying);
-            let ev = match std::env::current_exe() {
-                Ok(exe) => match apply_to(&path, kind, &exe, true) {
+            let ev = match current_exe() {
+                Ok(exe) => match apply_to(&path, kind, &exe, true, &sha256) {
                     Ok(applied) => Event::Applied(applied),
                     Err(e) => Event::Failed(format!("{e:#}")),
                 },
-                Err(e) => Event::Failed(format!("현재 실행 파일 경로를 알 수 없습니다: {e}")),
+                Err(e) => Event::Failed(format!("{e:#}")),
             };
             let _ = tx.send(ev);
         });
@@ -228,30 +285,29 @@ impl Updater {
         }
         self.state = match ev {
             Event::Checking => State::Checking,
+            Event::Disabled(why) => State::Disabled(why),
             Event::UpToDate => State::UpToDate,
             Event::Available(a) => State::Available(a),
-            Event::Progress(p) => State::Downloading { received: p.received, total: p.total },
-            Event::Downloaded(path) => {
-                // 종류는 확인 단계에서 알아 둔 것을 쓴다. 이전 상태가 사라졌으면 확장자로 짐작한다.
-                let kind = self.kind_hint(&path);
-                State::Downloaded { path, kind }
-            }
+            Event::Progress(p) => State::Downloading {
+                received: p.received,
+                total: p.total,
+            },
+            Event::Downloaded(path) => match &self.last_available {
+                // 종류와 해시는 **서명된 매니페스트**에서만 온다. 파일 이름은 공격자가 정하는 URL 에서
+                // 오므로 확장자로 짐작하면 임의의 `.exe` 를 설치 프로그램으로 실행하게 된다.
+                Some(a) => State::Downloaded {
+                    path,
+                    kind: a.asset.kind,
+                    sha256: a.asset.sha256.clone(),
+                },
+                None => {
+                    State::Failed("어떤 자산을 받았는지 알 수 없습니다 — 확인 결과가 없으면 적용하지 않습니다".into())
+                }
+            },
             Event::Applying => State::Applying,
             Event::Applied(a) => State::Applied(a),
             Event::Failed(e) => State::Failed(e),
         };
-    }
-
-    /// 확인 단계에서 알아낸 종류를 쓰고, 그것이 없으면 확장자로 짐작한다.
-    fn kind_hint(&self, path: &Path) -> AssetKind {
-        if let Some(a) = &self.last_available {
-            return a.asset.kind;
-        }
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
-            AssetKind::Installer
-        } else {
-            AssetKind::Binary
-        }
     }
 
     /// 새 작업을 시작하며 채널을 건다.
@@ -278,13 +334,19 @@ mod tests {
         Available {
             version: semver::Version::new(0, 2, 0),
             notes: "고침".into(),
-            asset: Asset { url: "https://h/app".into(), sha256: "ab".into(), kind, size: 10 },
+            asset: Asset {
+                url: "https://h/app".into(),
+                sha256: "ab".into(),
+                kind,
+                size: 10,
+            },
             target: "linux-x86_64".into(),
         }
     }
 
+    /// 제대로 설정된 업데이터 — https 주소와 공개키가 다 있다.
     fn updater() -> Updater {
-        Updater::new("https://h/latest.json", semver::Version::new(0, 1, 0))
+        Updater::new("https://h/latest.json", semver::Version::new(0, 1, 0)).with_public_key(Some("RWQ…"))
     }
 
     #[test]
@@ -309,8 +371,17 @@ mod tests {
         assert_eq!(u.available().unwrap().version, semver::Version::new(0, 2, 0));
         assert!(!u.is_busy());
 
-        u.on_event(Event::Progress(Progress { received: 5, total: Some(10) }));
-        assert_eq!(*u.state(), State::Downloading { received: 5, total: Some(10) });
+        u.on_event(Event::Progress(Progress {
+            received: 5,
+            total: Some(10),
+        }));
+        assert_eq!(
+            *u.state(),
+            State::Downloading {
+                received: 5,
+                total: Some(10)
+            }
+        );
         assert!(u.state().message().contains("50%"));
 
         u.on_event(Event::Downloaded(PathBuf::from("/tmp/app")));
@@ -319,7 +390,10 @@ mod tests {
         u.on_event(Event::Applying);
         assert!(u.is_busy());
 
-        u.on_event(Event::Applied(Applied::Replaced { exe: PathBuf::from("/tmp/app"), relaunched: true }));
+        u.on_event(Event::Applied(Applied::Replaced {
+            exe: PathBuf::from("/tmp/app"),
+            relaunched: true,
+        }));
         assert!(u.state().message().contains("다시 시작"));
         assert!(!u.is_busy());
     }
@@ -344,21 +418,44 @@ mod tests {
     fn download_keeps_the_asset_kind_from_the_check() {
         let mut u = updater();
         u.on_event(Event::Available(available(AssetKind::Installer)));
-        u.on_event(Event::Progress(Progress { received: 1, total: None }));
+        u.on_event(Event::Progress(Progress {
+            received: 1,
+            total: None,
+        }));
         u.on_event(Event::Downloaded(PathBuf::from("/tmp/setup.bin")));
         // 확장자는 exe 가 아니지만 매니페스트가 installer 라고 했으므로 installer 다.
-        assert_eq!(*u.state(), State::Downloaded { path: "/tmp/setup.bin".into(), kind: AssetKind::Installer });
+        assert_eq!(
+            *u.state(),
+            State::Downloaded {
+                path: "/tmp/setup.bin".into(),
+                kind: AssetKind::Installer,
+                sha256: "ab".into()
+            }
+        );
     }
 
+    /// L11: 확인 결과가 없으면 확장자로 짐작하지 않고 실패한다 — 파일 이름은 공격자가 정하는 URL 에서 온다.
     #[test]
-    fn kind_falls_back_to_the_extension() {
+    fn without_a_check_result_a_download_is_not_applied() {
         let mut u = updater();
         u.on_event(Event::Downloaded(PathBuf::from("/tmp/setup.exe")));
-        assert!(matches!(u.state(), State::Downloaded { kind: AssetKind::Installer, .. }));
+        assert!(
+            matches!(u.state(), State::Failed(m) if m.contains("알 수 없습니다")),
+            "{:?}",
+            u.state()
+        );
 
+        // 확인 결과가 있으면 그 종류를 그대로 쓴다.
         let mut u = updater();
+        u.on_event(Event::Available(available(AssetKind::Binary)));
         u.on_event(Event::Downloaded(PathBuf::from("/tmp/app")));
-        assert!(matches!(u.state(), State::Downloaded { kind: AssetKind::Binary, .. }));
+        assert!(matches!(
+            u.state(),
+            State::Downloaded {
+                kind: AssetKind::Binary,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -371,6 +468,28 @@ mod tests {
     }
 
     #[test]
+    fn without_a_key_it_starts_disabled_and_check_does_nothing() {
+        let mut u = Updater::new("https://h/latest.json", semver::Version::new(0, 1, 0));
+        assert!(u.state().is_disabled(), "{:?}", u.state());
+        u.check();
+        assert!(u.state().is_disabled(), "확인을 시작하면 안 됩니다: {:?}", u.state());
+        assert!(!u.is_busy());
+    }
+
+    #[test]
+    fn a_non_https_url_is_disabled_too() {
+        let u = Updater::new("http://h/latest.json", semver::Version::new(0, 1, 0)).with_public_key(Some("RWQ…"));
+        assert!(u.state().is_disabled(), "{:?}", u.state());
+    }
+
+    #[test]
+    fn an_empty_key_counts_as_no_key() {
+        let u = updater().with_public_key(Some("   "));
+        assert!(u.public_key.is_none());
+        assert!(u.state().is_disabled(), "{:?}", u.state());
+    }
+
+    #[test]
     fn poll_without_a_running_task_is_empty() {
         let mut u = updater();
         assert!(u.poll().is_empty());
@@ -378,10 +497,13 @@ mod tests {
 
     #[test]
     fn public_key_and_timeout_are_configurable() {
-        let u = updater().with_public_key(Some("RWQ…")).with_timeout(Duration::from_secs(3));
+        let u = updater()
+            .with_public_key(Some("RWQ…"))
+            .with_timeout(Duration::from_secs(3));
         assert_eq!(u.public_key.as_deref(), Some("RWQ…"));
         assert_eq!(u.timeout, Duration::from_secs(3));
         let u = updater().with_public_key(None::<String>);
         assert!(u.public_key.is_none());
+        assert!(u.state().is_disabled(), "키를 지우면 업데이트가 꺼진다");
     }
 }

@@ -13,6 +13,7 @@
         linux-x86_64=dist/nl-runtime windows-x86_64=dist/nl-runtime.exe
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -24,6 +25,10 @@ def main(argv: list) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     version, base, out_path = argv[1], argv[2].rstrip("/"), argv[3]
+    # 자산 주소는 https 여야 한다 — 받는 쪽(nl-update)이 평문 http 를 거절한다.
+    if not base.startswith("https://"):
+        print(f"자산 기본 URL 은 https 여야 합니다: {base}", file=sys.stderr)
+        return 2
 
     assets = {}
     for pair in argv[4:]:
@@ -47,7 +52,14 @@ def main(argv: list) -> int:
             "size": len(data),
         }
 
-    manifest = {"version": version, "notes": f"{version} 런타임", "assets": assets}
+    # published_at 은 서명 대상 안에 들어가 재생 공격을 막는다 — 받는 쪽이 30일 넘은 매니페스트를 거절한다.
+    published_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest = {
+        "version": version,
+        "notes": f"{version} 런타임",
+        "published_at": published_at,
+        "assets": assets,
+    }
     parent = os.path.dirname(out_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
