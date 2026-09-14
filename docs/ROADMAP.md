@@ -24,12 +24,37 @@
   고른다. NVIDIA 공식 드라이버를 깔면 RTX 로 잡힌다.
 - 이 PC 의 실제 세션은 KDE Plasma 6 Wayland → wlr-screencopy·X11 GetImage 둘 다 불가. **xdg-desktop-portal 경로가 M1 최우선**(아래).
 
+## 보안
+
+2026-09-14 에 네트워크·번들·업데이트 경로를 읽기 전용으로 리뷰했다(높음 11 · 중간 22 · 낮음 25).
+같은 날 엔진 정확성 리뷰도 따로 했다(버그 7 · 의심 9).
+
+- [`docs/reviews/security-2026-09-14.md`](reviews/security-2026-09-14.md) — 맨 위 "처리 현황" 표가 항목별 상태·담당 크레이트·근거·남은 한계
+- [`docs/reviews/engine-2026-09-14.md`](reviews/engine-2026-09-14.md) — 같은 자리에 현황표(아직 전부 열려 있다)
+
+높음 11건 중 9건, 전체 58건 중 37건을 고쳤다. 남은 것은 nl-engine(M15~M19·L21)과
+nl-app(H5·H9·M21·M22·L1~L3·L22) 담당이고, 낮음 6건은 영향이 낮아 미룬 것이다.
+
+신뢰 모델이 한 줄로 바뀌었다. **서명 공개키가 없으면 자동 업데이트 기능 자체가 켜지지 않는다.**
+예전처럼 "키가 없으면 검증을 건너뛰고 경고만" 하지 않는다.
+
+릴리스 전에 끝내야 하는 일:
+
+- [ ] **서명 키 발급** — minisign 키 쌍을 만들고 비밀키를 보관할 곳을 정한다.
+      절차는 `packaging/README.md` 의 "서명" 절에 있다
+- [ ] **공개키를 코드에 박기** — 빌더는 `crates/nl-app/src/update_key.rs` 의 `PUBLIC_KEY`(지금 `None` → 업데이트 꺼짐),
+      배포 앱은 빌더 UI 가 번들 매니페스트의 `update_public_key` 에 채워 넣는다
+- [ ] **실제 배포 서버** — https 로만 서빙하고 `latest.json` 옆에 `latest.json.minisig` 를 같이 올린다.
+      자산은 매니페스트와 같은 오리진에 둔다(아니면 `allowed_asset_hosts` 에 적는다)
+- [ ] **Inno Setup 실컴파일 확인** — 설치본 해시는 고정했으나 설치·컴파일 경로는 아직 확인하지 못했다
+- [ ] **Authenticode 서명** — Windows 설치본에 붙인다. 지금 신뢰의 뿌리는 서명된 매니페스트의 sha256 하나뿐이다(M10)
+
 ## M1 — 데이터·페이로드·파이프라인
 - [x] **화면 캡처 (KDE/GNOME Wayland)**: `org.freedesktop.portal.Screenshot`(zbus, 순수 Rust) — 이 PC 실측 2.8fps
 - [ ] `ScreenCast` + pipewire(고 fps; 빌드 머신에 `pipewire-devel` 필요 → optional feature `pipewire`)
 - [x] WebSocket 소스/싱크, 인바운드 HTTP 서버/응답 노드(배포 앱을 API 로), 녹화기(`Recorder` → `Recorded` 데이터셋)
 - [x] 엔진: 다입출력 학습, LR 스케줄(Step/Cosine/Plateau)·워밍업·조기 종료, 상주 배치(detach 버그 수정)
-- [ ] 배포 앱 입력 무장 opt-in(`BundleManifest.arm_input`), Runner 서버 선기동, 샘플 통일(nl-core 로 이동) — 진행 중
+- [x] 배포 앱 입력 무장 opt-in(`BundleManifest.arm_input`), Runner 서버 선기동(모델 로딩 중 503), 샘플 통일(nl-core 로 이동)
 - 데이터셋: CSV, 이미지 폴더, 녹화(화면 + 입력 라벨) 가져오기와 미리보기
 - 페이로드 편집기(필드·Transform 체인), 인코더/디코더 실행(`codec`)
 - 파이프라인 캔버스: 화면 캡처 → 모델 → 마우스/키보드, HTTP 폴링 → 모델 → HTTP 호출, stdio JSON 연결
