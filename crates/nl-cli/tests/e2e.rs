@@ -24,7 +24,11 @@ fn enabled() -> bool {
 
 /// 워크스페이스 루트(`crates/nl-cli` 의 두 단계 위).
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).expect("워크스페이스 루트").to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("워크스페이스 루트")
+        .to_path_buf()
 }
 
 /// 배포판에 붙일 런타임 실행 파일.
@@ -61,11 +65,17 @@ fn unpack_app(dist: &Path, dir: &Path) -> PathBuf {
         .map(|e| e.path())
         .find(|p| p.to_string_lossy().ends_with("-linux-x86_64.tar.gz"))
         .expect("tar.gz 산출물이 없다");
-    assert!(std::fs::metadata(&tarball).unwrap().len() > 1_000_000, "아카이브가 너무 작다");
+    assert!(
+        std::fs::metadata(&tarball).unwrap().len() > 1_000_000,
+        "아카이브가 너무 작다"
+    );
 
     let unpacked = dir.join("unpacked");
     std::fs::create_dir_all(&unpacked).unwrap();
-    run("tar 풀기", Command::new("tar").arg("xzf").arg(&tarball).arg("-C").arg(&unpacked));
+    run(
+        "tar 풀기",
+        Command::new("tar").arg("xzf").arg(&tarball).arg("-C").arg(&unpacked),
+    );
 
     let app = std::fs::read_dir(&unpacked)
         .expect("푼 폴더")
@@ -83,7 +93,10 @@ fn unpack_app(dist: &Path, dir: &Path) -> PathBuf {
 
 /// 명령을 돌리고 실패하면 양쪽 출력을 붙여 패닉한다.
 fn run(label: &str, cmd: &mut Command) -> Output {
-    let out = cmd.env("NO_COLOR", "1").output().unwrap_or_else(|e| panic!("{label} 을 실행하지 못했다: {e}"));
+    let out = cmd
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap_or_else(|e| panic!("{label} 을 실행하지 못했다: {e}"));
     assert!(
         out.status.success(),
         "{label} 실패 (종료 코드 {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -102,11 +115,7 @@ fn stdout(o: &Output) -> String {
 fn wait_until_serving(addr: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if std::net::TcpStream::connect_timeout(
-            &addr.parse().expect("주소 형식"),
-            Duration::from_millis(200),
-        )
-        .is_ok()
+        if std::net::TcpStream::connect_timeout(&addr.parse().expect("주소 형식"), Duration::from_millis(200)).is_ok()
         {
             return true;
         }
@@ -150,12 +159,18 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
 
     // 프로젝트에 가중치 경로가 적혔다.
     let saved = std::fs::read_to_string(&proj).expect("프로젝트 파일");
-    assert!(saved.contains("final.safetensors"), "학습 뒤 가중치 경로가 프로젝트에 없다");
+    assert!(
+        saved.contains("final.safetensors"),
+        "학습 뒤 가중치 경로가 프로젝트에 없다"
+    );
 
     // ── 3. 추론 ──
     let out = run(
         "nl infer",
-        Command::new(NL).args(["infer"]).arg(&proj).args(["--model", "XOR MLP", "--input", "[0.8,-0.8]"]),
+        Command::new(NL)
+            .args(["infer"])
+            .arg(&proj)
+            .args(["--model", "XOR MLP", "--input", "[0.8,-0.8]"]),
     );
     let json: serde_json::Value = serde_json::from_str(stdout(&out).trim()).expect("추론 결과가 JSON 이 아니다");
     let logits = json.as_array().expect("2 클래스 로짓 배열이어야 한다");
@@ -171,7 +186,15 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
             .arg(&proj)
             .args(["--target", "linux", "--out"])
             .arg(&dist)
-            .args(["--name", "종단 데모", "--version", "1.0.0", "--pipeline", "추론 API", "--runtime"])
+            .args([
+                "--name",
+                "종단 데모",
+                "--version",
+                "1.0.0",
+                "--pipeline",
+                "추론 API",
+                "--runtime",
+            ])
             .arg(&runtime),
     );
     let text = stdout(&out);
@@ -189,7 +212,10 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
     let text = stdout(&out);
     assert!(text.contains("종단 데모 1.0.0"), "앱 이름이 안 보인다:\n{text}");
     assert!(text.contains("HTTP 서버"), "HTTP 서버가 열리지 않았다:\n{text}");
-    assert!(!text.contains("마우스·키보드를 실제로 조작"), "무장하지 않았는데 무장 문구가 있다:\n{text}");
+    assert!(
+        !text.contains("마우스·키보드를 실제로 조작"),
+        "무장하지 않았는데 무장 문구가 있다:\n{text}"
+    );
 
     // 5b. 다시 띄워 두고 실제로 추론을 요청한다.
     let mut child = Command::new(&exe)
@@ -256,9 +282,16 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
 
     let dir = temp_dir("cnn");
     let proj = dir.join("cnn.nlproj");
-    let out = run("nl sample --kind cnn", Command::new(NL).args(["sample"]).arg(&proj).args(["--kind", "cnn"]));
+    let out = run(
+        "nl sample --kind cnn",
+        Command::new(NL).args(["sample"]).arg(&proj).args(["--kind", "cnn"]),
+    );
     assert!(proj.is_file(), "CNN 샘플 파일이 만들어지지 않았다: {}", stdout(&out));
-    assert!(stdout(&out).contains("사분면 CNN"), "모델 이름이 안 보인다:\n{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("사분면 CNN"),
+        "모델 이름이 안 보인다:\n{}",
+        stdout(&out)
+    );
 
     // ── 학습 (짧게) ──
     let out = run(
@@ -268,7 +301,11 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
             .arg(&proj)
             .args(["--model", "사분면 CNN", "--device", "cpu", "--epochs", "3"]),
     );
-    assert!(stdout(&out).contains("가중치"), "학습 결과에 가중치가 없다:\n{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("가중치"),
+        "학습 결과에 가중치가 없다:\n{}",
+        stdout(&out)
+    );
 
     // ── 빌드 ──
     let dist = dir.join("dist");
@@ -279,7 +316,15 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
             .arg(&proj)
             .args(["--target", "linux", "--out"])
             .arg(&dist)
-            .args(["--name", "사분면 데모", "--version", "1.0.0", "--pipeline", "추론 API", "--runtime"])
+            .args([
+                "--name",
+                "사분면 데모",
+                "--version",
+                "1.0.0",
+                "--pipeline",
+                "추론 API",
+                "--runtime",
+            ])
             .arg(&runtime),
     );
     let exe = unpack_app(&dist, &dir);
@@ -332,9 +377,7 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
             serde_json::from_str(&res.body).unwrap_or_else(|e| panic!("{label}: JSON 이 아니다 ({e}): {}", res.body));
         // 페이로드의 decode 체인이 `MapLabel` 이면 라벨 문자열이, 아니면 인덱스가 온다.
         let ok = match &body {
-            serde_json::Value::String(s) => {
-                ["좌상", "우상", "좌하", "우하"].contains(&s.as_str())
-            }
+            serde_json::Value::String(s) => ["좌상", "우상", "좌하", "우하"].contains(&s.as_str()),
             serde_json::Value::Number(n) => n.as_f64().is_some_and(|v| (0.0..4.0).contains(&v)),
             _ => false,
         };
@@ -362,14 +405,13 @@ fn quadrant_png(w: u32, h: u32, quadrant: u32) -> Vec<u8> {
 }
 
 /// 이진 본문을 POST 한다. `nl_io::http::call` 은 텍스트 본문만 다뤄 소켓으로 직접 보낸다.
-fn post_bytes(
-    url: &str,
-    headers: &std::collections::BTreeMap<String, String>,
-    body: &[u8],
-) -> std::io::Result<Reply> {
+fn post_bytes(url: &str, headers: &std::collections::BTreeMap<String, String>, body: &[u8]) -> std::io::Result<Reply> {
     use std::io::{Read, Write};
     let rest = url.strip_prefix("http://").unwrap_or(url);
-    let (hostport, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let (hostport, path) = rest
+        .split_once('/')
+        .map(|(h, p)| (h, format!("/{p}")))
+        .unwrap_or((rest, "/".into()));
 
     let mut sock = std::net::TcpStream::connect(hostport)?;
     sock.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -395,7 +437,10 @@ fn post_bytes(
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| std::io::Error::other("상태 코드를 읽을 수 없다"))?;
-    Ok(Reply { status, body: String::from_utf8_lossy(&raw[split + 4..]).into_owned() })
+    Ok(Reply {
+        status,
+        body: String::from_utf8_lossy(&raw[split + 4..]).into_owned(),
+    })
 }
 
 struct Reply {

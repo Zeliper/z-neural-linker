@@ -43,7 +43,10 @@ fn ensure_link_target() -> Result<(), String> {
             "{LIB_STEM}.so 도 {LIB_STEM}.so.<버전> 도 찾지 못했다. \
              xkbcommon 런타임 라이브러리를 설치해야 한다 (Fedora: libxkbcommon, Debian/Ubuntu: libxkbcommon0). \
              찾아본 경로: {}",
-            dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     };
 
@@ -57,11 +60,14 @@ fn ensure_link_target() -> Result<(), String> {
     let already = std::fs::read_link(&link).map(|t| t == real).unwrap_or(false);
     if !already {
         if link.exists() || std::fs::symlink_metadata(&link).is_ok() {
-            std::fs::remove_file(&link)
-                .map_err(|e| format!("낡은 링크 {} 를 지우지 못했다: {e}", link.display()))?;
+            std::fs::remove_file(&link).map_err(|e| format!("낡은 링크 {} 를 지우지 못했다: {e}", link.display()))?;
         }
         std::os::unix::fs::symlink(&real, &link).map_err(|e| {
-            format!("{} → {} 심볼릭 링크를 만들지 못했다: {e}", link.display(), real.display())
+            format!(
+                "{} → {} 심볼릭 링크를 만들지 못했다: {e}",
+                link.display(),
+                real.display()
+            )
         })?;
     }
 
@@ -87,7 +93,14 @@ fn search_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(format!("/lib/{triple}")));
     }
 
-    for p in ["/usr/lib64", "/usr/lib", "/lib64", "/lib", "/usr/local/lib64", "/usr/local/lib"] {
+    for p in [
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib64",
+        "/lib",
+        "/usr/local/lib64",
+        "/usr/local/lib",
+    ] {
         dirs.push(PathBuf::from(p));
     }
 
@@ -106,7 +119,9 @@ fn newest_versioned(dirs: &[PathBuf]) -> Option<PathBuf> {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
             // `libxkbcommon-x11.so.0` 같은 이웃 라이브러리는 걸러진다 (접두사가 정확히 다르다).
-            let Some(rest) = name.strip_prefix(&prefix) else { continue };
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
             let ver: Vec<u64> = rest.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect();
             if ver.is_empty() {
                 continue;

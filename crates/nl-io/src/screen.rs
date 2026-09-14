@@ -131,7 +131,8 @@ pub fn capture(region: &Region) -> anyhow::Result<Frame> {
 
 /// 모니터 목록에서 `index` 를 꺼낸다. 범위를 벗어나면 사람이 읽을 수 있는 오류.
 fn pick(list: &[MonitorInfo], index: usize) -> anyhow::Result<&MonitorInfo> {
-    list.get(index).ok_or_else(|| anyhow!("모니터 {index} 번이 없다 (연결된 모니터 {}개)", list.len()))
+    list.get(index)
+        .ok_or_else(|| anyhow!("모니터 {index} 번이 없다 (연결된 모니터 {}개)", list.len()))
 }
 
 /// 모니터 상대 영역을 모니터 안으로 자른다. `width == 0` 이면 전체.
@@ -254,7 +255,8 @@ mod imp {
                     }
                 }
             } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                init_errors.push("portal: D-Bus 세션 버스가 없다 (DBUS_SESSION_BUS_ADDRESS·XDG_RUNTIME_DIR 확인)".into());
+                init_errors
+                    .push("portal: D-Bus 세션 버스가 없다 (DBUS_SESSION_BUS_ADDRESS·XDG_RUNTIME_DIR 확인)".into());
                 None
             } else {
                 None
@@ -280,7 +282,13 @@ mod imp {
                     init_errors.join(" / ")
                 );
             }
-            Ok(Self { wayland, portal, x11, chosen: None, init_errors })
+            Ok(Self {
+                wayland,
+                portal,
+                x11,
+                chosen: None,
+                init_errors,
+            })
         }
 
         pub fn backend(&self) -> Option<Backend> {
@@ -292,10 +300,18 @@ mod imp {
             // 포털은 모니터 정보를 주지 않으므로 Wayland 열거(wl_output)를 그대로 쓴다 — 아래 일반 경로와 같다.
             match self.chosen {
                 Some(Backend::Wayland) => {
-                    return self.wayland.as_mut().expect("wayland 백엔드가 선택됐는데 연결이 없다").monitors()
+                    return self
+                        .wayland
+                        .as_mut()
+                        .expect("wayland 백엔드가 선택됐는데 연결이 없다")
+                        .monitors()
                 }
                 Some(Backend::X11) => {
-                    return self.x11.as_mut().expect("x11 백엔드가 선택됐는데 연결이 없다").monitors()
+                    return self
+                        .x11
+                        .as_mut()
+                        .expect("x11 백엔드가 선택됐는데 연결이 없다")
+                        .monitors()
                 }
                 _ => {}
             }
@@ -314,7 +330,11 @@ mod imp {
                     Err(e) => errs.push(format!("x11: {e:#}")),
                 }
             }
-            bail!("모니터 목록을 얻지 못했다 ({}). 사유: {}", session_hint(), errs.join(" / "))
+            bail!(
+                "모니터 목록을 얻지 못했다 ({}). 사유: {}",
+                session_hint(),
+                errs.join(" / ")
+            )
         }
 
         pub fn capture(&mut self, region: &Region) -> anyhow::Result<Frame> {
@@ -357,7 +377,12 @@ mod imp {
                     Err(e) => errs.push(format!("x11: {e:#}")),
                 }
             }
-            bail!("화면 캡처 실패 ({}). {} 사유: {}", session_hint(), advice(), errs.join(" / "))
+            bail!(
+                "화면 캡처 실패 ({}). {} 사유: {}",
+                session_hint(),
+                advice(),
+                errs.join(" / ")
+            )
         }
 
         /// 모니터들의 논리 좌표 사각형. Wayland 열거를 먼저, 없으면 X11 randr.
@@ -370,9 +395,10 @@ mod imp {
                     }
                 }
             }
-            let x = self.x11.as_mut().ok_or_else(|| {
-                anyhow!("모니터 좌표를 알 수 없다 (Wayland 출력 열거도, X11 randr 도 되지 않는다)")
-            })?;
+            let x = self
+                .x11
+                .as_mut()
+                .ok_or_else(|| anyhow!("모니터 좌표를 알 수 없다 (Wayland 출력 열거도, X11 randr 도 되지 않는다)"))?;
             x.logical_rects()
         }
 
@@ -417,8 +443,16 @@ mod imp {
         let sy = img.height() as f64 / bh as f64;
 
         // 요청 영역은 모니터 기준 **물리** 픽셀이다. 그 모니터의 배율로 논리 좌표로 되돌린다.
-        let mscale_x = if rect.w > 0 { m.width as f64 / rect.w as f64 } else { 1.0 };
-        let mscale_y = if rect.h > 0 { m.height as f64 / rect.h as f64 } else { 1.0 };
+        let mscale_x = if rect.w > 0 {
+            m.width as f64 / rect.w as f64
+        } else {
+            1.0
+        };
+        let mscale_y = if rect.h > 0 {
+            m.height as f64 / rect.h as f64
+        } else {
+            1.0
+        };
 
         let lx = (rect.x - bx) as f64 + rx as f64 / mscale_x.max(f64::MIN_POSITIVE);
         let ly = (rect.y - by) as f64 + ry as f64 / mscale_y.max(f64::MIN_POSITIVE);
@@ -438,7 +472,11 @@ mod imp {
         }
 
         let view = image::imageops::crop_imm(img, px, py, pw, ph).to_image();
-        Ok(Frame { width: view.width(), height: view.height(), rgba: view.into_raw() })
+        Ok(Frame {
+            width: view.width(),
+            height: view.height(),
+            rgba: view.into_raw(),
+        })
     }
 
     /// 모든 모니터를 감싸는 논리 좌표 경계 상자 `(x, y, w, h)`.
@@ -461,7 +499,15 @@ mod imp {
         use super::*;
 
         fn mon(x: i32, y: i32, w: u32, h: u32) -> MonitorInfo {
-            MonitorInfo { index: 0, name: "m".into(), x, y, width: w, height: h, primary: true }
+            MonitorInfo {
+                index: 0,
+                name: "m".into(),
+                x,
+                y,
+                width: w,
+                height: h,
+                primary: true,
+            }
         }
 
         fn rect(x: i32, y: i32, w: u32, h: u32) -> LogicalRect {
@@ -586,7 +632,10 @@ mod imp {
                      (xdg-desktop-portal 과 데스크톱용 백엔드가 필요하다: KDE 는 xdg-desktop-portal-kde, GNOME 은 -gnome)",
                 )?;
                 log::debug!("xdg-desktop-portal Screenshot 버전 {version}");
-                Ok(Self { conn: Some(conn), seq: 0 })
+                Ok(Self {
+                    conn: Some(conn),
+                    seq: 0,
+                })
             }
 
             /// 전체 데스크톱을 한 장 찍어 RGBA 로 돌려준다.
@@ -680,8 +729,8 @@ mod imp {
                 let uri = String::try_from(uri.try_clone().context("uri 값을 복제하지 못했다")?)
                     .context("포털이 돌려준 uri 가 문자열이 아니다")?;
                 let path = file_uri_to_path(&uri)?;
-                let img = image::open(&path)
-                    .with_context(|| format!("포털이 만든 {} 을 열지 못했다", path.display()))?;
+                let img =
+                    image::open(&path).with_context(|| format!("포털이 만든 {} 을 열지 못했다", path.display()))?;
                 if let Err(e) = std::fs::remove_file(&path) {
                     log::warn!("포털 임시 파일 {} 을 지우지 못했다: {e}", path.display());
                 }
@@ -732,13 +781,19 @@ mod imp {
 
             #[test]
             fn decodes_file_uris() {
-                assert_eq!(file_uri_to_path("file:///tmp/a.png").unwrap(), PathBuf::from("/tmp/a.png"));
+                assert_eq!(
+                    file_uri_to_path("file:///tmp/a.png").unwrap(),
+                    PathBuf::from("/tmp/a.png")
+                );
                 assert_eq!(
                     file_uri_to_path("file:///tmp/a%20b%2Fc.png").unwrap(),
                     PathBuf::from("/tmp/a b/c.png")
                 );
                 // 호스트가 붙은 형태도 경로만 남는다.
-                assert_eq!(file_uri_to_path("file://localhost/tmp/x.png").unwrap(), PathBuf::from("/tmp/x.png"));
+                assert_eq!(
+                    file_uri_to_path("file://localhost/tmp/x.png").unwrap(),
+                    PathBuf::from("/tmp/x.png")
+                );
                 assert!(file_uri_to_path("http://example.com/x.png").is_err());
             }
 
@@ -779,7 +834,10 @@ mod imp {
             }
 
             pub fn monitors(&mut self) -> anyhow::Result<Vec<MonitorInfo>> {
-                self.conn.refresh_outputs().map_err(wl_err).context("출력 목록 갱신 실패")?;
+                self.conn
+                    .refresh_outputs()
+                    .map_err(wl_err)
+                    .context("출력 목록 갱신 실패")?;
                 Ok(self
                     .conn
                     .get_all_outputs()
@@ -796,7 +854,11 @@ mod imp {
                         };
                         MonitorInfo {
                             index: i,
-                            name: if o.name.is_empty() { format!("output-{i}") } else { o.name.clone() },
+                            name: if o.name.is_empty() {
+                                format!("output-{i}")
+                            } else {
+                                o.name.clone()
+                            },
                             x: log.position.x,
                             y: log.position.y,
                             width: w,
@@ -810,14 +872,22 @@ mod imp {
 
             /// 출력들의 논리 좌표 사각형 (스케일 적용 후).
             pub fn logical_rects(&mut self) -> anyhow::Result<Vec<super::LogicalRect>> {
-                self.conn.refresh_outputs().map_err(wl_err).context("출력 목록 갱신 실패")?;
+                self.conn
+                    .refresh_outputs()
+                    .map_err(wl_err)
+                    .context("출력 목록 갱신 실패")?;
                 Ok(self
                     .conn
                     .get_all_outputs()
                     .iter()
                     .map(|o| {
                         let r = o.logical_region.inner;
-                        super::LogicalRect { x: r.position.x, y: r.position.y, w: r.size.width, h: r.size.height }
+                        super::LogicalRect {
+                            x: r.position.x,
+                            y: r.position.y,
+                            w: r.size.width,
+                            h: r.size.height,
+                        }
                     })
                     .collect())
             }
@@ -850,14 +920,21 @@ mod imp {
                                 x: log.position.x + (rx as f64 / scale).round() as i32,
                                 y: log.position.y + (ry as f64 / scale).round() as i32,
                             },
-                            size: Size { width: to_log(rw), height: to_log(rh) },
+                            size: Size {
+                                width: to_log(rw),
+                                height: to_log(rh),
+                            },
                         },
                     };
                     self.conn.screenshot(lr, false).map_err(wl_err)?
                 };
 
                 let rgba = img.to_rgba8();
-                Ok(super::super::Frame { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
+                Ok(super::super::Frame {
+                    width: rgba.width(),
+                    height: rgba.height(),
+                    rgba: rgba.into_raw(),
+                })
             }
         }
     }
@@ -934,7 +1011,12 @@ mod imp {
                 Ok(self
                     .monitors()?
                     .into_iter()
-                    .map(|m| super::LogicalRect { x: m.x, y: m.y, w: m.width, h: m.height })
+                    .map(|m| super::LogicalRect {
+                        x: m.x,
+                        y: m.y,
+                        w: m.width,
+                        h: m.height,
+                    })
                     .collect())
             }
 
@@ -952,7 +1034,15 @@ mod imp {
                 let root = self.root();
                 let reply = self
                     .conn
-                    .get_image(ImageFormat::Z_PIXMAP, root, ax as i16, ay as i16, rw as u16, rh as u16, !0)
+                    .get_image(
+                        ImageFormat::Z_PIXMAP,
+                        root,
+                        ax as i16,
+                        ay as i16,
+                        rw as u16,
+                        rh as u16,
+                        !0,
+                    )
                     .context("GetImage 요청 실패")?
                     .reply()
                     .context("GetImage 응답 실패 (영역이 화면 밖이거나 서버가 거부)")?;
@@ -1004,7 +1094,11 @@ mod imp {
             // 스캔라인은 scanline_pad 비트 경계로 정렬된다.
             let stride = ((w * bpp).div_ceil(pad) * pad) / 8;
             if data.len() < stride * h {
-                bail!("GetImage 데이터가 짧다: {} 바이트, 최소 {} 필요", data.len(), stride * h);
+                bail!(
+                    "GetImage 데이터가 짧다: {} 바이트, 최소 {} 필요",
+                    data.len(),
+                    stride * h
+                );
             }
 
             let vis = find_visual(setup, visual);
@@ -1094,7 +1188,9 @@ mod imp {
     impl Imp {
         pub fn new() -> anyhow::Result<Self> {
             // xcap 은 연결 객체를 들고 있지 않다. 목록 조회가 되는지만 확인한다.
-            Monitor::all().map_err(|e| anyhow!("{e}")).context("모니터 목록 조회 실패")?;
+            Monitor::all()
+                .map_err(|e| anyhow!("{e}"))
+                .context("모니터 목록 조회 실패")?;
             Ok(Self { chosen: None })
         }
 
@@ -1103,7 +1199,9 @@ mod imp {
         }
 
         fn all() -> anyhow::Result<Vec<Monitor>> {
-            Monitor::all().map_err(|e| anyhow!("{e}")).context("모니터 목록 조회 실패")
+            Monitor::all()
+                .map_err(|e| anyhow!("{e}"))
+                .context("모니터 목록 조회 실패")
         }
 
         pub fn monitors(&mut self) -> anyhow::Result<Vec<MonitorInfo>> {
@@ -1137,7 +1235,11 @@ mod imp {
             };
             self.chosen = Some(Backend::XCap);
             let (width, height) = (img.width(), img.height());
-            Ok(Frame { width, height, rgba: img.into_raw() })
+            Ok(Frame {
+                width,
+                height,
+                rgba: img.into_raw(),
+            })
         }
     }
 }
@@ -1152,22 +1254,64 @@ mod tests {
 
     #[test]
     fn clamp_full_monitor_when_width_zero() {
-        let m = MonitorInfo { index: 0, name: "m".into(), x: 0, y: 0, width: 1920, height: 1080, primary: true };
-        let r = Region { monitor: 0, x: 10, y: 10, width: 0, height: 0 };
+        let m = MonitorInfo {
+            index: 0,
+            name: "m".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            primary: true,
+        };
+        let r = Region {
+            monitor: 0,
+            x: 10,
+            y: 10,
+            width: 0,
+            height: 0,
+        };
         assert_eq!(clamp_region(&m, &r).unwrap(), (0, 0, 1920, 1080));
     }
 
     #[test]
     fn clamp_cuts_region_to_monitor() {
-        let m = MonitorInfo { index: 0, name: "m".into(), x: 0, y: 0, width: 100, height: 100, primary: true };
-        let r = Region { monitor: 0, x: 90, y: 90, width: 50, height: 50 };
+        let m = MonitorInfo {
+            index: 0,
+            name: "m".into(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            primary: true,
+        };
+        let r = Region {
+            monitor: 0,
+            x: 90,
+            y: 90,
+            width: 50,
+            height: 50,
+        };
         assert_eq!(clamp_region(&m, &r).unwrap(), (90, 90, 10, 10));
     }
 
     #[test]
     fn clamp_rejects_offscreen_origin() {
-        let m = MonitorInfo { index: 0, name: "m".into(), x: 0, y: 0, width: 100, height: 100, primary: true };
-        let r = Region { monitor: 0, x: 200, y: 0, width: 10, height: 10 };
+        let m = MonitorInfo {
+            index: 0,
+            name: "m".into(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            primary: true,
+        };
+        let r = Region {
+            monitor: 0,
+            x: 200,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
         assert!(clamp_region(&m, &r).is_err());
     }
 
@@ -1202,7 +1346,13 @@ mod tests {
         for m in &mons {
             assert!(m.width > 0 && m.height > 0, "모니터 크기가 0 이다: {m:?}");
         }
-        let region = Region { monitor: 0, x: 0, y: 0, width: 0, height: 0 };
+        let region = Region {
+            monitor: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
         let f = match cap.capture(&region) {
             Ok(f) => f,
             Err(e) => {
@@ -1210,14 +1360,30 @@ mod tests {
                 return;
             }
         };
-        assert_eq!(f.rgba.len(), f.width as usize * f.height as usize * 4, "RGBA 길이가 크기와 안 맞는다");
+        assert_eq!(
+            f.rgba.len(),
+            f.width as usize * f.height as usize * 4,
+            "RGBA 길이가 크기와 안 맞는다"
+        );
         assert_eq!(f.width, mons[0].width, "전체 캡처 너비가 모니터 너비와 다르다");
         assert_eq!(f.height, mons[0].height, "전체 캡처 높이가 모니터 높이와 다르다");
         let backend = cap.backend().expect("캡처에 성공했으면 백엔드가 정해져 있어야 한다");
-        eprintln!("캡처 성공: {}x{} via {} — {}", f.width, f.height, backend.label(), backend.hint());
+        eprintln!(
+            "캡처 성공: {}x{} via {} — {}",
+            f.width,
+            f.height,
+            backend.label(),
+            backend.hint()
+        );
 
         // 부분 영역도 요청한 크기 그대로 나와야 한다.
-        let part = Region { monitor: 0, x: 10, y: 20, width: 320, height: 240 };
+        let part = Region {
+            monitor: 0,
+            x: 10,
+            y: 20,
+            width: 320,
+            height: 240,
+        };
         match cap.capture(&part) {
             Ok(p) => {
                 assert_eq!((p.width, p.height), (320, 240), "부분 캡처 크기가 다르다");
@@ -1235,14 +1401,27 @@ mod tests {
             }
         }
         let per = start.elapsed() / rounds;
-        eprintln!("연속 캡처 {rounds}장: 장당 {per:?} (약 {:.1} fps)", 1.0 / per.as_secs_f64());
+        eprintln!(
+            "연속 캡처 {rounds}장: 장당 {per:?} (약 {:.1} fps)",
+            1.0 / per.as_secs_f64()
+        );
 
         // 모니터가 여럿이면 두 번째도 찍어 본다 (좌표 계산 검증).
         if mons.len() > 1 {
-            let r2 = Region { monitor: 1, x: 0, y: 0, width: 0, height: 0 };
+            let r2 = Region {
+                monitor: 1,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            };
             match cap.capture(&r2) {
                 Ok(g) => {
-                    assert_eq!((g.width, g.height), (mons[1].width, mons[1].height), "두 번째 모니터 크기가 다르다");
+                    assert_eq!(
+                        (g.width, g.height),
+                        (mons[1].width, mons[1].height),
+                        "두 번째 모니터 크기가 다르다"
+                    );
                     eprintln!("모니터 2 캡처 성공: {}x{}", g.width, g.height);
                 }
                 Err(e) => eprintln!("모니터 2 캡처 실패: {e:#}"),

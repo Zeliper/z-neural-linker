@@ -54,7 +54,11 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         None => default_run_dir(&l.base_dir, run_id),
     };
     let resume_from = if args.resume {
-        model.weights.as_ref().map(|w| l.base_dir.join(w)).filter(|p| p.is_file())
+        model
+            .weights
+            .as_ref()
+            .map(|w| l.base_dir.join(w))
+            .filter(|p| p.is_file())
     } else {
         None
     };
@@ -93,8 +97,15 @@ pub fn run(args: Args<'_>) -> Result<i32> {
             handle.stop();
         }
         match handle.events.recv_timeout(Duration::from_millis(100)) {
-            Ok(TrainEvent::Started { device, batches_per_epoch, params }) => {
-                println!("  {} {device} · 에포크당 {batches_per_epoch} 배치 · 파라미터 {params}개", dim("장치"));
+            Ok(TrainEvent::Started {
+                device,
+                batches_per_epoch,
+                params,
+            }) => {
+                println!(
+                    "  {} {device} · 에포크당 {batches_per_epoch} 배치 · 파라미터 {params}개",
+                    dim("장치")
+                );
             }
             Ok(TrainEvent::Step { epoch, step, loss }) => {
                 progress(&format!("에포크 {epoch} · 스텝 {step} · loss {loss:.4}"));
@@ -136,8 +147,7 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         m.weights = Some(rel.clone());
         m.train = model.train.clone();
     }
-    save_project_atomic(&l.path, &l.project)
-        .with_context(|| format!("{} 저장 실패", l.path.display()))?;
+    save_project_atomic(&l.path, &l.project).with_context(|| format!("{} 저장 실패", l.path.display()))?;
 
     // ── 요약 ──
     println!();
@@ -151,7 +161,11 @@ pub fn run(args: Args<'_>) -> Result<i32> {
             println!("  {} {v:.4}", dim("val loss"));
         }
         if let Some(v) = m.val_metric {
-            println!("  {} {}", dim(&format!("{} (val)", model.train.metric.label())), metric_text(v, &model.train.metric));
+            println!(
+                "  {} {}",
+                dim(&format!("{} (val)", model.train.metric.label())),
+                metric_text(v, &model.train.metric)
+            );
         }
     }
     match &weights_rel {

@@ -71,7 +71,7 @@ enum Command {
         project: PathBuf,
         #[arg(long)]
         model: String,
-        /// JSON 값. 예: '[0,1]'
+        /// JSON 값. 예: `[0,1]`
         #[arg(long, conflicts_with_all = ["image", "csv"])]
         input: Option<String>,
         /// 이미지 파일 하나.
@@ -187,7 +187,15 @@ fn dispatch() -> Result<i32> {
     match Cli::parse().command {
         Command::Inspect { project } => inspect::run(&project),
         Command::Devices { probe } => devices::run(probe),
-        Command::Train { project, model, dataset, device, epochs, run_dir, resume } => train::run(train::Args {
+        Command::Train {
+            project,
+            model,
+            dataset,
+            device,
+            epochs,
+            run_dir,
+            resume,
+        } => train::run(train::Args {
             project: &project,
             model: &model,
             dataset: dataset.as_deref(),
@@ -196,7 +204,15 @@ fn dispatch() -> Result<i32> {
             run_dir: run_dir.as_deref(),
             resume,
         }),
-        Command::Infer { project, model, input, image, csv, payload, device } => infer::run(infer::Args {
+        Command::Infer {
+            project,
+            model,
+            input,
+            image,
+            csv,
+            payload,
+            device,
+        } => infer::run(infer::Args {
             project: &project,
             model: &model,
             input: input.as_deref(),
@@ -205,39 +221,77 @@ fn dispatch() -> Result<i32> {
             payload: payload.as_deref(),
             device: device.as_deref(),
         }),
-        Command::Run { project, pipeline, seconds, arm_input, device } => run::run(run::Args {
+        Command::Run {
+            project,
+            pipeline,
+            seconds,
+            arm_input,
+            device,
+        } => run::run(run::Args {
             project: &project,
             pipeline: pipeline.as_deref(),
             seconds,
             arm_input,
             device: device.as_deref(),
         }),
-        Command::Record { out, monitor, x, y, width, height, fps, seconds, label_keys } => {
+        Command::Record {
+            out,
+            monitor,
+            x,
+            y,
+            width,
+            height,
+            fps,
+            seconds,
+            label_keys,
+        } => {
             let allowed = match label_keys.as_deref() {
                 Some(list) => Some(record::parse_label_keys(list)?),
                 None => None,
             };
-            record::run(record::Args { out: &out, monitor, x, y, width, height, fps, seconds, allowed })
-        }
-        Command::Build { project, target, out, name, version, pipeline, runtime, icon, publisher, arm_input } => {
-            build::run(build::Args {
-                project: &project,
-                target: &target,
+            record::run(record::Args {
                 out: &out,
-                name: name.as_deref(),
-                version: Some(&version),
-                pipeline: pipeline.as_deref(),
-                runtime: runtime.as_deref(),
-                icon: icon.as_deref(),
-                publisher: &publisher,
-                arm_input,
+                monitor,
+                x,
+                y,
+                width,
+                height,
+                fps,
+                seconds,
+                allowed,
             })
         }
+        Command::Build {
+            project,
+            target,
+            out,
+            name,
+            version,
+            pipeline,
+            runtime,
+            icon,
+            publisher,
+            arm_input,
+        } => build::run(build::Args {
+            project: &project,
+            target: &target,
+            out: &out,
+            name: name.as_deref(),
+            version: Some(&version),
+            pipeline: pipeline.as_deref(),
+            runtime: runtime.as_deref(),
+            icon: icon.as_deref(),
+            publisher: &publisher,
+            arm_input,
+        }),
         Command::Sample { out, kind, list } => {
             if list {
                 list_samples()
             } else {
-                make_sample(out.as_deref().expect("clap 이 required_unless_present 로 보장한다"), &kind)
+                make_sample(
+                    out.as_deref().expect("clap 이 required_unless_present 로 보장한다"),
+                    &kind,
+                )
             }
         }
     }
@@ -261,7 +315,11 @@ fn make_sample(out: &std::path::Path, kind: &str) -> Result<i32> {
 
     let model = project.models.values().next();
     println!("{} {} ({key})", common::bold("샘플"), out.display());
-    println!("  {} {}", common::dim("모델"), model.map(|m| m.name.as_str()).unwrap_or(""));
+    println!(
+        "  {} {}",
+        common::dim("모델"),
+        model.map(|m| m.name.as_str()).unwrap_or("")
+    );
     println!(
         "  {} {}",
         common::dim("데이터셋"),
@@ -275,14 +333,14 @@ fn make_sample(out: &std::path::Path, kind: &str) -> Result<i32> {
     if let Some(m) = model {
         println!();
         println!("{}", common::dim("다음:"));
-        println!("  nl train {} --model '{}' --device cpu --epochs 30", out.display(), m.name);
+        println!(
+            "  nl train {} --model '{}' --device cpu --epochs 30",
+            out.display(),
+            m.name
+        );
         // 입력 형태가 달라 예시도 갈린다.
         if key == "cnn" {
-            println!(
-                "  nl infer {} --model '{}' --image 그림.png",
-                out.display(),
-                m.name
-            );
+            println!("  nl infer {} --model '{}' --image 그림.png", out.display(), m.name);
         } else {
             println!("  nl infer {} --model '{}' --input '[1,0]'", out.display(), m.name);
         }
@@ -293,7 +351,10 @@ fn make_sample(out: &std::path::Path, kind: &str) -> Result<i32> {
 /// 만들 수 있는 샘플 목록.
 fn list_samples() -> Result<i32> {
     let mut rows = vec![vec!["--kind".into(), "이름".into(), "모델".into(), "설명".into()]];
-    for (key, make) in [("xor", nl_core::sample::xor_project as nl_core::sample::SampleFactory), ("cnn", nl_core::sample::quadrants_cnn_project as _)] {
+    for (key, make) in [
+        ("xor", nl_core::sample::xor_project as nl_core::sample::SampleFactory),
+        ("cnn", nl_core::sample::quadrants_cnn_project as _),
+    ] {
         let p = make();
         rows.push(vec![
             key.to_string(),
@@ -323,9 +384,17 @@ mod tests {
         let c = Cli::parse_from(["nl", "inspect", "a.nlproj"]);
         assert!(matches!(c.command, Command::Inspect { .. }));
 
-        let c = Cli::parse_from(["nl", "train", "a.nlproj", "--model", "M", "--epochs", "7", "--device", "cpu"]);
+        let c = Cli::parse_from([
+            "nl", "train", "a.nlproj", "--model", "M", "--epochs", "7", "--device", "cpu",
+        ]);
         match c.command {
-            Command::Train { model, epochs, device, resume, .. } => {
+            Command::Train {
+                model,
+                epochs,
+                device,
+                resume,
+                ..
+            } => {
                 assert_eq!(model, "M");
                 assert_eq!(epochs, Some(7));
                 assert_eq!(device.as_deref(), Some("cpu"));
@@ -343,9 +412,26 @@ mod tests {
             _ => panic!("run 이 아니다"),
         }
 
-        let c = Cli::parse_from(["nl", "record", "/tmp/out", "--fps", "10", "--for", "3", "--label-keys", "0,1"]);
+        let c = Cli::parse_from([
+            "nl",
+            "record",
+            "/tmp/out",
+            "--fps",
+            "10",
+            "--for",
+            "3",
+            "--label-keys",
+            "0,1",
+        ]);
         match c.command {
-            Command::Record { fps, seconds, monitor, width, label_keys, .. } => {
+            Command::Record {
+                fps,
+                seconds,
+                monitor,
+                width,
+                label_keys,
+                ..
+            } => {
                 assert_eq!(fps, 10.0);
                 assert_eq!(seconds, Some(3.0));
                 assert_eq!(monitor, 0, "기본 모니터는 0");
@@ -357,7 +443,13 @@ mod tests {
 
         let c = Cli::parse_from(["nl", "build", "a.nlproj"]);
         match c.command {
-            Command::Build { target, out, version, publisher, .. } => {
+            Command::Build {
+                target,
+                out,
+                version,
+                publisher,
+                ..
+            } => {
                 assert_eq!(target, "host");
                 assert_eq!(out, PathBuf::from("dist"));
                 assert_eq!(version, "0.1.0");
@@ -369,10 +461,14 @@ mod tests {
 
     #[test]
     fn infer_input_sources_are_mutually_exclusive() {
-        assert!(Cli::try_parse_from(["nl", "infer", "a.nlproj", "--model", "M", "--input", "[1]", "--image", "a.png"])
-            .is_err());
-        assert!(Cli::try_parse_from(["nl", "infer", "a.nlproj", "--model", "M", "--image", "a.png", "--csv", "a.csv"])
-            .is_err());
+        assert!(
+            Cli::try_parse_from(["nl", "infer", "a.nlproj", "--model", "M", "--input", "[1]", "--image", "a.png"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["nl", "infer", "a.nlproj", "--model", "M", "--image", "a.png", "--csv", "a.csv"])
+                .is_err()
+        );
         assert!(Cli::try_parse_from(["nl", "infer", "a.nlproj", "--model", "M", "--input", "[1]"]).is_ok());
     }
 
@@ -444,8 +540,10 @@ mod tests {
         assert_eq!(make_sample(&path, "xor").unwrap(), 0);
 
         let p = common::load_project(&path).unwrap().project;
-        let errors: Vec<_> =
-            nl_core::validate(&p).into_iter().filter(|i| i.severity == Severity::Error).collect();
+        let errors: Vec<_> = nl_core::validate(&p)
+            .into_iter()
+            .filter(|i| i.severity == Severity::Error)
+            .collect();
         assert!(errors.is_empty(), "검증 오류: {errors:?}");
 
         assert_eq!(p.pipelines.len(), 2, "시험 + 추론 API");
@@ -474,8 +572,10 @@ mod tests {
         common::save_project_atomic(&path, &nl_core::sample::quadrants_cnn_project()).unwrap();
 
         let p = common::load_project(&path).unwrap().project;
-        let errors: Vec<_> =
-            nl_core::validate(&p).into_iter().filter(|i| i.severity == Severity::Error).collect();
+        let errors: Vec<_> = nl_core::validate(&p)
+            .into_iter()
+            .filter(|i| i.severity == Severity::Error)
+            .collect();
         assert!(errors.is_empty(), "검증 오류: {errors:?}");
         assert_eq!(p.models.len(), 1);
         assert_eq!(p.pipelines.len(), 1, "CNN 은 추론 API 하나만");

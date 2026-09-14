@@ -48,8 +48,8 @@ pub struct Loaded {
 }
 
 pub fn load_project(path: &Path) -> Result<Loaded> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("프로젝트 파일을 읽지 못했다: {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("프로젝트 파일을 읽지 못했다: {}", path.display()))?;
     let file = ProjectFile::from_json(&text)
         .with_context(|| format!("프로젝트 파일을 해석하지 못했다: {}", path.display()))?;
     if file.newer_than_app() {
@@ -61,8 +61,16 @@ pub fn load_project(path: &Path) -> Result<Loaded> {
             ))
         );
     }
-    let base_dir = path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-    Ok(Loaded { project: file.project, path: path.to_path_buf(), base_dir })
+    let base_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok(Loaded {
+        project: file.project,
+        path: path.to_path_buf(),
+        base_dir,
+    })
 }
 
 /// **원자적 저장**: 같은 폴더의 임시 파일에 다 쓰고 `fsync` 한 뒤 이름을 바꾼다.
@@ -73,9 +81,14 @@ pub fn save_project_atomic(path: &Path, project: &Project) -> Result<()> {
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("{} 폴더를 만들지 못했다", dir.display()))?;
-    let name = path.file_name().ok_or_else(|| anyhow!("파일 이름이 없는 경로다: {}", path.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("파일 이름이 없는 경로다: {}", path.display()))?;
     let tmp = dir.join(format!(".{}.tmp-{}", name.to_string_lossy(), std::process::id()));
 
     let mut f = std::fs::File::create(&tmp).with_context(|| format!("{} 를 만들지 못했다", tmp.display()))?;
@@ -107,31 +120,65 @@ where
         exact = all.iter().filter(|(_, _, id)| *id == key_l).collect();
     }
     if exact.is_empty() {
-        exact = all.iter().filter(|(_, _, id)| id.starts_with(&key_l) && !key_l.is_empty()).collect();
+        exact = all
+            .iter()
+            .filter(|(_, _, id)| id.starts_with(&key_l) && !key_l.is_empty())
+            .collect();
     }
     match exact.len() {
         1 => Ok(exact[0].0),
         0 => {
-            let names: Vec<String> = all.iter().map(|(_, n, i)| format!("{n} ({})", &i[..8.min(i.len())])).collect();
-            bail!("{what} '{key}' 을 찾을 수 없다. 있는 것: {}", if names.is_empty() { "(없음)".into() } else { names.join(", ") })
+            let names: Vec<String> = all
+                .iter()
+                .map(|(_, n, i)| format!("{n} ({})", &i[..8.min(i.len())]))
+                .collect();
+            bail!(
+                "{what} '{key}' 을 찾을 수 없다. 있는 것: {}",
+                if names.is_empty() {
+                    "(없음)".into()
+                } else {
+                    names.join(", ")
+                }
+            )
         }
         _ => {
-            let names: Vec<String> = exact.iter().map(|(_, n, i)| format!("{n} ({})", &i[..8.min(i.len())])).collect();
+            let names: Vec<String> = exact
+                .iter()
+                .map(|(_, n, i)| format!("{n} ({})", &i[..8.min(i.len())]))
+                .collect();
             bail!("{what} '{key}' 이 여럿에 걸린다: {}", names.join(", "))
         }
     }
 }
 
 pub fn find_model<'a>(p: &'a Project, key: &str) -> Result<&'a ModelDef> {
-    pick(p.models.values().map(|m| (m, m.name.clone(), m.id.0.simple().to_string())), "모델", key)
+    pick(
+        p.models
+            .values()
+            .map(|m| (m, m.name.clone(), m.id.0.simple().to_string())),
+        "모델",
+        key,
+    )
 }
 
 pub fn find_dataset<'a>(p: &'a Project, key: &str) -> Result<&'a DatasetSpec> {
-    pick(p.datasets.values().map(|d| (d, d.name.clone(), d.id.0.simple().to_string())), "데이터셋", key)
+    pick(
+        p.datasets
+            .values()
+            .map(|d| (d, d.name.clone(), d.id.0.simple().to_string())),
+        "데이터셋",
+        key,
+    )
 }
 
 pub fn find_pipeline<'a>(p: &'a Project, key: &str) -> Result<&'a Pipeline> {
-    pick(p.pipelines.values().map(|x| (x, x.name.clone(), x.id.0.simple().to_string())), "파이프라인", key)
+    pick(
+        p.pipelines
+            .values()
+            .map(|x| (x, x.name.clone(), x.id.0.simple().to_string())),
+        "파이프라인",
+        key,
+    )
 }
 
 // ───────────────────────────── 장치 ─────────────────────────────

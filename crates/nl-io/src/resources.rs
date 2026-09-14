@@ -44,7 +44,10 @@ fn cache() -> &'static Mutex<Cache> {
         let kinds = RefreshKind::nothing()
             .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
             .with_memory(MemoryRefreshKind::nothing().with_ram());
-        Mutex::new(Cache { sys: System::new_with_specifics(kinds), last: None })
+        Mutex::new(Cache {
+            sys: System::new_with_specifics(kinds),
+            last: None,
+        })
     })
 }
 
@@ -87,7 +90,10 @@ pub fn snapshot() -> ResourceSnapshot {
         cpu_name,
         mem_used_bytes: c.sys.used_memory(),
         mem_total_bytes: c.sys.total_memory(),
-        gpus: nl_engine::enumerate().into_iter().filter(|d| d.kind != DeviceKind::Cpu).collect(),
+        gpus: nl_engine::enumerate()
+            .into_iter()
+            .filter(|d| d.kind != DeviceKind::Cpu)
+            .collect(),
     };
     c.last = Some((snap.clone(), Instant::now()));
     snap
@@ -102,9 +108,16 @@ mod tests {
         let s = snapshot();
         assert!(s.cpu_cores >= 1, "코어 수가 0 이다");
         assert!(!s.cpu_name.is_empty(), "CPU 이름이 비었다");
-        assert!((0.0..=100.0).contains(&s.cpu_usage_percent), "CPU 사용률 범위 밖: {}", s.cpu_usage_percent);
+        assert!(
+            (0.0..=100.0).contains(&s.cpu_usage_percent),
+            "CPU 사용률 범위 밖: {}",
+            s.cpu_usage_percent
+        );
         assert!(s.mem_total_bytes > 0, "총 메모리가 0 이다");
-        assert!(s.mem_used_bytes <= s.mem_total_bytes, "사용 메모리가 총 메모리보다 크다");
+        assert!(
+            s.mem_used_bytes <= s.mem_total_bytes,
+            "사용 메모리가 총 메모리보다 크다"
+        );
         assert!((0.0..=1.0).contains(&s.mem_ratio()));
         // GPU 목록에는 CPU 가 섞이지 않는다.
         assert!(s.gpus.iter().all(|d| d.kind != DeviceKind::Cpu));

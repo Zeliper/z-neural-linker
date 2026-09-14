@@ -60,7 +60,14 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         let over = deadline.is_some_and(|d| Instant::now() >= d);
         if (interrupted() || over) && !asked_stop {
             asked_stop = true;
-            println!("{}", dim(if over { "  시간이 다 됐다 — 정지" } else { "  중단 요청 — 정지" }));
+            println!(
+                "{}",
+                dim(if over {
+                    "  시간이 다 됐다 — 정지"
+                } else {
+                    "  중단 요청 — 정지"
+                })
+            );
             handle.stop();
         }
         match handle.events.recv_timeout(Duration::from_millis(100)) {
@@ -80,7 +87,11 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         }
     }
     println!();
-    println!("{} {:.1}초 · 오류 {errors}건", bold("종료"), start.elapsed().as_secs_f64());
+    println!(
+        "{} {:.1}초 · 오류 {errors}건",
+        bold("종료"),
+        start.elapsed().as_secs_f64()
+    );
     Ok(if errors > 0 { 1 } else { 0 })
 }
 
@@ -102,7 +113,9 @@ fn format_event(project: &nl_core::Project, ev: &RunnerEvent, start: Instant) ->
             return None;
         }
         // 미리보기 축소판은 터미널에서 쓸 데가 없다.
-        RunnerEvent::ValuePreview { node, width, height, .. } => {
+        RunnerEvent::ValuePreview {
+            node, width, height, ..
+        } => {
             log::debug!("미리보기 {} {width}x{height}", node.short());
             return None;
         }
@@ -117,7 +130,11 @@ fn node_label(project: &nl_core::Project, node: Option<nl_core::PNodeId>) -> Str
     let Some(id) = node else { return String::new() };
     for p in project.pipelines.values() {
         if let Some(n) = p.nodes.get(&id) {
-            let name = if n.name.is_empty() { n.kind.label().to_string() } else { n.name.clone() };
+            let name = if n.name.is_empty() {
+                n.kind.label().to_string()
+            } else {
+                n.name.clone()
+            };
             return format!("[{name}] ");
         }
     }

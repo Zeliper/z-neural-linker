@@ -19,7 +19,13 @@ pub fn run(path: &Path) -> Result<i32> {
     println!();
 
     // ── 모델 ──
-    let mut rows = vec![vec!["모델".into(), "id".into(), "레이어".into(), "출력 형상".into(), "가중치".into()]];
+    let mut rows = vec![vec![
+        "모델".into(),
+        "id".into(),
+        "레이어".into(),
+        "출력 형상".into(),
+        "가중치".into(),
+    ]];
     for m in p.models.values() {
         let rep = shape::infer(&m.graph);
         let out_shape = m
@@ -84,7 +90,13 @@ pub fn run(path: &Path) -> Result<i32> {
     }
 
     // ── 파이프라인 ──
-    let mut rows = vec![vec!["파이프라인".into(), "id".into(), "노드".into(), "연결".into(), "tick_hz".into()]];
+    let mut rows = vec![vec![
+        "파이프라인".into(),
+        "id".into(),
+        "노드".into(),
+        "연결".into(),
+        "tick_hz".into(),
+    ]];
     for pl in p.pipelines.values() {
         rows.push(vec![
             pl.name.clone(),
@@ -134,17 +146,36 @@ fn where_label(p: &nl_core::Project, w: &Where) -> String {
         Where::Model(m) => p.models.get(m).map(|x| x.name.clone()).unwrap_or_else(|| m.short()),
         Where::Node(m, n) => {
             let mn = p.models.get(m).map(|x| x.name.clone()).unwrap_or_else(|| m.short());
-            let nn = p.models.get(m).and_then(|x| x.graph.nodes.get(n)).map(|x| x.display_name()).unwrap_or_default();
+            let nn = p
+                .models
+                .get(m)
+                .and_then(|x| x.graph.nodes.get(n))
+                .map(|x| x.display_name())
+                .unwrap_or_default();
             format!("{mn}/{nn}")
         }
-        Where::Pipeline(id) => p.pipelines.get(id).map(|x| x.name.clone()).unwrap_or_else(|| id.short()),
+        Where::Pipeline(id) => p
+            .pipelines
+            .get(id)
+            .map(|x| x.name.clone())
+            .unwrap_or_else(|| id.short()),
         Where::PNode(pid, nid) => {
-            let pn = p.pipelines.get(pid).map(|x| x.name.clone()).unwrap_or_else(|| pid.short());
+            let pn = p
+                .pipelines
+                .get(pid)
+                .map(|x| x.name.clone())
+                .unwrap_or_else(|| pid.short());
             let nn = p
                 .pipelines
                 .get(pid)
                 .and_then(|x| x.nodes.get(nid))
-                .map(|n| if n.name.is_empty() { n.kind.label().to_string() } else { n.name.clone() })
+                .map(|n| {
+                    if n.name.is_empty() {
+                        n.kind.label().to_string()
+                    } else {
+                        n.name.clone()
+                    }
+                })
                 .unwrap_or_default();
             format!("{pn}/{nn}")
         }

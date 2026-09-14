@@ -74,12 +74,16 @@ pub fn call(
     let a = agent();
     let res = match body {
         Some(b) => {
-            let req = builder.body(b.to_owned()).with_context(|| format!("요청을 만들지 못했다: {url}"))?;
+            let req = builder
+                .body(b.to_owned())
+                .with_context(|| format!("요청을 만들지 못했다: {url}"))?;
             let req = a.configure_request(req).timeout_global(Some(timeout)).build();
             a.run(req)
         }
         None => {
-            let req = builder.body(()).with_context(|| format!("요청을 만들지 못했다: {url}"))?;
+            let req = builder
+                .body(())
+                .with_context(|| format!("요청을 만들지 못했다: {url}"))?;
             let req = a.configure_request(req).timeout_global(Some(timeout)).build();
             a.run(req)
         }
@@ -87,8 +91,12 @@ pub fn call(
     .map_err(|e| anyhow!("{method} {url} 실패: {e}"))?;
 
     let status = res.status().as_u16();
-    let content_type =
-        res.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned();
+    let content_type = res
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
 
     let mut b = res.into_body();
     let raw = b
@@ -99,7 +107,11 @@ pub fn call(
     // 이진 응답이 와도 죽지 않게 손실 변환한다.
     let body = String::from_utf8_lossy(&raw).into_owned();
 
-    Ok(HttpResponse { status, body, content_type })
+    Ok(HttpResponse {
+        status,
+        body,
+        content_type,
+    })
 }
 
 #[cfg(test)]
@@ -146,7 +158,12 @@ mod tests {
                     }
                 }
             });
-            Self { addr, stop, server, handle: Some(handle) }
+            Self {
+                addr,
+                stop,
+                server,
+                handle: Some(handle),
+            }
         }
     }
 
@@ -166,10 +183,21 @@ mod tests {
             assert_eq!(req.method().as_str(), "GET");
             (200, "application/json".into(), r#"{"ok":true}"#.into())
         });
-        let res = call("GET", &format!("{}/x", s.addr), &BTreeMap::new(), None, Duration::from_secs(5)).unwrap();
+        let res = call(
+            "GET",
+            &format!("{}/x", s.addr),
+            &BTreeMap::new(),
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert_eq!(res.status, 200);
         assert_eq!(res.body, r#"{"ok":true}"#);
-        assert!(res.content_type.starts_with("application/json"), "content-type: {}", res.content_type);
+        assert!(
+            res.content_type.starts_with("application/json"),
+            "content-type: {}",
+            res.content_type
+        );
         assert!(res.is_success());
         assert_eq!(res.json().unwrap()["ok"], serde_json::json!(true));
     }
@@ -178,7 +206,10 @@ mod tests {
     fn post_sends_body_and_headers() {
         let s = TestServer::start(|req, body| {
             assert_eq!(req.method().as_str(), "POST");
-            let has = req.headers().iter().any(|h| h.field.equiv("X-Token") && h.value.as_str() == "abc");
+            let has = req
+                .headers()
+                .iter()
+                .any(|h| h.field.equiv("X-Token") && h.value.as_str() == "abc");
             assert!(has, "X-Token 헤더가 오지 않았다: {:?}", req.headers());
             (201, "text/plain".into(), format!("받음:{body}"))
         });
@@ -218,7 +249,11 @@ mod tests {
         let start = std::time::Instant::now();
         let err = call("GET", &s.addr, &BTreeMap::new(), None, Duration::from_millis(200)).unwrap_err();
         // 서버는 1.5초를 잔다. 그보다 일찍 끝났으면 타임아웃이 먹은 것이다.
-        assert!(start.elapsed() < Duration::from_millis(1200), "타임아웃이 걸리지 않았다: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(1200),
+            "타임아웃이 걸리지 않았다: {:?}",
+            start.elapsed()
+        );
         let msg = err.to_string();
         assert!(msg.contains("GET"), "오류 메시지에 메서드가 없다: {msg}");
     }
@@ -237,6 +272,13 @@ mod tests {
     #[test]
     fn connection_refused_is_an_error() {
         // 127.0.0.1:1 은 열려 있지 않다.
-        assert!(call("GET", "http://127.0.0.1:1/", &BTreeMap::new(), None, Duration::from_millis(500)).is_err());
+        assert!(call(
+            "GET",
+            "http://127.0.0.1:1/",
+            &BTreeMap::new(),
+            None,
+            Duration::from_millis(500)
+        )
+        .is_err());
     }
 }

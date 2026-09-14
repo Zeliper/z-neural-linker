@@ -29,7 +29,10 @@ pub fn parse_label_keys(list: &str) -> Result<Vec<i64>> {
         if t.is_empty() {
             continue;
         }
-        out.push(t.parse::<i64>().map_err(|_| anyhow::anyhow!("--label-keys 의 '{t}' 은 정수가 아니다"))?);
+        out.push(
+            t.parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("--label-keys 의 '{t}' 은 정수가 아니다"))?,
+        );
     }
     if out.is_empty() {
         anyhow::bail!("--label-keys 가 비어 있다");
@@ -53,12 +56,23 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         "  {} 모니터 {} · {} · {:.1} fps",
         dim("영역"),
         args.monitor,
-        if args.width == 0 { "전체".to_string() } else { format!("{}x{} @ ({}, {})", args.width, args.height, args.x, args.y) },
+        if args.width == 0 {
+            "전체".to_string()
+        } else {
+            format!("{}x{} @ ({}, {})", args.width, args.height, args.x, args.y)
+        },
         args.fps
     );
-    println!("  {}", dim("라벨을 바꾸려면 숫자를 입력하고 엔터. 끝내려면 빈 줄이나 Ctrl+C."));
+    println!(
+        "  {}",
+        dim("라벨을 바꾸려면 숫자를 입력하고 엔터. 끝내려면 빈 줄이나 Ctrl+C.")
+    );
     if let Some(keys) = &args.allowed {
-        println!("  {} {}", dim("받는 라벨"), keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
+        println!(
+            "  {} {}",
+            dim("받는 라벨"),
+            keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")
+        );
     }
 
     // 표준 입력은 블로킹이라 별도 스레드에서 읽는다.

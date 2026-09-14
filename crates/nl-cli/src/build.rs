@@ -44,13 +44,19 @@ pub fn run(args: Args<'_>) -> Result<i32> {
             1 => Some(l.project.pipelines.values().next().expect("하나 있다").id),
             0 => None,
             _ => {
-                eprintln!("{}", yellow("파이프라인이 여럿이라 진입 파이프라인을 비워 둔다 (--pipeline 으로 지정)"));
+                eprintln!(
+                    "{}",
+                    yellow("파이프라인이 여럿이라 진입 파이프라인을 비워 둔다 (--pipeline 으로 지정)")
+                );
                 None
             }
         },
     };
     if entry.is_none() && !l.project.pipelines.is_empty() {
-        eprintln!("{}", yellow("진입 파이프라인이 없으면 배포 앱이 아무것도 실행하지 않는다"));
+        eprintln!(
+            "{}",
+            yellow("진입 파이프라인이 없으면 배포 앱이 아무것도 실행하지 않는다")
+        );
     }
 
     // 아이콘: 지정이 없으면 프로젝트 폴더의 icon.png.
@@ -69,13 +75,20 @@ pub fn run(args: Args<'_>) -> Result<i32> {
     println!("{} {} {}", bold("번들"), app_name, version);
     println!("  {} {}개", dim("모델"), bundle.manifest.models.len());
     for m in &missing {
-        println!("  {} 모델 '{m}' 의 가중치가 없어 빼놓았다 (먼저 nl train)", yellow("경고"));
+        println!(
+            "  {} 모델 '{m}' 의 가중치가 없어 빼놓았다 (먼저 nl train)",
+            yellow("경고")
+        );
     }
     match entry {
         Some(id) => println!(
             "  {} {}",
             dim("진입 파이프라인"),
-            l.project.pipelines.get(&id).map(|p| p.name.clone()).unwrap_or_else(|| id.short())
+            l.project
+                .pipelines
+                .get(&id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| id.short())
         ),
         None => println!("  {}", dim("진입 파이프라인 없음")),
     }
@@ -97,7 +110,11 @@ pub fn run(args: Args<'_>) -> Result<i32> {
 
     let mut artifacts: Vec<(String, Artifact)> = vec![(
         "번들".into(),
-        Artifact { sha256: sha256_hex(&zip), size: zip.len() as u64, path: nlapp.clone() },
+        Artifact {
+            sha256: sha256_hex(&zip),
+            size: zip.len() as u64,
+            path: nlapp.clone(),
+        },
     )];
 
     for target in &targets {
@@ -129,10 +146,9 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         attach(&runtime, &zip, &staged).context("런타임에 번들을 붙이지 못했다")?;
         println!("  {} {}", dim("첨부"), staged.display());
 
-        let art = archive_with(
-            ArchiveOptions::new(*target, &staged, &app_name, &version, args.out).icon(icon.as_deref()),
-        )
-        .context("배포 아카이브를 만들지 못했다")?;
+        let art =
+            archive_with(ArchiveOptions::new(*target, &staged, &app_name, &version, args.out).icon(icon.as_deref()))
+                .context("배포 아카이브를 만들지 못했다")?;
         artifacts.push((format!("{} 아카이브", target.label()), art));
 
         if *target == Target::WindowsX64 {
@@ -154,7 +170,10 @@ pub fn run(args: Args<'_>) -> Result<i32> {
     for (kind, a) in &artifacts {
         rows.push(vec![
             kind.clone(),
-            a.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            a.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             human_size(a.size),
             a.sha256[..16].to_string(),
         ]);
@@ -216,7 +235,10 @@ fn make_bundle(
         // zip 안에서는 `weights/<model_id>.safetensors`, 매니페스트에는 접두사 없이.
         let file = format!("{}.safetensors", id.0.simple());
         weights.insert(file.clone(), bytes);
-        manifest.models.push(BundledModel { model: *id, weights_file: file.clone() });
+        manifest.models.push(BundledModel {
+            model: *id,
+            weights_file: file.clone(),
+        });
         if let Some(m) = packed.models.get_mut(id) {
             m.weights = Some(format!("weights/{file}"));
         }

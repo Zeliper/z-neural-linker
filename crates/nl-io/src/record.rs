@@ -128,7 +128,11 @@ impl Recorder {
                 .context("녹화 캡처 스레드를 만들지 못했다")?
         };
 
-        Ok(RecorderHandle { dir, shared, threads: Some((capture, writer)) })
+        Ok(RecorderHandle {
+            dir,
+            shared,
+            threads: Some((capture, writer)),
+        })
     }
 }
 
@@ -349,7 +353,12 @@ fn write_loop(frames_dir: &Path, mut labels: std::fs::File, rx: &Receiver<Shot>,
 fn save_png(path: &Path, frame: &Frame) -> anyhow::Result<()> {
     let expect = frame.width as usize * frame.height as usize * 4;
     if frame.rgba.len() != expect {
-        bail!("프레임 크기가 맞지 않는다: {}x{} 인데 {} 바이트", frame.width, frame.height, frame.rgba.len());
+        bail!(
+            "프레임 크기가 맞지 않는다: {}x{} 인데 {} 바이트",
+            frame.width,
+            frame.height,
+            frame.rgba.len()
+        );
     }
     let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
         .ok_or_else(|| anyhow::anyhow!("RGBA 버퍼를 이미지로 만들지 못했다"))?;
@@ -370,8 +379,7 @@ fn write_meta(
         "backend": backend,
     });
     let path = dir.join("meta.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&meta)?)
-        .with_context(|| format!("{} 저장 실패", path.display()))
+    std::fs::write(&path, serde_json::to_vec_pretty(&meta)?).with_context(|| format!("{} 저장 실패", path.display()))
 }
 
 #[cfg(test)]
@@ -407,24 +415,42 @@ mod tests {
                 anyhow::bail!("일부러 낸 실패 {}", self.n);
             }
             let px = (self.n % 256) as u8;
-            Ok(Frame { width: self.w, height: self.h, rgba: vec![px; (self.w * self.h * 4) as usize] })
+            Ok(Frame {
+                width: self.w,
+                height: self.h,
+                rgba: vec![px; (self.w * self.h * 4) as usize],
+            })
         }
     }
 
     fn read_labels(dir: &Path) -> Vec<serde_json::Value> {
         let text = std::fs::read_to_string(dir.join("labels.jsonl")).expect("labels.jsonl 이 없다");
-        text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).expect("JSON 이 아니다")).collect()
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("JSON 이 아니다"))
+            .collect()
     }
 
     #[test]
     fn writes_frames_labels_and_meta_in_the_recorded_layout() {
         let dir = tmp("layout");
-        let region = Region { monitor: 0, x: 0, y: 0, width: 8, height: 6 };
+        let region = Region {
+            monitor: 0,
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 6,
+        };
         let rec = Recorder::start_with(
             &dir,
             region,
             120.0,
-            Box::new(FakeSource { n: 0, w: 8, h: 6, fail_first: 0 }),
+            Box::new(FakeSource {
+                n: 0,
+                w: 8,
+                h: 6,
+                fail_first: 0,
+            }),
         )
         .unwrap();
 
@@ -455,12 +481,14 @@ mod tests {
         assert_eq!(labels.last().unwrap()["label"], serde_json::json!(7));
 
         // meta.json.
-        let meta: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
         assert_eq!(meta["fps"], serde_json::json!(120.0));
         assert_eq!(meta["backend"], serde_json::json!("fake"));
         assert_eq!(meta["region"]["width"], serde_json::json!(8));
-        assert!(meta["started"].as_str().unwrap().contains('T'), "시작 시각이 RFC 3339 가 아니다");
+        assert!(
+            meta["started"].as_str().unwrap().contains('T'),
+            "시작 시각이 RFC 3339 가 아니다"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -468,10 +496,25 @@ mod tests {
     #[test]
     fn the_recorded_folder_loads_back_through_nl_engine() {
         let dir = tmp("loadback");
-        let region = Region { monitor: 0, x: 0, y: 0, width: 4, height: 4 };
-        let rec =
-            Recorder::start_with(&dir, region, 120.0, Box::new(FakeSource { n: 0, w: 4, h: 4, fail_first: 0 }))
-                .unwrap();
+        let region = Region {
+            monitor: 0,
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let rec = Recorder::start_with(
+            &dir,
+            region,
+            120.0,
+            Box::new(FakeSource {
+                n: 0,
+                w: 4,
+                h: 4,
+                fail_first: 0,
+            }),
+        )
+        .unwrap();
         rec.set_label(2);
         while rec.frames_written() < 4 {
             std::thread::sleep(Duration::from_millis(5));
@@ -480,11 +523,17 @@ mod tests {
 
         let spec = nl_core::DatasetSpec::new(
             "녹화",
-            nl_core::DataSource::Recorded { path: dir.to_string_lossy().into_owned() },
+            nl_core::DataSource::Recorded {
+                path: dir.to_string_lossy().into_owned(),
+            },
         );
         let info = nl_engine::scan(&spec, Path::new(".")).expect("녹화 폴더를 다시 읽지 못했다");
         assert_eq!(info.samples, total, "적재기가 센 샘플 수가 녹화한 프레임 수와 다르다");
-        assert_eq!(info.input_shape, vec![3, 4, 4], "RGBA 회색 프레임은 3채널 4x4 로 읽힌다");
+        assert_eq!(
+            info.input_shape,
+            vec![3, 4, 4],
+            "RGBA 회색 프레임은 3채널 4x4 로 읽힌다"
+        );
         assert_eq!(info.target_shape, vec![1]);
         // 라벨 2 를 썼으니 클래스는 0..=2.
         assert_eq!(info.classes.len(), 3);
@@ -495,16 +544,30 @@ mod tests {
     #[test]
     fn capture_failures_are_reported_and_recording_gives_up() {
         let dir = tmp("failing");
-        let region = Region { monitor: 0, x: 0, y: 0, width: 4, height: 4 };
+        let region = Region {
+            monitor: 0,
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
         let rec = Recorder::start_with(
             &dir,
             region,
             240.0,
             // 계속 실패한다 (fail_first 를 아주 크게).
-            Box::new(FakeSource { n: 0, w: 4, h: 4, fail_first: u32::MAX }),
+            Box::new(FakeSource {
+                n: 0,
+                w: 4,
+                h: 4,
+                fail_first: u32::MAX,
+            }),
         )
         .unwrap();
-        assert!(rec.wait_done(Duration::from_secs(5)), "연속 실패인데 녹화가 끝나지 않았다");
+        assert!(
+            rec.wait_done(Duration::from_secs(5)),
+            "연속 실패인데 녹화가 끝나지 않았다"
+        );
         let err = rec.error().expect("오류가 기록되지 않았다");
         assert!(err.contains("멈춘다"), "{err}");
         assert_eq!(rec.frames_written(), 0);
@@ -514,10 +577,25 @@ mod tests {
     #[test]
     fn transient_failures_do_not_stop_the_recording() {
         let dir = tmp("transient");
-        let region = Region { monitor: 0, x: 0, y: 0, width: 4, height: 4 };
-        let rec =
-            Recorder::start_with(&dir, region, 240.0, Box::new(FakeSource { n: 0, w: 4, h: 4, fail_first: 3 }))
-                .unwrap();
+        let region = Region {
+            monitor: 0,
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let rec = Recorder::start_with(
+            &dir,
+            region,
+            240.0,
+            Box::new(FakeSource {
+                n: 0,
+                w: 4,
+                h: 4,
+                fail_first: 3,
+            }),
+        )
+        .unwrap();
         while rec.frames_written() < 2 {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -538,8 +616,18 @@ mod tests {
         let region = Region::default();
         for bad in [0.0f32, -1.0, f32::NAN] {
             assert!(
-                Recorder::start_with(&dir, region, bad, Box::new(FakeSource { n: 0, w: 2, h: 2, fail_first: 0 }))
-                    .is_err(),
+                Recorder::start_with(
+                    &dir,
+                    region,
+                    bad,
+                    Box::new(FakeSource {
+                        n: 0,
+                        w: 2,
+                        h: 2,
+                        fail_first: 0
+                    })
+                )
+                .is_err(),
                 "fps {bad} 가 통과했다"
             );
         }
@@ -548,7 +636,11 @@ mod tests {
 
     #[test]
     fn a_mismatched_frame_buffer_is_an_error_not_a_panic() {
-        let bad = Frame { width: 4, height: 4, rgba: vec![0; 10] };
+        let bad = Frame {
+            width: 4,
+            height: 4,
+            rgba: vec![0; 10],
+        };
         let dir = tmp("badframe");
         assert!(save_png(&dir.join("x.png"), &bad).is_err());
         std::fs::remove_dir_all(&dir).ok();
@@ -562,7 +654,13 @@ mod tests {
             return;
         }
         let dir = tmp("realscreen");
-        let region = Region { monitor: 0, x: 0, y: 0, width: 0, height: 0 };
+        let region = Region {
+            monitor: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
         let rec = match Recorder::start(&dir, region, 4.0) {
             Ok(r) => r,
             Err(e) => {
@@ -583,8 +681,7 @@ mod tests {
         }
         eprintln!("버린 프레임 {dropped}장");
         assert_eq!(read_labels(&dir).len(), total, "라벨 줄 수와 프레임 수가 다르다");
-        let meta: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
         eprintln!("실제 녹화: {total}장, 백엔드 {}", meta["backend"]);
         std::fs::remove_dir_all(&dir).ok();
     }

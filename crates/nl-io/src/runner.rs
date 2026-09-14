@@ -39,7 +39,7 @@
 //!
 //! ## 누가 부를 수 있나
 //! 이 서버는 파이프라인을 **구동한다**. `Sink::MouseKeyboard` 가 붙어 있으면 요청 하나가 남의 컴퓨터를
-//! 움직이므로, 인증은 기능이 아니라 방어선이다. [`AccessPolicy`] 가 요청마다 세 가지를 본다.
+//! 움직이므로, 인증은 기능이 아니라 방어선이다. `AccessPolicy` 가 요청마다 세 가지를 본다.
 //!
 //! | 조건 | 결과 |
 //! |---|---|
@@ -119,12 +119,23 @@ const STATS_INTERVAL: Duration = Duration::from_secs(1);
 pub enum RunnerEvent {
     Started,
     /// 노드가 값을 냈다 (GUI 위젯 바인딩·디버그 표시).
-    Value { node: PNodeId, value: Value },
+    Value {
+        node: PNodeId,
+        value: Value,
+    },
     /// `Sink::GuiWidget` 로 위젯에 표시할 값.
-    Widget { widget: WidgetId, value: Value },
+    Widget {
+        widget: WidgetId,
+        value: Value,
+    },
     /// 노드가 낸 `Value::Image` 의 축소판. 캔버스·인스펙터 미리보기용으로 노드당 초당 4회까지만 나간다.
     /// 원본 이미지는 [`RunnerEvent::Value`] 로 나가지 않으므로(드롭 정책) 이것이 유일한 이미지 통로다.
-    ValuePreview { node: PNodeId, width: u32, height: u32, rgba: Vec<u8> },
+    ValuePreview {
+        node: PNodeId,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
     /// 틱 루프 상태. 초당 1회. 상태바에 실제 속도를 보여 주는 용도다.
     Stats {
         /// 시작 이후 누적 틱 수.
@@ -135,7 +146,10 @@ pub enum RunnerEvent {
         hz: f32,
     },
     Log(String),
-    Error { node: Option<PNodeId>, message: String },
+    Error {
+        node: Option<PNodeId>,
+        message: String,
+    },
     Stopped,
 }
 
@@ -232,7 +246,13 @@ impl Runner {
             let _ = etx.send(RunnerEvent::Stopped);
             d2.store(true, Ordering::SeqCst);
         })?;
-        Ok(RunnerHandle { events: erx, inputs: itx, stop, done, armed })
+        Ok(RunnerHandle {
+            events: erx,
+            inputs: itx,
+            stop,
+            done,
+            armed,
+        })
     }
 }
 
@@ -270,7 +290,11 @@ pub const HTTP_TOKEN_ENV_PREFIX: &str = "NL_HTTP_TOKEN_";
 /// 서버로 돌릴 때는 실행 환경에서 새 토큰을 주는 편이 낫다.
 /// 포트별 변수가 전체 변수보다 우선한다.
 pub fn token_override(bind: &str) -> Option<String> {
-    let port = bind.trim().rsplit_once(':').map(|(_, p)| p.trim().to_owned()).unwrap_or_default();
+    let port = bind
+        .trim()
+        .rsplit_once(':')
+        .map(|(_, p)| p.trim().to_owned())
+        .unwrap_or_default();
     let by_port = (!port.is_empty())
         .then(|| std::env::var(format!("{HTTP_TOKEN_ENV_PREFIX}{port}")).ok())
         .flatten();
@@ -282,7 +306,10 @@ pub fn token_override(bind: &str) -> Option<String> {
 /// 환경 변수 읽기와 갈라 둔 덕에 시험이 전역 상태를 건드리지 않는다 —
 /// `NL_HTTP_TOKEN` 을 시험 중에 설정하면 **같이 돌던 다른 시험의 서버**가 토큰을 요구하게 된다.
 fn pick_token(by_port: Option<String>, global: Option<String>) -> Option<String> {
-    by_port.or(global).map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
+    by_port
+        .or(global)
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
 }
 /// 모델이 준비되기 전에 온 요청에 돌려주는 503 본문. 영문 `model loading` 을 함께 넣어 두어
 /// 클라이언트가 문자열로도 구분할 수 있게 한다 (상태 코드 503 이 본래 계약이다).
@@ -327,9 +354,13 @@ impl AccessPolicy {
     }
 
     /// 요청을 받아들일지. 거절이면 `(상태 코드, 사유)`.
-    fn check(&self, origin: Option<&str>, host: Option<&str>, auth: Option<&str>, nl_token: Option<&str>)
-        -> Result<(), (u16, String)>
-    {
+    fn check(
+        &self,
+        origin: Option<&str>,
+        host: Option<&str>,
+        auth: Option<&str>,
+        nl_token: Option<&str>,
+    ) -> Result<(), (u16, String)> {
         // 브라우저에서 온 요청은 받지 않는다. 사람이 연 페이지가 몰래 부르는 길을 막는다.
         if let Some(o) = origin {
             return Err((403, format!("브라우저에서 온 요청은 받지 않는다 (Origin: {o})")));
@@ -340,14 +371,21 @@ impl AccessPolicy {
             if !self.allowed_hosts.contains(&h) {
                 return Err((
                     400,
-                    format!("Host 가 이 서버의 주소와 다르다 ({h}). 받는 이름: {}", self.allowed_hosts.join(", ")),
+                    format!(
+                        "Host 가 이 서버의 주소와 다르다 ({h}). 받는 이름: {}",
+                        self.allowed_hosts.join(", ")
+                    ),
                 ));
             }
         }
         // 토큰.
         let Some(want) = &self.token else { return Ok(()) };
         let given = auth
-            .and_then(|a| a.trim().strip_prefix("Bearer ").or_else(|| a.trim().strip_prefix("bearer ")))
+            .and_then(|a| {
+                a.trim()
+                    .strip_prefix("Bearer ")
+                    .or_else(|| a.trim().strip_prefix("bearer "))
+            })
             .map(str::trim)
             .or(nl_token.map(str::trim));
         match given {
@@ -447,19 +485,25 @@ fn respond_json(request: crate::httpd::Request, status: u16, body: &str) -> Resu
 /// 이미지 값을 PNG 로 답한다.
 fn respond_png(request: crate::httpd::Request, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let png = encode_png(width, height, rgba)?;
-    request.respond(200, "image/png", &png).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
+    request
+        .respond(200, "image/png", &png)
+        .map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
 }
 
 /// RGBA8 → PNG 바이트.
 fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let expect = width as usize * height as usize * 4;
     if rgba.len() != expect {
-        return Err(format!("이미지 크기가 맞지 않는다: {width}x{height} 인데 {} 바이트", rgba.len()));
+        return Err(format!(
+            "이미지 크기가 맞지 않는다: {width}x{height} 인데 {} 바이트",
+            rgba.len()
+        ));
     }
     let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
         .ok_or_else(|| "RGBA 버퍼를 이미지로 만들지 못했다".to_string())?;
     let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| format!("PNG 인코딩 실패: {e}"))?;
+    img.write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG 인코딩 실패: {e}"))?;
     Ok(out.into_inner())
 }
 
@@ -474,7 +518,9 @@ fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<Http
             "{bind} 은 바깥에서 닿는 주소라 토큰 없이 열 수 없다              (HttpServer 노드에 token 을 넣거나 127.0.0.1 에 묶어라)"
         ));
     }
-    let server = crate::httpd::Server::bind(bind).map(Arc::new).map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
+    let server = crate::httpd::Server::bind(bind)
+        .map(Arc::new)
+        .map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
     // 접근 정책은 **실제로 묶인 주소**로 만든다. 설정이 `:0` 이면 운영체제가 포트를 골라 주는데,
     // 설정 문자열로 만들면 `Host` 검사가 포트 0 을 기대해 모든 요청을 400 으로 막는다.
     let policy = AccessPolicy::new(&server.local_addr().to_string(), token);
@@ -515,19 +561,18 @@ fn normalize_path(p: &str) -> String {
     if t.is_empty() || t == "/" {
         return "/".into();
     }
-    let with_slash = if t.starts_with('/') { t.to_owned() } else { format!("/{t}") };
+    let with_slash = if t.starts_with('/') {
+        t.to_owned()
+    } else {
+        format!("/{t}")
+    };
     with_slash.trim_end_matches('/').to_owned()
 }
 
 /// accept 전용 루프. 소켓을 받아 **연결마다 짧은 스레드**에 넘긴다.
 ///
 /// 여기서는 한 바이트도 읽지 않는다. 읽기는 전부 [`http_conn_thread`] 가 하고, 그쪽은 마감으로 묶여 있다.
-fn http_accept_loop(
-    server: &crate::httpd::Server,
-    ctx: &ConnContext,
-    stop: &AtomicBool,
-    inflight: &AtomicUsize,
-) {
+fn http_accept_loop(server: &crate::httpd::Server, ctx: &ConnContext, stop: &AtomicBool, inflight: &AtomicUsize) {
     while !stop.load(Ordering::SeqCst) {
         let stream = match server.accept() {
             Ok(Some(s)) => s,
@@ -635,7 +680,10 @@ fn head_phase(stream: std::net::TcpStream, c: &ConnContext) -> Option<crate::htt
         let _ = respond_json(
             request,
             404,
-            &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {})", c.want_path),
+            &format!(
+                "{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {})",
+                c.want_path
+            ),
         );
         return None;
     }
@@ -661,13 +709,21 @@ fn head_phase(stream: std::net::TcpStream, c: &ConnContext) -> Option<crate::htt
 
     let method = request.method().to_owned();
     if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH") {
-        let _ = respond_json(request, 405, &format!("{method} 은 지원하지 않는다 (GET, POST, PUT, PATCH 만)"));
+        let _ = respond_json(
+            request,
+            405,
+            &format!("{method} 은 지원하지 않는다 (GET, POST, PUT, PATCH 만)"),
+        );
         return None;
     }
 
     // 길이를 알려 줬으면 읽기 전에 거른다.
     if request.declared_len().is_some_and(|n| n > MAX_HTTP_REQUEST_BYTES) {
-        let _ = respond_json(request, 413, &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"));
+        let _ = respond_json(
+            request,
+            413,
+            &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"),
+        );
         return None;
     }
 
@@ -685,7 +741,12 @@ impl Drop for InflightGuard {
 
 /// `image/png; charset=x` → `image/png`.
 fn mime_of(content_type: &str) -> String {
-    content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// `image` 크레이트로 디코드할 수 있는 MIME 인가.
@@ -693,7 +754,10 @@ fn mime_of(content_type: &str) -> String {
 /// 실제로 읽히는지는 디코더가 정한다 — 여기서는 "이진 이미지로 받겠다" 는 뜻만 가린다.
 /// (빌드된 feature 에 따라 png·jpeg 만 열릴 수 있다. webp·bmp 는 feature 가 없으면 디코드에서 400 이 난다.)
 fn is_image_mime(mime: &str) -> bool {
-    matches!(mime, "image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/bmp")
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/bmp"
+    )
 }
 
 /// 요청 본문 → 파이프라인 값.
@@ -713,16 +777,20 @@ fn body_to_value(content_type: &str, body: Vec<u8>, query: &str) -> Result<Value
     }
 
     if mime == "multipart/form-data" {
-        let boundary = multipart_boundary(content_type)
-            .ok_or_else(|| "multipart/form-data 인데 boundary 가 없다".to_string())?;
-        let part = first_file_part(&body, &boundary)
-            .ok_or_else(|| "multipart 본문에서 파일 파트를 찾지 못했다 (filename 이 있는 파트가 필요하다)".to_string())?;
+        let boundary =
+            multipart_boundary(content_type).ok_or_else(|| "multipart/form-data 인데 boundary 가 없다".to_string())?;
+        let part = first_file_part(&body, &boundary).ok_or_else(|| {
+            "multipart 본문에서 파일 파트를 찾지 못했다 (filename 이 있는 파트가 필요하다)".to_string()
+        })?;
         let part_mime = mime_of(&part.content_type);
         if is_image_mime(&part_mime) || part.content_type.is_empty() {
             // 파트에 Content-Type 이 없으면 확장자를 믿지 말고 내용으로 판단한다.
             return decode_image(&part.body, if part_mime.is_empty() { "(추측)" } else { &part_mime });
         }
-        return Err(format!("multipart 파일 파트의 형식을 다룰 수 없다: {}", part.content_type));
+        return Err(format!(
+            "multipart 파일 파트의 형식을 다룰 수 없다: {}",
+            part.content_type
+        ));
     }
 
     if mime == "application/octet-stream" {
@@ -733,7 +801,11 @@ fn body_to_value(content_type: &str, body: Vec<u8>, query: &str) -> Result<Value
 
     let text = String::from_utf8(body)
         .map_err(|_| "본문이 UTF-8 이 아니다 (이미지면 Content-Type 을 image/png 처럼 적어라)".to_string())?;
-    Ok(if text.trim().is_empty() { query_to_value(query) } else { text_to_value(&text) })
+    Ok(if text.trim().is_empty() {
+        query_to_value(query)
+    } else {
+        text_to_value(&text)
+    })
 }
 
 /// 이진 이미지 → [`Value::Image`]. 형식은 내용으로 판단한다(헤더는 참고만).
@@ -741,10 +813,13 @@ fn decode_image(bytes: &[u8], mime: &str) -> Result<Value, String> {
     if bytes.is_empty() {
         return Err(format!("{mime} 인데 본문이 비어 있다"));
     }
-    let img = image::load_from_memory(bytes)
-        .map_err(|e| format!("이미지를 읽지 못했다 ({mime}): {e}"))?;
+    let img = image::load_from_memory(bytes).map_err(|e| format!("이미지를 읽지 못했다 ({mime}): {e}"))?;
     let rgba = img.to_rgba8();
-    Ok(Value::Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
+    Ok(Value::Image {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
 }
 
 /// `multipart/form-data; boundary=----abc` → `----abc`. 따옴표는 벗긴다.
@@ -1180,7 +1255,14 @@ fn run_loop(
     stop: &AtomicBool,
     armed: &AtomicBool,
 ) {
-    let Runner { project, pipeline, base_dir, device, arm_input, http_reply_timeout } = runner;
+    let Runner {
+        project,
+        pipeline,
+        base_dir,
+        device,
+        arm_input,
+        http_reply_timeout,
+    } = runner;
     let _ = etx.send(RunnerEvent::Started);
 
     let (order, cyclic) = topo_order(&pipeline);
@@ -1193,7 +1275,10 @@ fn run_loop(
         }
     }
     if order.is_empty() {
-        let _ = etx.send(RunnerEvent::Error { node: None, message: "실행할 노드가 없다".into() });
+        let _ = etx.send(RunnerEvent::Error {
+            node: None,
+            message: "실행할 노드가 없다".into(),
+        });
         return;
     }
 
@@ -1208,7 +1293,14 @@ fn run_loop(
     let stdin_nodes: Vec<PNodeId> = order
         .iter()
         .copied()
-        .filter(|id| matches!(&pipeline.nodes[id].kind, PNodeKind::Source { source: Source::StdinJson }))
+        .filter(|id| {
+            matches!(
+                &pipeline.nodes[id].kind,
+                PNodeKind::Source {
+                    source: Source::StdinJson
+                }
+            )
+        })
         .collect();
     if !stdin_nodes.is_empty() {
         let mut senders = Vec::with_capacity(stdin_nodes.len());
@@ -1253,7 +1345,10 @@ fn run_loop(
             }
         });
         if let Err(e) = spawned {
-            let _ = etx.send(RunnerEvent::Error { node: None, message: format!("stdin 읽기 스레드 생성 실패: {e}") });
+            let _ = etx.send(RunnerEvent::Error {
+                node: None,
+                message: format!("stdin 읽기 스레드 생성 실패: {e}"),
+            });
         }
     }
 
@@ -1262,13 +1357,20 @@ fn run_loop(
     // 틱마다 검사하지 않고, 결과를 노드 상태에 담아 둔 뒤 그대로 쓴다.
     for id in &order {
         let path = match &pipeline.nodes[id].kind {
-            PNodeKind::Source { source: Source::File { path, .. } } => path,
-            PNodeKind::Sink { sink: Sink::File { path, .. } } => path,
+            PNodeKind::Source {
+                source: Source::File { path, .. },
+            } => path,
+            PNodeKind::Sink {
+                sink: Sink::File { path, .. },
+            } => path,
             _ => continue,
         };
         let resolved = resolve_inside(&base_dir, path);
         if let Err(e) = &resolved {
-            let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: e.clone() });
+            let _ = etx.send(RunnerEvent::Error {
+                node: Some(*id),
+                message: e.clone(),
+            });
         }
         states.get_mut(id).expect("상태 미리 생성").file_path = Some(resolved);
     }
@@ -1276,7 +1378,9 @@ fn run_loop(
     // ── 준비: 인바운드 HTTP 서버. 노드마다 소켓 하나를 연다.
     let mut servers: HashMap<PNodeId, HttpServerState> = HashMap::new();
     for id in &order {
-        let PNodeKind::Source { source: Source::HttpServer { bind, path, token } } = &pipeline.nodes[id].kind
+        let PNodeKind::Source {
+            source: Source::HttpServer { bind, path, token },
+        } = &pipeline.nodes[id].kind
         else {
             continue;
         };
@@ -1294,12 +1398,19 @@ fn run_loop(
                     "HTTP 서버 http://{}{} 열림 ({})",
                     srv.local_addr(),
                     normalize_path(path),
-                    if effective.is_some_and(|t| !t.trim().is_empty()) { "토큰 필요" } else { "루프백 전용" }
+                    if effective.is_some_and(|t| !t.trim().is_empty()) {
+                        "토큰 필요"
+                    } else {
+                        "루프백 전용"
+                    }
                 )));
                 servers.insert(*id, srv);
             }
             Err(e) => {
-                let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: e });
+                let _ = etx.send(RunnerEvent::Error {
+                    node: Some(*id),
+                    message: e,
+                });
             }
         }
     }
@@ -1311,12 +1422,12 @@ fn run_loop(
         let mut by_url: BTreeMap<String, (Vec<PNodeId>, Vec<PNodeId>)> = BTreeMap::new();
         for id in &order {
             match &pipeline.nodes[id].kind {
-                PNodeKind::Source { source: Source::WebSocket { url } } => {
-                    by_url.entry(url.clone()).or_default().0.push(*id)
-                }
-                PNodeKind::Sink { sink: Sink::WebSocketSend { url } } => {
-                    by_url.entry(url.clone()).or_default().1.push(*id)
-                }
+                PNodeKind::Source {
+                    source: Source::WebSocket { url },
+                } => by_url.entry(url.clone()).or_default().0.push(*id),
+                PNodeKind::Sink {
+                    sink: Sink::WebSocketSend { url },
+                } => by_url.entry(url.clone()).or_default().1.push(*id),
                 _ => {}
             }
         }
@@ -1330,7 +1441,10 @@ fn run_loop(
                 }
                 Err(e) => {
                     for id in sources.iter().chain(sinks.iter()) {
-                        let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: e.clone() });
+                        let _ = etx.send(RunnerEvent::Error {
+                            node: Some(*id),
+                            message: e.clone(),
+                        });
                     }
                     continue;
                 }
@@ -1354,12 +1468,19 @@ fn run_loop(
                 Ok(handle) => {
                     ws_pool.conns.insert(
                         url,
-                        WsConn { status: status_rx, nodes, handle: Some(handle) },
+                        WsConn {
+                            status: status_rx,
+                            nodes,
+                            handle: Some(handle),
+                        },
                     );
                 }
                 Err(e) => {
                     for id in &nodes {
-                        let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: e.clone() });
+                        let _ = etx.send(RunnerEvent::Error {
+                            node: Some(*id),
+                            message: e.clone(),
+                        });
                     }
                 }
             }
@@ -1375,7 +1496,9 @@ fn run_loop(
     let model_load_started = Instant::now();
     for id in &order {
         let node = &pipeline.nodes[id];
-        let PNodeKind::Model { model, .. } = &node.kind else { continue };
+        let PNodeKind::Model { model, .. } = &node.kind else {
+            continue;
+        };
         let Some(def) = project.models.get(model) else {
             let _ = etx.send(RunnerEvent::Error {
                 node: Some(*id),
@@ -1390,7 +1513,10 @@ fn run_loop(
                 Ok(p) => Some(p),
                 Err(e) => {
                     let message = format!("모델 '{}' 의 가중치 경로를 쓸 수 없다: {e}", def.name);
-                    let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: message.clone() });
+                    let _ = etx.send(RunnerEvent::Error {
+                        node: Some(*id),
+                        message: message.clone(),
+                    });
                     sessions.insert(*id, Err(message));
                     continue;
                 }
@@ -1399,12 +1525,19 @@ fn run_loop(
         };
         match Session::load(def, weights.as_deref(), device) {
             Ok(s) => {
-                let _ = etx.send(RunnerEvent::Log(format!("모델 '{}' 준비 완료 ({})", def.name, s.device_name())));
+                let _ = etx.send(RunnerEvent::Log(format!(
+                    "모델 '{}' 준비 완료 ({})",
+                    def.name,
+                    s.device_name()
+                )));
                 sessions.insert(*id, Ok(s));
             }
             Err(e) => {
                 let message = format!("모델 '{}' 을 올리지 못했다: {e:#}", def.name);
-                let _ = etx.send(RunnerEvent::Error { node: Some(*id), message: message.clone() });
+                let _ = etx.send(RunnerEvent::Error {
+                    node: Some(*id),
+                    message: message.clone(),
+                });
                 sessions.insert(*id, Err(message));
             }
         }
@@ -1424,12 +1557,17 @@ fn run_loop(
     let mut sim = match InputSim::with_armed(arm_input) {
         Ok(s) => s,
         Err(e) => {
-            let _ = etx.send(RunnerEvent::Error { node: None, message: format!("입력 시뮬레이터 준비 실패: {e:#}") });
+            let _ = etx.send(RunnerEvent::Error {
+                node: None,
+                message: format!("입력 시뮬레이터 준비 실패: {e:#}"),
+            });
             return;
         }
     };
     if arm_input {
-        let _ = etx.send(RunnerEvent::Log("마우스·키보드 싱크가 무장됐다 (실제 입력을 보낸다)".into()));
+        let _ = etx.send(RunnerEvent::Log(
+            "마우스·키보드 싱크가 무장됐다 (실제 입력을 보낸다)".into(),
+        ));
     }
 
     let hz = pipeline.tick_hz.clamp(MIN_TICK_HZ, MAX_TICK_HZ);
@@ -1481,7 +1619,11 @@ fn run_loop(
         //    클라이언트가 이미 포기했을 가능성이 크고, 붙잡고 있어 봐야 소켓과 본문만 낭비한다.
         for (id, srv) in servers.iter_mut() {
             let mut expired = 0usize;
-            while srv.pending.front().is_some_and(|(at, _)| at.elapsed() >= http_reply_timeout) {
+            while srv
+                .pending
+                .front()
+                .is_some_and(|(at, _)| at.elapsed() >= http_reply_timeout)
+            {
                 let (_, req) = srv.pending.pop_front().expect("바로 위에서 확인했다");
                 let _ = respond_json(
                     req,
@@ -1495,7 +1637,11 @@ fn run_loop(
             while let Ok(inc) = srv.rx.try_recv() {
                 srv.queued.push_back(inc);
             }
-            while srv.queued.front().is_some_and(|inc| inc.at.elapsed() >= http_reply_timeout) {
+            while srv
+                .queued
+                .front()
+                .is_some_and(|inc| inc.at.elapsed() >= http_reply_timeout)
+            {
                 let inc = srv.queued.pop_front().expect("바로 위에서 확인했다");
                 let _ = respond_json(inc.request, 504, "요청이 큐에서 제한 시간을 넘겼다");
                 expired += 1;
@@ -1572,7 +1718,9 @@ fn run_loop(
                     }
                 }
                 PNodeKind::Model { model, payload } => {
-                    let Some(v) = upstream_value(&pipeline, &values, id) else { continue };
+                    let Some(v) = upstream_value(&pipeline, &values, id) else {
+                        continue;
+                    };
                     let spec = payload
                         .or_else(|| project.models.get(model).and_then(|m| m.payload))
                         .and_then(|pid| project.payloads.get(&pid));
@@ -1593,7 +1741,9 @@ fn run_loop(
                     }
                 }
                 PNodeKind::Logic { logic } => {
-                    let Some(v) = upstream_value(&pipeline, &values, id) else { continue };
+                    let Some(v) = upstream_value(&pipeline, &values, id) else {
+                        continue;
+                    };
                     let st = states.get_mut(&id).expect("상태 미리 생성");
                     match eval_logic(logic, &v, st, tick_start) {
                         Ok(Some(out)) => {
@@ -1612,9 +1762,7 @@ fn run_loop(
                         report(etx, st, Some(id), format!("{name}: {msg}"));
                     }
                     let Some(v) = v else { continue };
-                    if let Err(msg) =
-                        eval_sink(sink, &v, st, tick_start, &mut sim, armed, etx, name, &mut servers)
-                    {
+                    if let Err(msg) = eval_sink(sink, &v, st, tick_start, &mut sim, armed, etx, name, &mut servers) {
                         report(etx, st, Some(id), format!("{name}: {msg}"));
                     }
                 }
@@ -1702,9 +1850,16 @@ fn emit_preview(
     if etx.len() >= IMAGE_BACKLOG_LIMIT {
         return;
     }
-    let Some((w, h, small)) = thumbnail(width, height, rgba) else { return };
+    let Some((w, h, small)) = thumbnail(width, height, rgba) else {
+        return;
+    };
     st.last_preview = Some(now);
-    let _ = etx.send(RunnerEvent::ValuePreview { node, width: w, height: h, rgba: small });
+    let _ = etx.send(RunnerEvent::ValuePreview {
+        node,
+        width: w,
+        height: h,
+        rgba: small,
+    });
 }
 
 /// RGBA8 프레임을 최장변 [`PREVIEW_MAX_SIDE`] 이하로 줄인다. 비율은 그대로 두고,
@@ -1833,10 +1988,18 @@ fn eval_source(
             }
             let cap = st.capturer.as_mut().expect("바로 위에서 만들었다");
             let f = cap.capture(region).map_err(|e| format!("화면 캡처 실패: {e:#}"))?;
-            Ok(Some(Value::Image { width: f.width, height: f.height, rgba: f.rgba }))
+            Ok(Some(Value::Image {
+                width: f.width,
+                height: f.height,
+                rgba: f.rgba,
+            }))
         }
 
-        Source::HttpPoll { url, interval_ms, headers } => {
+        Source::HttpPoll {
+            url,
+            interval_ms,
+            headers,
+        } => {
             // 지난 호출이 끝났으면 결과를 꺼낸다.
             if let Some(rx) = &st.pending_http {
                 match rx.try_recv() {
@@ -1873,7 +2036,9 @@ fn eval_source(
         }
 
         Source::StdinJson => {
-            let Some(rx) = &st.stdin else { return Err("stdin 읽기 스레드가 없다".into()) };
+            let Some(rx) = &st.stdin else {
+                return Err("stdin 읽기 스레드가 없다".into());
+            };
             match rx.try_recv() {
                 Ok(line) => Ok(Some(text_to_value(&line))),
                 Err(TryRecvError::Empty) => Ok(None),
@@ -1937,7 +2102,9 @@ fn resolve_inside(base_dir: &Path, path: &str) -> Result<PathBuf, String> {
     use std::path::Component;
     let p = Path::new(path);
     if p.is_absolute() {
-        return Err(format!("절대 경로는 쓸 수 없다: {path} (프로젝트 폴더 기준 상대 경로만)"));
+        return Err(format!(
+            "절대 경로는 쓸 수 없다: {path} (프로젝트 폴더 기준 상대 경로만)"
+        ));
     }
     let mut rel = PathBuf::new();
     for c in p.components() {
@@ -1945,11 +2112,11 @@ fn resolve_inside(base_dir: &Path, path: &str) -> Result<PathBuf, String> {
             Component::Normal(seg) => rel.push(seg),
             Component::CurDir => {}
             Component::ParentDir => {
-                return Err(format!("경로가 프로젝트 폴더 밖을 가리킨다: {path} ('..' 는 쓸 수 없다)"))
+                return Err(format!(
+                    "경로가 프로젝트 폴더 밖을 가리킨다: {path} ('..' 는 쓸 수 없다)"
+                ))
             }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("절대 경로는 쓸 수 없다: {path}"))
-            }
+            Component::RootDir | Component::Prefix(_) => return Err(format!("절대 경로는 쓸 수 없다: {path}")),
         }
     }
     if rel.as_os_str().is_empty() {
@@ -1963,7 +2130,9 @@ fn resolve_inside(base_dir: &Path, path: &str) -> Result<PathBuf, String> {
     if let Some(parent) = joined.parent() {
         if let Ok(real) = parent.canonicalize() {
             if !real.starts_with(&base_real) {
-                return Err(format!("경로가 프로젝트 폴더 밖을 가리킨다: {path} (심볼릭 링크로 빠져나간다)"));
+                return Err(format!(
+                    "경로가 프로젝트 폴더 밖을 가리킨다: {path} (심볼릭 링크로 빠져나간다)"
+                ));
             }
         }
     }
@@ -1978,11 +2147,19 @@ fn resolve_inside(base_dir: &Path, path: &str) -> Result<PathBuf, String> {
 
 /// 확장자가 이미지면 RGBA 로, 아니면 JSON → 텍스트 순으로 읽는다.
 fn read_file_value(path: &Path) -> Result<Value, String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
         let img = image::open(path).map_err(|e| format!("이미지 {}: {e}", path.display()))?;
         let rgba = img.to_rgba8();
-        return Ok(Value::Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() });
+        return Ok(Value::Image {
+            width: rgba.width(),
+            height: rgba.height(),
+            rgba: rgba.into_raw(),
+        });
     }
     let text = std::fs::read_to_string(path).map_err(|e| format!("파일 {}: {e}", path.display()))?;
     Ok(text_to_value(&text))
@@ -2061,7 +2238,10 @@ fn first_line(s: &str) -> String {
 fn run_model(sess: &mut Session, spec: Option<&PayloadSpec>, v: &Value) -> Result<Value, String> {
     let input = encode_input(spec, v)?;
     let outs = sess.run(&[input]).map_err(|e| format!("추론 실패: {e:#}"))?;
-    let first = outs.into_iter().next().ok_or_else(|| "모델이 출력을 내지 않았다".to_string())?;
+    let first = outs
+        .into_iter()
+        .next()
+        .ok_or_else(|| "모델이 출력을 내지 않았다".to_string())?;
     match spec.and_then(|s| s.outputs.first()) {
         Some(field) => nl_engine::decode(field, &first).map_err(|e| format!("출력 디코딩 실패: {e:#}")),
         None => Ok(Value::Tensor(first)),
@@ -2123,7 +2303,10 @@ fn eval_logic(logic: &Logic, v: &Value, st: &mut NodeState, now: Instant) -> Res
                 .map(|j| Value::Json(j.clone()))
                 .map(Some)
                 .ok_or_else(|| format!("Select: 인덱스 {index} 가 배열 길이 {} 를 넘는다", a.len())),
-            other => Err(format!("Select 는 벡터·텐서·JSON 배열에만 쓸 수 있다 (받은 값: {})", kind_name(other))),
+            other => Err(format!(
+                "Select 는 벡터·텐서·JSON 배열에만 쓸 수 있다 (받은 값: {})",
+                kind_name(other)
+            )),
         },
 
         // 표에 없는 값은 흘리지 않는다 (치환표는 "이 값만 통과" 라는 뜻으로도 쓰인다).
@@ -2144,7 +2327,9 @@ fn eval_logic(logic: &Logic, v: &Value, st: &mut NodeState, now: Instant) -> Res
                 *counts.entry(*x).or_default() += 1;
             }
             // 동률이면 작은 값 (BTreeMap 순회가 오름차순이라 `>` 비교로 자연히 그렇게 된다).
-            let best = counts.into_iter().fold((0i64, 0usize), |acc, (k, c)| if c > acc.1 { (k, c) } else { acc });
+            let best = counts
+                .into_iter()
+                .fold((0i64, 0usize), |acc, (k, c)| if c > acc.1 { (k, c) } else { acc });
             Ok(Some(Value::Number(best.0 as f64)))
         }
     }
@@ -2185,10 +2370,16 @@ fn eval_sink(
                 return Ok(());
             }
             st.last_fire = Some(now);
-            sim.perform(a).map_err(|e| format!("입력 실행 실패({}): {e:#}", input::describe(a)))
+            sim.perform(a)
+                .map_err(|e| format!("입력 실행 실패({}): {e:#}", input::describe(a)))
         }
 
-        Sink::HttpCall { method, url, headers, body_template } => {
+        Sink::HttpCall {
+            method,
+            url,
+            headers,
+            body_template,
+        } => {
             if st.pending_http.is_some() {
                 // 앞 호출이 아직 안 끝났다. 겹쳐 쏘지 않는다.
                 return Ok(());
@@ -2244,9 +2435,7 @@ fn eval_sink(
                 return Err("가리키는 HTTP 서버 노드가 열려 있지 않다".into());
             };
             let Some((_, request)) = srv.pending.pop_front() else {
-                return Err(
-                    "답할 HTTP 요청이 없다 (이미 시간 초과로 닫혔거나, HTTP 서버에서 온 값이 아니다)".into()
-                );
+                return Err("답할 HTTP 요청이 없다 (이미 시간 초과로 닫혔거나, HTTP 서버에서 온 값이 아니다)".into());
             };
             // 이미지가 응답까지 그대로 왔으면 PNG 로 돌려준다 (JSON 에 픽셀을 실을 수는 없다).
             // 중간에 로직을 거쳐 숫자가 됐으면 여느 값처럼 JSON 이다.
@@ -2261,7 +2450,10 @@ fn eval_sink(
                 // 소비자가 밀렸다. 새 프레임을 버려 지연이 쌓이지 않게 한다.
                 return Ok(());
             }
-            let _ = etx.send(RunnerEvent::Widget { widget: *widget, value: v.clone() });
+            let _ = etx.send(RunnerEvent::Widget {
+                widget: *widget,
+                value: v.clone(),
+            });
             Ok(())
         }
 
@@ -2321,7 +2513,10 @@ pub(crate) fn as_f64(v: &Value) -> Result<f64, String> {
             .fold(None::<f32>, |m, x| Some(m.map_or(x, |a| a.max(x))))
             .map(|x| x as f64)
             .ok_or_else(|| "빈 벡터는 숫자로 볼 수 없다".to_string()),
-        Value::Text(s) => s.trim().parse::<f64>().map_err(|_| format!("숫자로 읽을 수 없는 텍스트: {s:?}")),
+        Value::Text(s) => s
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("숫자로 읽을 수 없는 텍스트: {s:?}")),
         Value::Json(j) => json_as_f64(j),
         Value::Tensor(t) => t
             .data
@@ -2338,9 +2533,10 @@ fn json_as_f64(j: &serde_json::Value) -> Result<f64, String> {
     match j {
         serde_json::Value::Number(n) => n.as_f64().ok_or_else(|| format!("숫자로 읽을 수 없다: {n}")),
         serde_json::Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-        serde_json::Value::String(s) => {
-            s.trim().parse::<f64>().map_err(|_| format!("숫자로 읽을 수 없는 문자열: {s:?}"))
-        }
+        serde_json::Value::String(s) => s
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("숫자로 읽을 수 없는 문자열: {s:?}")),
         other => Err(format!("숫자로 볼 수 없는 JSON: {other}")),
     }
 }
@@ -2352,9 +2548,9 @@ pub(crate) fn as_i64(v: &Value) -> Result<i64, String> {
         Value::Numbers(n) => argmax(n).ok_or_else(|| "빈 벡터에는 argmax 가 없다".to_string()),
         Value::Text(s) => {
             let t = s.trim();
-            t.parse::<i64>().or_else(|_| t.parse::<f64>().map(|x| x.round() as i64)).map_err(|_| {
-                format!("정수로 읽을 수 없는 텍스트: {s:?}")
-            })
+            t.parse::<i64>()
+                .or_else(|_| t.parse::<f64>().map(|x| x.round() as i64))
+                .map_err(|_| format!("정수로 읽을 수 없는 텍스트: {s:?}"))
         }
         Value::Json(j) => json_as_f64(j).map(|x| x.round() as i64),
         Value::Tensor(t) => {
@@ -2392,7 +2588,9 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Numbers(n) => json!(n),
         Value::Text(s) => json!(s),
         Value::Json(j) => j.clone(),
-        Value::Image { width, height, rgba } => json!({ "image": { "width": width, "height": height, "bytes": rgba.len() } }),
+        Value::Image { width, height, rgba } => {
+            json!({ "image": { "width": width, "height": height, "bytes": rgba.len() } })
+        }
         Value::Tensor(t) => json!({ "shape": t.shape, "data": t.data }),
     }
 }
@@ -2404,9 +2602,9 @@ mod tests {
 
     use super::*;
     // 소켓을 직접 다루는 시험이 여럿이라 여기서만 쓴다 (본 코드의 읽기는 `httpd` 가 한다).
-    use std::io::Read as _;
     use nl_core::pipeline::{PNode, PNodeKind};
     use nl_core::{ModelDef, Sink, Source};
+    use std::io::Read as _;
 
     fn drain_for(h: &RunnerHandle, timeout: Duration) -> Vec<RunnerEvent> {
         let mut out = Vec::new();
@@ -2438,30 +2636,43 @@ mod tests {
         let mut p = Pipeline::new("무장");
         p.tick_hz = 60.0;
         let timer = p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::Timer { interval_ms: 10 } },
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 10 },
+            },
             [0.0, 0.0],
         ));
         let sink = p.add_node(PNode::new(
-            PNodeKind::Sink { sink: Sink::MouseKeyboard { actions: vec![InputAction::None], cooldown_ms: 0 } },
+            PNodeKind::Sink {
+                sink: Sink::MouseKeyboard {
+                    actions: vec![InputAction::None],
+                    cooldown_ms: 0,
+                },
+            },
             [1.0, 0.0],
         ));
         p.add_link(timer, sink);
 
-        let h = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(!h.is_armed(), "기본은 비무장이다");
 
         h.set_armed(true);
         assert!(h.is_armed());
         // 틱 루프가 바뀐 것을 알아채고 로그를 남긴다.
-        let ev = wait_for(&h, Duration::from_secs(3), |e| {
-            matches!(e, RunnerEvent::Log(m) if m.contains("무장됐다"))
-        });
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(3),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("무장됐다")),
+        );
         assert!(ev.is_some(), "무장 로그가 오지 않았다");
 
         h.set_armed(false);
-        let ev = wait_for(&h, Duration::from_secs(3), |e| {
-            matches!(e, RunnerEvent::Log(m) if m.contains("무장을 풀었다"))
-        });
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(3),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("무장을 풀었다")),
+        );
         assert!(ev.is_some(), "무장 해제 로그가 오지 않았다");
         assert!(!h.is_armed());
 
@@ -2474,7 +2685,12 @@ mod tests {
     fn arm_input_seeds_the_shared_flag() {
         let mut p = Pipeline::new("초기 무장");
         p.tick_hz = 60.0;
-        p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 50 } }, [0.0, 0.0]));
+        p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 50 },
+            },
+            [0.0, 0.0],
+        ));
 
         let mut r = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu);
         r.arm_input = true;
@@ -2492,18 +2708,41 @@ mod tests {
         let mut st = NodeState::default();
         let mut sim = InputSim::new().unwrap();
         // 실제 입력이 나가지 않는 액션만 쓴다.
-        let sink = Sink::MouseKeyboard { actions: vec![InputAction::None], cooldown_ms: 0 };
+        let sink = Sink::MouseKeyboard {
+            actions: vec![InputAction::None],
+            cooldown_ms: 0,
+        };
 
         let armed = AtomicBool::new(true);
         sim.armed = false;
-        eval_sink(&sink, &Value::Number(0.0), &mut st, Instant::now(), &mut sim, &armed, &etx, "n", &mut servers)
-            .unwrap();
+        eval_sink(
+            &sink,
+            &Value::Number(0.0),
+            &mut st,
+            Instant::now(),
+            &mut sim,
+            &armed,
+            &etx,
+            "n",
+            &mut servers,
+        )
+        .unwrap();
         assert!(sim.armed, "플래그가 켜져 있으면 액션 직전에 무장된다");
 
         armed.store(false, Ordering::SeqCst);
         st.last_fire = None;
-        eval_sink(&sink, &Value::Number(0.0), &mut st, Instant::now(), &mut sim, &armed, &etx, "n", &mut servers)
-            .unwrap();
+        eval_sink(
+            &sink,
+            &Value::Number(0.0),
+            &mut st,
+            Instant::now(),
+            &mut sim,
+            &armed,
+            &etx,
+            "n",
+            &mut servers,
+        )
+        .unwrap();
         assert!(!sim.armed, "플래그가 꺼지면 다음 액션부터 비무장이다");
     }
 
@@ -2511,7 +2750,9 @@ mod tests {
 
     #[test]
     fn thumbnail_fits_the_longest_side_and_keeps_the_ratio() {
-        let Value::Image { width, height, rgba } = frame(640, 480) else { unreachable!() };
+        let Value::Image { width, height, rgba } = frame(640, 480) else {
+            unreachable!()
+        };
         let (w, h, small) = thumbnail(width, height, &rgba).unwrap();
         assert_eq!(w, PREVIEW_MAX_SIDE);
         assert_eq!(h, 120, "4:3 비율이 유지된다");
@@ -2519,13 +2760,17 @@ mod tests {
         assert_eq!(small[3], 255, "알파는 그대로다");
 
         // 세로가 긴 그림은 세로가 상한에 맞는다.
-        let Value::Image { width, height, rgba } = frame(100, 400) else { unreachable!() };
+        let Value::Image { width, height, rgba } = frame(100, 400) else {
+            unreachable!()
+        };
         let (w, h, _) = thumbnail(width, height, &rgba).unwrap();
         assert_eq!(h, PREVIEW_MAX_SIDE);
         assert_eq!(w, 40);
 
         // 이미 작으면 그대로.
-        let Value::Image { width, height, rgba } = frame(32, 16) else { unreachable!() };
+        let Value::Image { width, height, rgba } = frame(32, 16) else {
+            unreachable!()
+        };
         let (w, h, small) = thumbnail(width, height, &rgba).unwrap();
         assert_eq!((w, h), (32, 16));
         assert_eq!(small, rgba);
@@ -2547,7 +2792,12 @@ mod tests {
 
         emit_value(&etx, node, &frame(320, 240), &mut st, now);
         match erx.try_recv().expect("미리보기가 와야 한다") {
-            RunnerEvent::ValuePreview { node: n, width, height, rgba } => {
+            RunnerEvent::ValuePreview {
+                node: n,
+                width,
+                height,
+                rgba,
+            } => {
                 assert_eq!(n, node);
                 assert_eq!((width, height), (PREVIEW_MAX_SIDE, 120));
                 assert_eq!(rgba.len(), (width * height * 4) as usize);
@@ -2606,9 +2856,16 @@ mod tests {
     fn stats_arrive_about_once_a_second() {
         let mut p = Pipeline::new("통계");
         p.tick_hz = 60.0;
-        p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 20 } }, [0.0, 0.0]));
+        p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 20 },
+            },
+            [0.0, 0.0],
+        ));
 
-        let h = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, PathBuf::from("."), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let ev = wait_for(&h, Duration::from_secs(4), |e| matches!(e, RunnerEvent::Stats { .. }));
         match ev {
             Some(RunnerEvent::Stats { tick, tick_ms, hz }) => {
@@ -2656,13 +2913,25 @@ mod tests {
     fn timer_threshold_log_runs_and_stops() {
         let mut p = Pipeline::new("t");
         p.tick_hz = 60.0;
-        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 10 } }, [0.0, 0.0]));
-        let thr = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Threshold { value: 0.5 } }, [1.0, 0.0]));
+        let src = p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 10 },
+            },
+            [0.0, 0.0],
+        ));
+        let thr = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Threshold { value: 0.5 },
+            },
+            [1.0, 0.0],
+        ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [2.0, 0.0]));
         assert!(p.add_link(src, thr).is_some());
         assert!(p.add_link(thr, log).is_some());
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("timer"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("timer"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(wait_for(&h, Duration::from_secs(2), |e| matches!(e, RunnerEvent::Started)).is_some());
         assert!(
             wait_for(&h, Duration::from_secs(3), |e| matches!(e, RunnerEvent::Value { .. })).is_some(),
@@ -2677,7 +2946,11 @@ mod tests {
         h.stop();
         assert!(h.wait_done(Duration::from_millis(500)), "stop() 후에도 끝나지 않았다");
         // 12초를 다 기다리지 않고 곧 끝나는지를 본다. 바쁜 기계를 감안해 넉넉히 잡았다.
-        assert!(t.elapsed() < Duration::from_secs(2), "stop 이 너무 느리다: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "stop 이 너무 느리다: {:?}",
+            t.elapsed()
+        );
         assert!(
             wait_for(&h, Duration::from_secs(1), |e| matches!(e, RunnerEvent::Stopped)).is_some(),
             "Stopped 이벤트가 오지 않았다"
@@ -2689,15 +2962,31 @@ mod tests {
         let mut p = Pipeline::new("m");
         p.tick_hz = 60.0;
         let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
-        let sel = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Select { index: 1 } }, [1.0, 0.0]));
+        let sel = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Select { index: 1 },
+            },
+            [1.0, 0.0],
+        ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [2.0, 0.0]));
         p.add_link(src, sel).unwrap();
         p.add_link(sel, log).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("manual"), DevicePref::Cpu).start().unwrap();
-        h.inputs.send(RunnerInput::Manual { node: src, value: Value::Numbers(vec![1.0, 5.0, 2.0]) }).unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("manual"), DevicePref::Cpu)
+            .start()
+            .unwrap();
+        h.inputs
+            .send(RunnerInput::Manual {
+                node: src,
+                value: Value::Numbers(vec![1.0, 5.0, 2.0]),
+            })
+            .unwrap();
 
-        let ev = wait_for(&h, Duration::from_secs(3), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == sel));
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(3),
+            |e| matches!(e, RunnerEvent::Value { node, .. } if *node == sel),
+        );
         match ev {
             Some(RunnerEvent::Value { value, .. }) => assert_eq!(value, Value::Number(5.0)),
             other => panic!("Select 결과가 오지 않았다: {other:?}"),
@@ -2717,22 +3006,43 @@ mod tests {
 
         let mut p = Pipeline::new("model");
         p.tick_hz = 60.0;
-        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 10 } }, [0.0, 0.0]));
-        let m = p.add_node(PNode::new(PNodeKind::Model { model: mid, payload: None }, [1.0, 0.0]));
+        let src = p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 10 },
+            },
+            [0.0, 0.0],
+        ));
+        let m = p.add_node(PNode::new(
+            PNodeKind::Model {
+                model: mid,
+                payload: None,
+            },
+            [1.0, 0.0],
+        ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [2.0, 0.0]));
         p.add_link(src, m).unwrap();
         p.add_link(m, log).unwrap();
 
-        let h = Runner::new(project, p, tmp_dir("model"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(project, p, tmp_dir("model"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         // nl-engine 이 아직 스텁이라 Session::load 가 실패한다. 그래도 루프는 계속 돌아야 한다.
         assert!(
-            wait_for(&h, Duration::from_secs(3), |e| matches!(e, RunnerEvent::Error { node, .. } if *node == Some(m)))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(3),
+                |e| matches!(e, RunnerEvent::Error { node, .. } if *node == Some(m))
+            )
+            .is_some(),
             "모델 오류 이벤트가 오지 않았다"
         );
         assert!(
-            wait_for(&h, Duration::from_secs(3), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == src))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(3),
+                |e| matches!(e, RunnerEvent::Value { node, .. } if *node == src)
+            )
+            .is_some(),
             "모델이 실패한 뒤 타이머가 멈췄다"
         );
         h.stop();
@@ -2743,11 +3053,23 @@ mod tests {
     #[test]
     fn cyclic_nodes_are_reported_not_executed() {
         let mut p = Pipeline::new("cycle");
-        let a = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Select { index: 0 } }, [0.0, 0.0]));
-        let b = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Select { index: 0 } }, [1.0, 0.0]));
+        let a = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Select { index: 0 },
+            },
+            [0.0, 0.0],
+        ));
+        let b = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Select { index: 0 },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(a, b).unwrap();
         p.add_link(b, a).unwrap();
-        let h = Runner::new(Project::new("p"), p, tmp_dir("cycle"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("cycle"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(
             wait_for(&h, Duration::from_secs(2), |e| {
                 matches!(e, RunnerEvent::Error { message, .. } if message.contains("순환"))
@@ -2761,9 +3083,14 @@ mod tests {
 
     #[test]
     fn empty_pipeline_stops_with_an_error() {
-        let h = Runner::new(Project::new("p"), Pipeline::new("빈"), tmp_dir("empty"), DevicePref::Cpu)
-            .start()
-            .unwrap();
+        let h = Runner::new(
+            Project::new("p"),
+            Pipeline::new("빈"),
+            tmp_dir("empty"),
+            DevicePref::Cpu,
+        )
+        .start()
+        .unwrap();
         let evs = drain_for(&h, Duration::from_millis(400));
         assert!(evs.iter().any(|e| matches!(e, RunnerEvent::Error { .. })), "{evs:?}");
         assert!(evs.iter().any(|e| matches!(e, RunnerEvent::Stopped)), "{evs:?}");
@@ -2775,19 +3102,34 @@ mod tests {
         let dir = tmp_dir("filesink");
         let mut p = Pipeline::new("f");
         p.tick_hz = 60.0;
-        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 10 } }, [0.0, 0.0]));
+        let src = p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 10 },
+            },
+            [0.0, 0.0],
+        ));
         let sink = p.add_node(PNode::new(
-            PNodeKind::Sink { sink: Sink::File { path: "out.jsonl".into(), append: true } },
+            PNodeKind::Sink {
+                sink: Sink::File {
+                    path: "out.jsonl".into(),
+                    append: true,
+                },
+            },
             [1.0, 0.0],
         ));
         p.add_link(src, sink).unwrap();
-        let h = Runner::new(Project::new("p"), p, dir.clone(), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, dir.clone(), DevicePref::Cpu)
+            .start()
+            .unwrap();
         std::thread::sleep(Duration::from_millis(200));
         h.stop();
         assert!(h.wait_done(Duration::from_millis(500)));
         let text = std::fs::read_to_string(dir.join("out.jsonl")).expect("싱크가 파일을 만들지 않았다");
         assert!(!text.trim().is_empty(), "파일이 비어 있다");
-        assert!(text.lines().next().unwrap().parse::<f64>().is_ok(), "JSON 숫자 줄이 아니다: {text}");
+        assert!(
+            text.lines().next().unwrap().parse::<f64>().is_ok(),
+            "JSON 숫자 줄이 아니다: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2805,10 +3147,16 @@ mod tests {
         let v = Value::Number(3.0);
         assert_eq!(eval_logic(&logic, &v, &mut s, t0).unwrap(), Some(Value::Number(3.0)));
         // 같은 값, 창 안 → 버린다.
-        assert_eq!(eval_logic(&logic, &v, &mut s, t0 + Duration::from_millis(100)).unwrap(), None);
+        assert_eq!(
+            eval_logic(&logic, &v, &mut s, t0 + Duration::from_millis(100)).unwrap(),
+            None
+        );
         // 다른 값은 즉시 통과.
         let other = Value::Number(4.0);
-        assert_eq!(eval_logic(&logic, &other, &mut s, t0 + Duration::from_millis(150)).unwrap(), Some(other.clone()));
+        assert_eq!(
+            eval_logic(&logic, &other, &mut s, t0 + Duration::from_millis(150)).unwrap(),
+            Some(other.clone())
+        );
         // 창을 지나면 같은 값도 다시 통과.
         assert_eq!(
             eval_logic(&logic, &other, &mut s, t0 + Duration::from_millis(1300)).unwrap(),
@@ -2837,8 +3185,14 @@ mod tests {
         let mut s = st();
         let logic = Logic::Threshold { value: 0.5 };
         let now = Instant::now();
-        assert_eq!(eval_logic(&logic, &Value::Number(0.4), &mut s, now).unwrap(), Some(Value::Number(0.0)));
-        assert_eq!(eval_logic(&logic, &Value::Number(0.5), &mut s, now).unwrap(), Some(Value::Number(1.0)));
+        assert_eq!(
+            eval_logic(&logic, &Value::Number(0.4), &mut s, now).unwrap(),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            eval_logic(&logic, &Value::Number(0.5), &mut s, now).unwrap(),
+            Some(Value::Number(1.0))
+        );
         // 벡터는 최댓값 기준.
         assert_eq!(
             eval_logic(&logic, &Value::Numbers(vec![0.1, 0.9]), &mut s, now).unwrap(),
@@ -2853,7 +3207,10 @@ mod tests {
         table.insert(1i64, 7i64);
         let logic = Logic::Map { table };
         let now = Instant::now();
-        assert_eq!(eval_logic(&logic, &Value::Number(1.0), &mut s, now).unwrap(), Some(Value::Number(7.0)));
+        assert_eq!(
+            eval_logic(&logic, &Value::Number(1.0), &mut s, now).unwrap(),
+            Some(Value::Number(7.0))
+        );
         assert_eq!(eval_logic(&logic, &Value::Number(2.0), &mut s, now).unwrap(), None);
     }
 
@@ -2877,8 +3234,16 @@ mod tests {
         assert_eq!(as_i64(&Value::Json(serde_json::json!(3))).unwrap(), 3);
         assert_eq!(as_i64(&Value::Json(serde_json::json!(true))).unwrap(), 1);
         assert_eq!(as_i64(&Value::Tensor(HostTensor::scalar(2.0))).unwrap(), 2);
-        assert_eq!(as_i64(&Value::Tensor(HostTensor::new(vec![1, 3], vec![0.0, 9.0, 1.0]))).unwrap(), 1);
-        assert!(as_i64(&Value::Image { width: 1, height: 1, rgba: vec![0; 4] }).is_err());
+        assert_eq!(
+            as_i64(&Value::Tensor(HostTensor::new(vec![1, 3], vec![0.0, 9.0, 1.0]))).unwrap(),
+            1
+        );
+        assert!(as_i64(&Value::Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4]
+        })
+        .is_err());
         assert!(as_i64(&Value::Text("사과".into())).is_err());
     }
 
@@ -2891,11 +3256,18 @@ mod tests {
 
     #[test]
     fn value_to_json_keeps_json_as_is_and_quotes_text() {
-        assert_eq!(value_to_json(&Value::Json(serde_json::json!({"a":1}))), serde_json::json!({"a":1}));
+        assert_eq!(
+            value_to_json(&Value::Json(serde_json::json!({"a":1}))),
+            serde_json::json!({"a":1})
+        );
         assert_eq!(value_to_json(&Value::Text("안녕".into())).to_string(), "\"안녕\"");
         assert_eq!(value_to_json(&Value::Number(2.0)).to_string(), "2.0");
         // 이미지는 바이트를 통째로 싣지 않는다.
-        let j = value_to_json(&Value::Image { width: 2, height: 1, rgba: vec![0; 8] });
+        let j = value_to_json(&Value::Image {
+            width: 2,
+            height: 1,
+            rgba: vec![0; 8],
+        });
         assert_eq!(j["image"]["width"], serde_json::json!(2));
         assert_eq!(j["image"]["bytes"], serde_json::json!(8));
     }
@@ -2945,7 +3317,11 @@ mod tests {
             eval_source(&Source::Manual, id, s, Instant::now(), w, m, &mut servers).unwrap()
         };
         assert_eq!(call(&mut s, &mut manual, &mut widgets), Some(Value::Number(1.0)));
-        assert_eq!(call(&mut s, &mut manual, &mut widgets), None, "수동 입력은 한 번만 쓰인다");
+        assert_eq!(
+            call(&mut s, &mut manual, &mut widgets),
+            None,
+            "수동 입력은 한 번만 쓰인다"
+        );
     }
 
     #[test]
@@ -2954,8 +3330,16 @@ mod tests {
         let src = Source::WebSocket { url: "ws://x".into() };
         let (mut m, mut w) = (HashMap::new(), HashMap::new());
         let mut servers = HashMap::new();
-        let e = eval_source(&src, PNodeId::from_u128(1), &mut s, Instant::now(), &mut w, &mut m, &mut servers)
-            .unwrap_err();
+        let e = eval_source(
+            &src,
+            PNodeId::from_u128(1),
+            &mut s,
+            Instant::now(),
+            &mut w,
+            &mut m,
+            &mut servers,
+        )
+        .unwrap_err();
         assert!(e.contains("ws://x"), "{e}");
     }
 
@@ -2970,14 +3354,50 @@ mod tests {
         let now = Instant::now();
 
         let mut servers = HashMap::new();
-        eval_sink(&sink, &Value::Text("그대로".into()), &mut s, now, &mut sim, &ARMED_OFF, &etx, "n", &mut servers).unwrap();
-        assert_eq!(rx.try_recv().unwrap(), "그대로", "텍스트는 따옴표 없이 그대로 나가야 한다");
+        eval_sink(
+            &sink,
+            &Value::Text("그대로".into()),
+            &mut s,
+            now,
+            &mut sim,
+            &ARMED_OFF,
+            &etx,
+            "n",
+            &mut servers,
+        )
+        .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            "그대로",
+            "텍스트는 따옴표 없이 그대로 나가야 한다"
+        );
 
-        eval_sink(&sink, &Value::Number(3.0), &mut s, now, &mut sim, &ARMED_OFF, &etx, "n", &mut servers).unwrap();
+        eval_sink(
+            &sink,
+            &Value::Number(3.0),
+            &mut s,
+            now,
+            &mut sim,
+            &ARMED_OFF,
+            &etx,
+            "n",
+            &mut servers,
+        )
+        .unwrap();
         assert_eq!(rx.try_recv().unwrap(), "3.0");
 
-        eval_sink(&sink, &Value::Json(serde_json::json!({"a":1})), &mut s, now, &mut sim, &ARMED_OFF, &etx, "n", &mut servers)
-            .unwrap();
+        eval_sink(
+            &sink,
+            &Value::Json(serde_json::json!({"a":1})),
+            &mut s,
+            now,
+            &mut sim,
+            &ARMED_OFF,
+            &etx,
+            "n",
+            &mut servers,
+        )
+        .unwrap();
         assert_eq!(rx.try_recv().unwrap(), r#"{"a":1}"#);
     }
 
@@ -3010,11 +3430,20 @@ mod tests {
 
     /// 서버가 실제로 뜰 때까지 기다린다 (Log 이벤트로 확인).
     fn wait_server_up(h: &RunnerHandle) -> String {
-        let ev = wait_for(h, Duration::from_secs(10), |e| matches!(e, RunnerEvent::Log(m) if m.contains("HTTP 서버")))
-            .expect("HTTP 서버가 열리지 않았다");
-        let RunnerEvent::Log(line) = ev else { panic!("로그가 아니다") };
+        let ev = wait_for(
+            h,
+            Duration::from_secs(10),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("HTTP 서버")),
+        )
+        .expect("HTTP 서버가 열리지 않았다");
+        let RunnerEvent::Log(line) = ev else {
+            panic!("로그가 아니다")
+        };
         // `HTTP 서버 http://127.0.0.1:39481/infer 열림 (…)` 에서 주소만 뽑는다.
-        let rest = line.split("http://").nth(1).unwrap_or_else(|| panic!("주소가 없다: {line}"));
+        let rest = line
+            .split("http://")
+            .nth(1)
+            .unwrap_or_else(|| panic!("주소가 없다: {line}"));
         let end = rest.find(['/', ' ']).unwrap_or(rest.len());
         rest[..end].to_owned()
     }
@@ -3025,12 +3454,24 @@ mod tests {
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
         // 본문 {"x":[1,9,2]} → Select 로 x 를 꺼낸다.
-        let pick = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Select { index: 1 } }, [1.0, 0.0]));
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [2.0, 0.0]));
+        let pick = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Select { index: 1 },
+            },
+            [1.0, 0.0],
+        ));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [2.0, 0.0],
+        ));
         p.add_link(server, pick).unwrap();
         p.add_link(pick, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httpsrv"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpsrv"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
 
         let res = crate::http::call(
@@ -3042,7 +3483,11 @@ mod tests {
         )
         .expect("요청이 실패했다");
         assert_eq!(res.status, 200, "본문: {}", res.body);
-        assert!(res.content_type.contains("application/json"), "content-type: {}", res.content_type);
+        assert!(
+            res.content_type.contains("application/json"),
+            "content-type: {}",
+            res.content_type
+        );
         // JSON 배열의 1번 원소. 정수는 정수 그대로 돌아온다 (JSON 값은 변환 없이 지나간다).
         assert_eq!(res.json().expect("JSON 이 아니다"), serde_json::json!(9));
 
@@ -3066,10 +3511,17 @@ mod tests {
         let mut p = Pipeline::new("api");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/q");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httpq"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpq"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
 
         let res = crate::http::call(
@@ -3092,13 +3544,26 @@ mod tests {
         let mut p = Pipeline::new("api");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
-        let h = Runner::new(Project::new("p"), p, tmp_dir("http404"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("http404"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
 
-        let res = crate::http::call("GET", &format!("http://{addr}/nope"), &BTreeMap::new(), None, Duration::from_secs(5))
-            .expect("요청이 실패했다");
+        let res = crate::http::call(
+            "GET",
+            &format!("http://{addr}/nope"),
+            &BTreeMap::new(),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("요청이 실패했다");
         assert_eq!(res.status, 404);
         assert!(res.json().unwrap()["error"].is_string(), "본문: {}", res.body);
 
@@ -3118,7 +3583,10 @@ mod tests {
         p.add_link(server, log).unwrap();
 
         let mut runner = Runner::new(Project::new("p"), p, tmp_dir("http504"), DevicePref::Cpu);
-        assert_eq!(runner.http_reply_timeout, HTTP_REPLY_TIMEOUT, "기본값이 상수와 달라졌다");
+        assert_eq!(
+            runner.http_reply_timeout, HTTP_REPLY_TIMEOUT,
+            "기본값이 상수와 달라졌다"
+        );
         runner.http_reply_timeout = Duration::from_millis(300);
         let h = runner.start().unwrap();
         let addr = wait_server_up(&h);
@@ -3146,9 +3614,16 @@ mod tests {
         let mut p = Pipeline::new("api");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httpstop"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpstop"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
 
         // 살아 있을 때는 답한다.
@@ -3159,7 +3634,11 @@ mod tests {
         let t = Instant::now();
         h.stop();
         assert!(h.wait_done(Duration::from_secs(2)), "stop 후에도 끝나지 않았다");
-        assert!(t.elapsed() < Duration::from_secs(2), "HTTP 서버 정리가 느리다: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "HTTP 서버 정리가 느리다: {:?}",
+            t.elapsed()
+        );
 
         // 소켓이 닫혔으니 새 연결은 거부된다.
         let mut refused = false;
@@ -3184,16 +3663,27 @@ mod tests {
         let mut p = Pipeline::new("api");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("http503"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("http503"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
 
         // 준비가 끝났다는 로그가 오기 전까지는 503 만 나온다.
         assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(5),
+                |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+            )
+            .is_some(),
             "준비 완료 로그가 오지 않았다"
         );
 
@@ -3221,7 +3711,11 @@ mod tests {
         assert_eq!(res.status, 503);
         let body = res.json().expect("503 본문이 JSON 이 아니다");
         assert_eq!(body["status"], serde_json::json!(503));
-        assert!(body["error"].as_str().unwrap().contains("model loading"), "본문: {}", res.body);
+        assert!(
+            body["error"].as_str().unwrap().contains("model loading"),
+            "본문: {}",
+            res.body
+        );
         // 큐에 남지 않았다 — 준비되면 낡은 요청이 되살아나지 않는다.
         assert!(srv.rx.try_recv().is_err(), "503 으로 돌려보낸 요청이 큐에 들어갔다");
 
@@ -3233,7 +3727,10 @@ mod tests {
             let r = crate::http::call("POST", &url2, &BTreeMap::new(), Some("2"), Duration::from_secs(5));
             let _ = tx.send(r.map(|x| x.status).unwrap_or(0));
         });
-        let inc = srv.rx.recv_timeout(Duration::from_secs(5)).expect("준비 뒤 요청이 오지 않았다");
+        let inc = srv
+            .rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("준비 뒤 요청이 오지 않았다");
         // 본문 "2" 는 JSON 으로 읽히므로 Json(2) 이다 (텍스트보다 JSON 을 먼저 시도한다).
         assert_eq!(inc.value, Value::Json(serde_json::json!(2)));
         respond_json(inc.request, 200, "2").unwrap();
@@ -3246,9 +3743,7 @@ mod tests {
 
     /// 작은 PNG 한 장을 바이트로.
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
-        let img = image::RgbaImage::from_fn(w, h, |x, y| {
-            image::Rgba([(x * 20) as u8, (y * 20) as u8, 0x40, 255])
-        });
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 20) as u8, (y * 20) as u8, 0x40, 255]));
         let mut out = std::io::Cursor::new(Vec::new());
         img.write_to(&mut out, image::ImageFormat::Png).unwrap();
         out.into_inner()
@@ -3270,7 +3765,10 @@ mod tests {
             Value::Image { .. }
         ));
         // 헤더가 jpeg 라고 해도 내용으로 판단한다 (PNG 가 들어오면 PNG 로 읽힌다).
-        assert!(matches!(body_to_value("image/jpeg", png, "").unwrap(), Value::Image { .. }));
+        assert!(matches!(
+            body_to_value("image/jpeg", png, "").unwrap(),
+            Value::Image { .. }
+        ));
     }
 
     #[test]
@@ -3296,10 +3794,19 @@ mod tests {
 
     #[test]
     fn text_and_query_bodies_still_work() {
-        assert_eq!(body_to_value("application/json", b"[1,2]".to_vec(), "").unwrap(), Value::Json(serde_json::json!([1, 2])));
-        assert_eq!(body_to_value("text/plain", "그냥 글".as_bytes().to_vec(), "").unwrap(), Value::Text("그냥 글".into()));
+        assert_eq!(
+            body_to_value("application/json", b"[1,2]".to_vec(), "").unwrap(),
+            Value::Json(serde_json::json!([1, 2]))
+        );
+        assert_eq!(
+            body_to_value("text/plain", "그냥 글".as_bytes().to_vec(), "").unwrap(),
+            Value::Text("그냥 글".into())
+        );
         // 본문이 비면 쿼리스트링.
-        assert_eq!(body_to_value("", Vec::new(), "a=1").unwrap(), Value::Json(serde_json::json!({"a": "1"})));
+        assert_eq!(
+            body_to_value("", Vec::new(), "a=1").unwrap(),
+            Value::Json(serde_json::json!({"a": "1"}))
+        );
     }
 
     #[test]
@@ -3341,8 +3848,14 @@ mod tests {
 
     #[test]
     fn boundary_is_read_from_the_content_type() {
-        assert_eq!(multipart_boundary("multipart/form-data; boundary=abc").as_deref(), Some("abc"));
-        assert_eq!(multipart_boundary("multipart/form-data; boundary=\"a b\"").as_deref(), Some("a b"));
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=abc").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=\"a b\"").as_deref(),
+            Some("a b")
+        );
         assert_eq!(multipart_boundary("multipart/form-data"), None);
     }
 
@@ -3365,14 +3878,25 @@ mod tests {
         let mut p = Pipeline::new("이미지 API");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httpbin"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpbin"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
         assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(5),
+                |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+            )
+            .is_some(),
             "준비 완료 로그가 오지 않았다"
         );
 
@@ -3394,7 +3918,10 @@ mod tests {
         let body = &raw[split + 4..];
 
         assert!(head_text.starts_with("HTTP/1.1 200"), "응답 머리: {head_text}");
-        assert!(head_text.to_ascii_lowercase().contains("content-type: image/png"), "응답 머리: {head_text}");
+        assert!(
+            head_text.to_ascii_lowercase().contains("content-type: image/png"),
+            "응답 머리: {head_text}"
+        );
         let back = image::load_from_memory(body).expect("응답이 PNG 가 아니다");
         assert_eq!((back.width(), back.height()), (8, 5), "돌아온 이미지 크기가 다르다");
 
@@ -3410,14 +3937,31 @@ mod tests {
         let mut p = Pipeline::new("이미지 → 로직");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let logic = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Debounce { ms: 0 } }, [1.0, 0.0]));
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [2.0, 0.0]));
+        let logic = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Debounce { ms: 0 },
+            },
+            [1.0, 0.0],
+        ));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [2.0, 0.0],
+        ));
         p.add_link(server, logic).unwrap();
         p.add_link(logic, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httpimg2"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpimg2"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
-        assert!(wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))).is_some());
+        assert!(wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+        )
+        .is_some());
 
         let png = png_bytes(4, 4);
         let mut sock = std::net::TcpStream::connect(&addr).unwrap();
@@ -3432,7 +3976,11 @@ mod tests {
         sock.read_to_end(&mut raw).unwrap();
         let head_text = String::from_utf8_lossy(&raw).into_owned();
         assert!(head_text.starts_with("HTTP/1.1 200"), "{head_text}");
-        assert!(head_text.to_ascii_lowercase().contains("image/png"), "{}", &head_text[..head_text.len().min(300)]);
+        assert!(
+            head_text.to_ascii_lowercase().contains("image/png"),
+            "{}",
+            &head_text[..head_text.len().min(300)]
+        );
 
         h.stop();
         assert!(h.wait_done(Duration::from_secs(2)));
@@ -3444,8 +3992,14 @@ mod tests {
     fn a_token_is_accepted_from_either_header() {
         let p = AccessPolicy::new("127.0.0.1:8799", Some("s3cret"));
         assert!(p.check(None, None, Some("Bearer s3cret"), None).is_ok());
-        assert!(p.check(None, None, Some("bearer s3cret"), None).is_ok(), "소문자 bearer 도 받는다");
-        assert!(p.check(None, None, None, Some("s3cret")).is_ok(), "X-NL-Token 도 받는다");
+        assert!(
+            p.check(None, None, Some("bearer s3cret"), None).is_ok(),
+            "소문자 bearer 도 받는다"
+        );
+        assert!(
+            p.check(None, None, None, Some("s3cret")).is_ok(),
+            "X-NL-Token 도 받는다"
+        );
         // 앞뒤 공백은 무시한다.
         assert!(p.check(None, None, Some("Bearer  s3cret "), None).is_ok());
     }
@@ -3468,7 +4022,9 @@ mod tests {
         let p = AccessPolicy::new("127.0.0.1:8799", None);
         assert!(p.check(None, None, None, None).is_ok());
         // 빈 토큰은 없는 것과 같다.
-        assert!(AccessPolicy::new("127.0.0.1:8799", Some("   ")).check(None, None, None, None).is_ok());
+        assert!(AccessPolicy::new("127.0.0.1:8799", Some("   "))
+            .check(None, None, None, None)
+            .is_ok());
     }
 
     #[test]
@@ -3476,7 +4032,12 @@ mod tests {
         for token in [None, Some("s3cret")] {
             let p = AccessPolicy::new("127.0.0.1:8799", token);
             let (code, why) = p
-                .check(Some("https://evil.example"), Some("127.0.0.1:8799"), Some("Bearer s3cret"), None)
+                .check(
+                    Some("https://evil.example"),
+                    Some("127.0.0.1:8799"),
+                    Some("Bearer s3cret"),
+                    None,
+                )
                 .unwrap_err();
             assert_eq!(code, 403, "{why}");
             assert!(why.contains("브라우저"), "{why}");
@@ -3490,7 +4051,13 @@ mod tests {
     fn a_foreign_host_header_is_refused() {
         let p = AccessPolicy::new("127.0.0.1:8799", None);
         // 바인드 주소와 localhost 는 받는다 (포트가 붙든 말든).
-        for ok in ["127.0.0.1:8799", "127.0.0.1", "localhost:8799", "localhost", "LOCALHOST"] {
+        for ok in [
+            "127.0.0.1:8799",
+            "127.0.0.1",
+            "localhost:8799",
+            "localhost",
+            "LOCALHOST",
+        ] {
             assert!(p.check(None, Some(ok), None, None).is_ok(), "{ok} 가 거부됐다");
         }
         // 남의 이름을 태워 온 요청은 막는다 (DNS rebinding).
@@ -3508,7 +4075,10 @@ mod tests {
         let p = AccessPolicy::new("0.0.0.0:8799", Some("t"));
         assert!(p.check(None, Some("0.0.0.0:8799"), None, Some("t")).is_ok());
         // 루프백이 아니면 localhost 를 덤으로 받지 않는다.
-        assert_eq!(p.check(None, Some("localhost:8799"), None, Some("t")).unwrap_err().0, 400);
+        assert_eq!(
+            p.check(None, Some("localhost:8799"), None, Some("t")).unwrap_err().0,
+            400
+        );
     }
 
     #[test]
@@ -3546,15 +4116,24 @@ mod tests {
         let mut p = Pipeline::new("보안 API");
         p.tick_hz = 120.0;
         let server = http_server_node_with(&mut p, ANY_ADDR, "/infer", Some("s3cret"));
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httpauth"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httpauth"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
-        assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
-                .is_some()
-        );
+        assert!(wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+        )
+        .is_some());
         let url = format!("http://{addr}/infer");
 
         // 토큰 없이 → 401.
@@ -3589,15 +4168,24 @@ mod tests {
         let mut p = Pipeline::new("보안 API");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httporigin"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httporigin"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
-        assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
-                .is_some()
-        );
+        assert!(wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+        )
+        .is_some());
         let url = format!("http://{addr}/infer");
 
         let mut headers = BTreeMap::new();
@@ -3619,15 +4207,24 @@ mod tests {
         let mut p = Pipeline::new("보안 API");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("httphost"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("httphost"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
-        assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
-                .is_some()
-        );
+        assert!(wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+        )
+        .is_some());
 
         // `http::call` 은 URI 에서 Host 를 만든다. 남의 이름을 태우려면 소켓으로 직접 보낸다.
         use std::io::Write as _;
@@ -3656,7 +4253,10 @@ mod tests {
         let base = tmp_dir("inside");
         // 상대 경로는 된다.
         assert_eq!(resolve_inside(&base, "out.jsonl").unwrap(), base.join("out.jsonl"));
-        assert_eq!(resolve_inside(&base, "sub/out.jsonl").unwrap(), base.join("sub/out.jsonl"));
+        assert_eq!(
+            resolve_inside(&base, "sub/out.jsonl").unwrap(),
+            base.join("sub/out.jsonl")
+        );
         assert_eq!(resolve_inside(&base, "./a.txt").unwrap(), base.join("a.txt"));
 
         // 절대 경로·상위 이동은 안 된다.
@@ -3704,14 +4304,26 @@ mod tests {
 
         let mut p = Pipeline::new("탈출");
         p.tick_hz = 120.0;
-        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 5 } }, [0.0, 0.0]));
+        let src = p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 5 },
+            },
+            [0.0, 0.0],
+        ));
         let sink = p.add_node(PNode::new(
-            PNodeKind::Sink { sink: Sink::File { path: victim.to_string_lossy().into_owned(), append: false } },
+            PNodeKind::Sink {
+                sink: Sink::File {
+                    path: victim.to_string_lossy().into_owned(),
+                    append: false,
+                },
+            },
             [1.0, 0.0],
         ));
         p.add_link(src, sink).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, base.clone(), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, base.clone(), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(
             wait_for(&h, Duration::from_secs(3), |e| {
                 matches!(e, RunnerEvent::Error { node, message } if *node == Some(sink) && message.contains("절대 경로"))
@@ -3723,7 +4335,11 @@ mod tests {
         h.stop();
         assert!(h.wait_done(Duration::from_secs(2)));
 
-        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "원래 내용", "폴더 밖 파일이 덮어써졌다");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "원래 내용",
+            "폴더 밖 파일이 덮어써졌다"
+        );
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&outside).ok();
     }
@@ -3734,14 +4350,26 @@ mod tests {
         let base = tmp_dir("filesink-ok");
         let mut p = Pipeline::new("정상");
         p.tick_hz = 120.0;
-        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Timer { interval_ms: 5 } }, [0.0, 0.0]));
+        let src = p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 5 },
+            },
+            [0.0, 0.0],
+        ));
         let sink = p.add_node(PNode::new(
-            PNodeKind::Sink { sink: Sink::File { path: "logs/out.jsonl".into(), append: true } },
+            PNodeKind::Sink {
+                sink: Sink::File {
+                    path: "logs/out.jsonl".into(),
+                    append: true,
+                },
+            },
             [1.0, 0.0],
         ));
         p.add_link(src, sink).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, base.clone(), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, base.clone(), DevicePref::Cpu)
+            .start()
+            .unwrap();
         std::thread::sleep(Duration::from_millis(250));
         h.stop();
         assert!(h.wait_done(Duration::from_secs(2)));
@@ -3757,13 +4385,20 @@ mod tests {
         let mut p = Pipeline::new("읽기 탈출");
         p.tick_hz = 120.0;
         let src = p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::File { path: "../../etc/passwd".into(), interval_ms: 10 } },
+            PNodeKind::Source {
+                source: Source::File {
+                    path: "../../etc/passwd".into(),
+                    interval_ms: 10,
+                },
+            },
             [0.0, 0.0],
         ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
         p.add_link(src, log).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, base.clone(), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, base.clone(), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(
             wait_for(&h, Duration::from_secs(3), |e| {
                 matches!(e, RunnerEvent::Error { node, message } if *node == Some(src) && message.contains("밖을 가리킨다"))
@@ -3792,7 +4427,10 @@ mod tests {
         // 받는 쪽이 사라지면 알린다.
         let (tx2, rx2) = crossbeam_channel::bounded::<i32>(1);
         drop(rx2);
-        assert!(matches!(send_dropping_oldest(&tx2, &crossbeam_channel::bounded::<i32>(1).1, 1), Pushed::Disconnected));
+        assert!(matches!(
+            send_dropping_oldest(&tx2, &crossbeam_channel::bounded::<i32>(1).1, 1),
+            Pushed::Disconnected
+        ));
         let _ = tx2;
     }
 
@@ -3810,7 +4448,12 @@ mod tests {
         assert!(notice.contains("wss://"), "{notice}");
 
         // 다른 스킴은 거부.
-        for bad in ["http://example.com", "https://example.com", "file:///etc/passwd", "example.com"] {
+        for bad in [
+            "http://example.com",
+            "https://example.com",
+            "file:///etc/passwd",
+            "example.com",
+        ] {
             let err = check_ws_url(bad).unwrap_err();
             assert!(err.contains("ws://"), "{bad}: {err}");
         }
@@ -3831,13 +4474,19 @@ mod tests {
         let mut p = Pipeline::new("잘못된 ws");
         p.tick_hz = 60.0;
         let ws = p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::WebSocket { url: "http://example.com".into() } },
+            PNodeKind::Source {
+                source: Source::WebSocket {
+                    url: "http://example.com".into(),
+                },
+            },
             [0.0, 0.0],
         ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
         p.add_link(ws, log).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("wsscheme"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsscheme"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(
             wait_for(&h, Duration::from_secs(3), |e| {
                 matches!(e, RunnerEvent::Error { node, message } if *node == Some(ws) && message.contains("ws://"))
@@ -3854,7 +4503,10 @@ mod tests {
     #[test]
     fn a_port_specific_token_wins_over_the_global_one() {
         // 결정 로직만 본다 — 전역 환경 변수를 건드리면 같이 돌던 시험의 서버가 토큰을 요구하게 된다.
-        assert_eq!(pick_token(Some("포트".into()), Some("전체".into())).as_deref(), Some("포트"));
+        assert_eq!(
+            pick_token(Some("포트".into()), Some("전체".into())).as_deref(),
+            Some("포트")
+        );
         assert_eq!(pick_token(None, Some("전체".into())).as_deref(), Some("전체"));
         assert_eq!(pick_token(Some("포트".into()), None).as_deref(), Some("포트"));
         assert_eq!(pick_token(None, None), None);
@@ -3892,13 +4544,24 @@ mod tests {
         let mut p = Pipeline::new("echo");
         p.tick_hz = 120.0;
         let server = http_server_node(&mut p, ANY_ADDR, "/infer");
-        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
         p.add_link(server, reply).unwrap();
-        let h = Runner::new(Project::new("p"), p, tmp_dir(tag), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir(tag), DevicePref::Cpu)
+            .start()
+            .unwrap();
         let addr = wait_server_up(&h);
         assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(5),
+                |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작"))
+            )
+            .is_some(),
             "준비 완료 로그가 오지 않았다"
         );
         (h, addr)
@@ -3906,7 +4569,11 @@ mod tests {
 
     /// 응답의 상태 줄만 읽는다.
     fn status_line(raw: &[u8]) -> String {
-        String::from_utf8_lossy(raw).lines().next().unwrap_or_default().to_owned()
+        String::from_utf8_lossy(raw)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// 헤더를 1바이트씩 천천히 보내는 클라이언트는 타임아웃으로 끊기고,
@@ -3977,7 +4644,9 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut slow = Vec::new();
         for _ in 0..8 {
-            let Ok(mut sock) = std::net::TcpStream::connect(&addr) else { continue };
+            let Ok(mut sock) = std::net::TcpStream::connect(&addr) else {
+                continue;
+            };
             sock.set_write_timeout(Some(Duration::from_secs(2))).ok();
             // 머리는 제대로 보낸다 — 여기서 막히면 본문 시험이 되지 않는다.
             // 본문 4096 바이트를 약속해 놓고 아주 천천히 흘린다.
@@ -4094,7 +4763,8 @@ mod tests {
 
         let mut sock = std::net::TcpStream::connect(&addr).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        sock.write_all(b"POST /infer HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        sock.write_all(b"POST /infer HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
         let _ = sock.flush();
         let mut raw = Vec::new();
         let _ = sock.read_to_end(&mut raw);
@@ -4164,7 +4834,12 @@ mod tests {
         let mut raw = Vec::new();
         let _ = sock.read_to_end(&mut raw);
         let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
-        for want in ["x-content-type-options: nosniff", "connection: close", "content-length:", "content-type:"] {
+        for want in [
+            "x-content-type-options: nosniff",
+            "connection: close",
+            "content-length:",
+            "content-type:",
+        ] {
             assert!(text.contains(want), "{want} 가 없다:\n{text}");
         }
 
@@ -4184,7 +4859,10 @@ mod tests {
 
     #[test]
     fn query_strings_become_json_objects() {
-        assert_eq!(query_to_value("a=1&b=hi"), Value::Json(serde_json::json!({"a":"1","b":"hi"})));
+        assert_eq!(
+            query_to_value("a=1&b=hi"),
+            Value::Json(serde_json::json!({"a":"1","b":"hi"}))
+        );
         // `+` 는 공백, `%XX` 는 바이트.
         assert_eq!(query_to_value("s=a+b%21"), Value::Json(serde_json::json!({"s":"a b!"})));
         // 값 없는 키, 빈 쿼리.
@@ -4227,7 +4905,9 @@ mod tests {
                         Err(_) => break,
                     };
                     stream.set_nonblocking(false).ok();
-                    let Ok(mut ws) = tungstenite::accept(stream) else { continue };
+                    let Ok(mut ws) = tungstenite::accept(stream) else {
+                        continue;
+                    };
                     ws.get_mut().set_read_timeout(Some(Duration::from_millis(20))).ok();
                     if let Some(g) = &greet {
                         let _ = ws.send(tungstenite::Message::Text(g.clone().into()));
@@ -4249,7 +4929,12 @@ mod tests {
                     let _ = ws.close(None);
                 }
             });
-            Self { url, stop, seen, handle: Some(handle) }
+            Self {
+                url,
+                stop,
+                seen,
+                handle: Some(handle),
+            }
         }
     }
 
@@ -4268,14 +4953,24 @@ mod tests {
         let mut p = Pipeline::new("ws-in");
         p.tick_hz = 60.0;
         let src = p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::WebSocket { url: server.url.clone() } },
+            PNodeKind::Source {
+                source: Source::WebSocket {
+                    url: server.url.clone(),
+                },
+            },
             [0.0, 0.0],
         ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
         p.add_link(src, log).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("wsin"), DevicePref::Cpu).start().unwrap();
-        let ev = wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == src));
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsin"), DevicePref::Cpu)
+            .start()
+            .unwrap();
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Value { node, .. } if *node == src),
+        );
         match ev {
             Some(RunnerEvent::Value { value, .. }) => {
                 // 서버가 JSON 텍스트를 보냈으니 Json 으로 들어와야 한다.
@@ -4288,7 +4983,11 @@ mod tests {
         let t = Instant::now();
         h.stop();
         assert!(h.wait_done(Duration::from_secs(2)), "stop 후에도 끝나지 않았다");
-        assert!(t.elapsed() < Duration::from_secs(2), "WebSocket 스레드 정리가 느리다: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "WebSocket 스레드 정리가 느리다: {:?}",
+            t.elapsed()
+        );
     }
 
     #[test]
@@ -4299,30 +4998,56 @@ mod tests {
         // 같은 url 의 소스와 싱크 → 연결 하나를 공유한다. 보낸 것이 에코로 되돌아온다.
         let manual = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
         let out = p.add_node(PNode::new(
-            PNodeKind::Sink { sink: Sink::WebSocketSend { url: server.url.clone() } },
+            PNodeKind::Sink {
+                sink: Sink::WebSocketSend {
+                    url: server.url.clone(),
+                },
+            },
             [1.0, 0.0],
         ));
         let back = p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::WebSocket { url: server.url.clone() } },
+            PNodeKind::Source {
+                source: Source::WebSocket {
+                    url: server.url.clone(),
+                },
+            },
             [0.0, 1.0],
         ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 1.0]));
         p.add_link(manual, out).unwrap();
         p.add_link(back, log).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("wsout"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsout"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         // 연결이 설 때까지 기다렸다가 보낸다.
         assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("연결됨")))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(5),
+                |e| matches!(e, RunnerEvent::Log(m) if m.contains("연결됨"))
+            )
+            .is_some(),
             "WebSocket 연결 로그가 오지 않았다"
         );
-        h.inputs.send(RunnerInput::Manual { node: manual, value: Value::Text("핑".into()) }).unwrap();
+        h.inputs
+            .send(RunnerInput::Manual {
+                node: manual,
+                value: Value::Text("핑".into()),
+            })
+            .unwrap();
 
-        let got = server.seen.recv_timeout(Duration::from_secs(5)).expect("서버가 메시지를 받지 못했다");
+        let got = server
+            .seen
+            .recv_timeout(Duration::from_secs(5))
+            .expect("서버가 메시지를 받지 못했다");
         assert_eq!(got, "핑", "텍스트 값은 따옴표 없이 그대로 가야 한다");
 
-        let ev = wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == back));
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Value { node, .. } if *node == back),
+        );
         match ev {
             Some(RunnerEvent::Value { value, .. }) => assert_eq!(value, Value::Text("핑".into())),
             other => panic!("에코가 돌아오지 않았다: {other:?}"),
@@ -4343,25 +5068,42 @@ mod tests {
         };
         let mut p = Pipeline::new("ws-dead");
         p.tick_hz = 60.0;
-        let ws = p.add_node(PNode::new(PNodeKind::Source { source: Source::WebSocket { url: dead } }, [0.0, 0.0]));
+        let ws = p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::WebSocket { url: dead },
+            },
+            [0.0, 0.0],
+        ));
         let timer = p.add_node(PNode::new(
-            PNodeKind::Source { source: Source::Timer { interval_ms: 10 } },
+            PNodeKind::Source {
+                source: Source::Timer { interval_ms: 10 },
+            },
             [0.0, 1.0],
         ));
         let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
         p.add_link(ws, log).unwrap();
         p.add_link(timer, log).unwrap();
 
-        let h = Runner::new(Project::new("p"), p, tmp_dir("wsdead"), DevicePref::Cpu).start().unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir("wsdead"), DevicePref::Cpu)
+            .start()
+            .unwrap();
         assert!(
-            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Error { node, .. } if *node == Some(ws)))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(5),
+                |e| matches!(e, RunnerEvent::Error { node, .. } if *node == Some(ws))
+            )
+            .is_some(),
             "연결 실패 오류가 오지 않았다"
         );
         // 루프는 계속 돈다.
         assert!(
-            wait_for(&h, Duration::from_secs(3), |e| matches!(e, RunnerEvent::Value { node, .. } if *node == timer))
-                .is_some(),
+            wait_for(
+                &h,
+                Duration::from_secs(3),
+                |e| matches!(e, RunnerEvent::Value { node, .. } if *node == timer)
+            )
+            .is_some(),
             "WebSocket 실패 뒤 타이머가 멈췄다"
         );
 
@@ -4370,7 +5112,11 @@ mod tests {
         assert!(h.wait_done(Duration::from_secs(2)), "stop 후에도 끝나지 않았다");
         // 백오프로 자고 있어도 곧바로 깨야 한다.
         // 백오프는 1초부터 시작한다. 그 안에 깨는지가 요점이라 2초면 충분히 구분된다.
-        assert!(t.elapsed() < Duration::from_secs(2), "백오프 중 stop 이 느리다: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "백오프 중 stop 이 느리다: {:?}",
+            t.elapsed()
+        );
         assert!(wait_for(&h, Duration::from_secs(1), |e| matches!(e, RunnerEvent::Stopped)).is_some());
     }
 }

@@ -107,7 +107,10 @@ pub struct HeadError {
 
 impl HeadError {
     fn new(status: u16, message: impl Into<String>) -> Self {
-        Self { status, message: message.into() }
+        Self {
+            status,
+            message: message.into(),
+        }
     }
 }
 
@@ -120,7 +123,10 @@ pub struct BodyError {
 
 impl BodyError {
     fn new(status: u16, message: impl Into<String>) -> Self {
-        Self { status, message: message.into() }
+        Self {
+            status,
+            message: message.into(),
+        }
     }
 }
 
@@ -141,7 +147,10 @@ impl Request {
             Err(e) => return Err((reader.into_inner(), e)),
         };
         let Some((method, target, _version)) = parse_request_line(&line) else {
-            return Err((reader.into_inner(), HeadError::new(400, format!("요청 줄을 읽을 수 없다: {line:?}"))));
+            return Err((
+                reader.into_inner(),
+                HeadError::new(400, format!("요청 줄을 읽을 수 없다: {line:?}")),
+            ));
         };
 
         let mut headers: Vec<(String, String)> = Vec::new();
@@ -160,7 +169,10 @@ impl Request {
                 ));
             }
             let Some((name, value)) = line.split_once(':') else {
-                return Err((reader.into_inner(), HeadError::new(400, format!("헤더 줄이 잘못됐다: {line:?}"))));
+                return Err((
+                    reader.into_inner(),
+                    HeadError::new(400, format!("헤더 줄이 잘못됐다: {line:?}")),
+                ));
             };
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
         }
@@ -175,7 +187,16 @@ impl Request {
             Err(e) => return Err((reader.into_inner(), e)),
         };
 
-        Ok(Self { method, path, query, headers, reader, writer, body, answered: false })
+        Ok(Self {
+            method,
+            path,
+            query,
+            headers,
+            reader,
+            writer,
+            body,
+            answered: false,
+        })
     }
 
     pub fn method(&self) -> &str {
@@ -371,7 +392,10 @@ fn read_line(
             Err(e) => return Err(HeadError::new(400, format!("읽기 실패: {e}"))),
         }
         if *budget == 0 {
-            return Err(HeadError::new(431, format!("머리가 너무 크다 (상한 {MAX_HEADER_BYTES} 바이트)")));
+            return Err(HeadError::new(
+                431,
+                format!("머리가 너무 크다 (상한 {MAX_HEADER_BYTES} 바이트)"),
+            ));
         }
         *budget -= 1;
         if byte[0] == b'\n' {
@@ -471,18 +495,35 @@ mod tests {
         let h = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
             pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
         };
-        assert_eq!(body_kind(&h(&[("content-length", "5")]), "POST").unwrap(), BodyKind::Sized(5));
-        assert_eq!(body_kind(&h(&[("content-length", "0")]), "POST").unwrap(), BodyKind::None);
-        assert_eq!(body_kind(&h(&[("transfer-encoding", "chunked")]), "POST").unwrap(), BodyKind::Chunked);
+        assert_eq!(
+            body_kind(&h(&[("content-length", "5")]), "POST").unwrap(),
+            BodyKind::Sized(5)
+        );
+        assert_eq!(
+            body_kind(&h(&[("content-length", "0")]), "POST").unwrap(),
+            BodyKind::None
+        );
+        assert_eq!(
+            body_kind(&h(&[("transfer-encoding", "chunked")]), "POST").unwrap(),
+            BodyKind::Chunked
+        );
         assert_eq!(body_kind(&h(&[]), "GET").unwrap(), BodyKind::None);
 
         // 본문이 있어야 할 메서드인데 길이가 없다 → 411.
         assert_eq!(body_kind(&h(&[]), "POST").unwrap_err().status, 411);
         assert_eq!(body_kind(&h(&[]), "PUT").unwrap_err().status, 411);
         // 수가 아닌 길이 → 400.
-        assert_eq!(body_kind(&h(&[("content-length", "많이")]), "POST").unwrap_err().status, 400);
+        assert_eq!(
+            body_kind(&h(&[("content-length", "많이")]), "POST").unwrap_err().status,
+            400
+        );
         // 모르는 전송 인코딩 → 501.
-        assert_eq!(body_kind(&h(&[("transfer-encoding", "gzip")]), "POST").unwrap_err().status, 501);
+        assert_eq!(
+            body_kind(&h(&[("transfer-encoding", "gzip")]), "POST")
+                .unwrap_err()
+                .status,
+            501
+        );
     }
 
     #[test]

@@ -25,7 +25,10 @@ impl InputSim {
     /// 항상 성공한다(`armed = false`, enigo 미초기화). 반환형은 호출부 계약 유지를 위해 `Result` 로 둔다.
     #[allow(clippy::unnecessary_wraps)]
     pub fn new() -> anyhow::Result<Self> {
-        Ok(Self { armed: false, enigo: None })
+        Ok(Self {
+            armed: false,
+            enigo: None,
+        })
     }
 
     /// 무장 상태를 지정해 만든다.
@@ -59,11 +62,13 @@ impl InputSim {
             InputAction::None => Ok(()),
             InputAction::MoveTo { x, y } => {
                 let e = self.enigo()?;
-                e.move_mouse(*x, *y, Coordinate::Abs).map_err(|e| anyhow!("커서 이동 실패: {e}"))
+                e.move_mouse(*x, *y, Coordinate::Abs)
+                    .map_err(|e| anyhow!("커서 이동 실패: {e}"))
             }
             InputAction::MoveBy { dx, dy } => {
                 let e = self.enigo()?;
-                e.move_mouse(*dx, *dy, Coordinate::Rel).map_err(|e| anyhow!("커서 상대 이동 실패: {e}"))
+                e.move_mouse(*dx, *dy, Coordinate::Rel)
+                    .map_err(|e| anyhow!("커서 상대 이동 실패: {e}"))
             }
             InputAction::Click { button } => {
                 let b = to_button(*button);
@@ -83,10 +88,12 @@ impl InputSim {
             InputAction::Scroll { dx, dy } => {
                 let e = self.enigo()?;
                 if *dx != 0 {
-                    e.scroll(*dx, Axis::Horizontal).map_err(|e| anyhow!("가로 스크롤 실패: {e}"))?;
+                    e.scroll(*dx, Axis::Horizontal)
+                        .map_err(|e| anyhow!("가로 스크롤 실패: {e}"))?;
                 }
                 if *dy != 0 {
-                    e.scroll(*dy, Axis::Vertical).map_err(|e| anyhow!("세로 스크롤 실패: {e}"))?;
+                    e.scroll(*dy, Axis::Vertical)
+                        .map_err(|e| anyhow!("세로 스크롤 실패: {e}"))?;
                 }
                 Ok(())
             }
@@ -127,7 +134,11 @@ pub fn describe(action: &InputAction) -> String {
         InputAction::TypeText { text } => format!("텍스트 입력 {text:?}"),
         InputAction::Scroll { dx, dy } => format!("스크롤 ({dx:+}, {dy:+})"),
         InputAction::Sequence { steps } => {
-            format!("순서 {}개: [{}]", steps.len(), steps.iter().map(describe).collect::<Vec<_>>().join(", "))
+            format!(
+                "순서 {}개: [{}]",
+                steps.len(),
+                steps.iter().map(describe).collect::<Vec<_>>().join(", ")
+            )
         }
     }
 }
@@ -273,9 +284,17 @@ mod tests {
         let mut sim = InputSim::new().unwrap();
         assert!(!sim.armed);
         sim.perform(&InputAction::MoveTo { x: 10, y: 10 }).unwrap();
-        sim.perform(&InputAction::TypeText { text: "무장 안 됨".into() }).unwrap();
+        sim.perform(&InputAction::TypeText {
+            text: "무장 안 됨".into(),
+        })
+        .unwrap();
         sim.perform(&InputAction::Sequence {
-            steps: vec![InputAction::KeyTap { key: "enter".into() }, InputAction::Click { button: MouseButton::Left }],
+            steps: vec![
+                InputAction::KeyTap { key: "enter".into() },
+                InputAction::Click {
+                    button: MouseButton::Left,
+                },
+            ],
         })
         .unwrap();
         assert!(sim.enigo.is_none(), "비무장인데 백엔드가 열렸다");
@@ -287,13 +306,17 @@ mod tests {
             InputAction::None,
             InputAction::MoveTo { x: 1, y: 2 },
             InputAction::MoveBy { dx: -1, dy: 2 },
-            InputAction::Click { button: MouseButton::Middle },
+            InputAction::Click {
+                button: MouseButton::Middle,
+            },
             InputAction::KeyTap { key: "a".into() },
             InputAction::KeyDown { key: "ctrl".into() },
             InputAction::KeyUp { key: "ctrl".into() },
             InputAction::TypeText { text: "hi".into() },
             InputAction::Scroll { dx: 0, dy: 3 },
-            InputAction::Sequence { steps: vec![InputAction::None] },
+            InputAction::Sequence {
+                steps: vec![InputAction::None],
+            },
         ];
         for a in &all {
             assert!(!describe(a).is_empty());

@@ -54,7 +54,11 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         results.push(infer_one(&mut session, payload.as_ref(), v)?);
     }
 
-    let out = if results.len() == 1 { results.remove(0) } else { serde_json::Value::Array(results) };
+    let out = if results.len() == 1 {
+        results.remove(0)
+    } else {
+        serde_json::Value::Array(results)
+    };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(0)
 }
@@ -66,7 +70,11 @@ fn collect_inputs(args: &Args<'_>) -> Result<Vec<Value>> {
         (None, Some(path), None) => {
             let img = image::open(path).with_context(|| format!("이미지를 열지 못했다: {}", path.display()))?;
             let rgba = img.to_rgba8();
-            Ok(vec![Value::Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() }])
+            Ok(vec![Value::Image {
+                width: rgba.width(),
+                height: rgba.height(),
+                rgba: rgba.into_raw(),
+            }])
         }
         (None, None, Some(path)) => {
             let text =
@@ -155,7 +163,9 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Numbers(n) => json!(n),
         Value::Text(s) => json!(s),
         Value::Json(j) => j.clone(),
-        Value::Image { width, height, rgba } => json!({"image": {"width": width, "height": height, "bytes": rgba.len()}}),
+        Value::Image { width, height, rgba } => {
+            json!({"image": {"width": width, "height": height, "bytes": rgba.len()}})
+        }
         Value::Tensor(t) => json!({"shape": t.shape, "data": t.data}),
     }
 }
@@ -186,7 +196,12 @@ mod tests {
         };
         assert!(collect_inputs(&args).is_err());
 
-        let none = Args { input: None, image: None, csv: None, ..args };
+        let none = Args {
+            input: None,
+            image: None,
+            csv: None,
+            ..args
+        };
         assert!(collect_inputs(&none).is_err());
     }
 
