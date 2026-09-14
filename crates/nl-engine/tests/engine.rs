@@ -2394,6 +2394,9 @@ fn stacked_template_blocks_keep_the_shape_and_save_weights() {
 /// (학습 → `RunRecord` → `Op::UpsertRun` → 저장)를 태운다 — 사용자가 하는 일이 그것이고,
 /// 옛 빌더로 한 번 열었다 저장하면 남의 설정이 통째로 날아가던 문제(보안 리뷰 L3)가
 /// 되살아나는지는 이 경로에서만 드러난다.
+///
+/// 최상위·프로젝트·**설정**·모델·**학습 설정**·**데이터셋**·노드 일곱 층을 본다.
+/// 굵게 표시한 셋은 잎 구조체라 나중에 `extra` 가 퍼지면서 들어왔다.
 #[test]
 fn unknown_fields_survive_training_and_a_save() {
     use nl_core::{apply_op, Op, Project, ProjectFile};
@@ -2418,8 +2421,9 @@ fn unknown_fields_survive_training_and_a_save() {
     let mut raw: serde_json::Value = serde_json::from_str(&ProjectFile::new(project).to_json()).unwrap();
     raw["미래_최상위"] = serde_json::json!({"schema": 99});
     raw["project"]["미래_프로젝트"] = serde_json::json!("값");
-    // `ProjectSettings` 에는 `extra` 가 없다 — 아래에서 그 경계를 확인한다.
     raw["project"]["settings"]["미래_설정"] = serde_json::json!(true);
+    raw["project"]["models"][model_id.to_string()]["train"]["미래_학습설정"] = serde_json::json!(0.5);
+    raw["project"]["datasets"][dataset_id.to_string()]["미래_데이터셋"] = serde_json::json!("d");
     raw["project"]["models"][model_id.to_string()]["미래_모델"] = serde_json::json!([1, 2, 3]);
     raw["project"]["models"][model_id.to_string()]["graph"]["nodes"][node_id.to_string()]["미래_노드"] =
         serde_json::json!("노드 메모");
@@ -2469,14 +2473,17 @@ fn unknown_fields_survive_training_and_a_save() {
         "노드"
     );
 
-    // **경계**: `extra` 는 컨테이너·그래프 구조체에만 있다
-    // (`Project`·`ProjectFile`·`ModelDef`·`Graph`·`Node`·`PNode`·`Widget`).
-    // `ProjectSettings`·`DatasetSpec`·`PayloadSpec`·`Pipeline`·`TrainConfig`·`RunRecord` 등
-    // 잎 구조체는 아직 아니라, 그 안에 더해진 모르는 필드는 저장할 때 사라진다.
-    // 여기를 넓히면 이 단언이 깨진다 — 그때는 이 주석과 두 README 를 함께 고쳐야 한다.
-    assert!(
-        back["project"]["settings"]["미래_설정"].is_null(),
-        "ProjectSettings 에 extra 가 생겼다면 이 시험과 문서를 갱신하라"
+    // 잎 구조체까지 퍼졌다 — 설정·학습 설정·데이터셋 안에 더해진 것도 남는다.
+    assert_eq!(back["project"]["settings"]["미래_설정"], true, "설정");
+    assert_eq!(
+        back["project"]["models"][model_id.to_string()]["train"]["미래_학습설정"],
+        0.5,
+        "학습 설정"
+    );
+    assert_eq!(
+        back["project"]["datasets"][dataset_id.to_string()]["미래_데이터셋"],
+        "d",
+        "데이터셋"
     );
 
     // 새 실행 기록과 가중치 경로도 함께 들어갔다.

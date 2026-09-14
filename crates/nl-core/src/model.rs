@@ -59,6 +59,12 @@ pub struct ProjectSettings {
     /// 배포 빌드 설정. 빌드 뷰에서 한 번 정하면 문서에 남는다.
     #[serde(default)]
     pub build: Option<crate::bundle::BuildSpec>,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for ProjectSettings {
@@ -67,6 +73,7 @@ impl Default for ProjectSettings {
             default_device: DevicePref::Auto,
             runs_dir: None,
             build: None,
+            extra: Default::default(),
         }
     }
 }
@@ -791,6 +798,192 @@ mod tests {
         assert_eq!(
             back["project"]["models"][mid.to_string()]["graph"]["nodes"][nid.to_string()]["미래_노드"],
             serde_json::json!([1, 2])
+        );
+    }
+
+    /// `flatten` 은 serde 가 맵을 통째로 버퍼링하는 경로를 탄다. 그 경로에서도
+    /// **`#[serde(default = "fn")]` 이 그대로 먹는지** 본다 — 안 먹으면 옛 문서를 열 때
+    /// 학습 설정이 0 으로 초기화되고, 오류 없이 모델이 이상하게 학습된다.
+    #[test]
+    fn flatten_does_not_break_named_default_functions() {
+        use crate::train::TrainConfig;
+
+        // 필드를 하나도 적지 않은 문서. 전부 기본값으로 채워져야 한다.
+        let bare: TrainConfig = serde_json::from_str("{}").expect("빈 객체");
+        let want = TrainConfig::default();
+        assert_eq!(bare.epochs, want.epochs, "epochs 기본값");
+        assert_eq!(bare.batch_size, want.batch_size, "batch_size 기본값");
+        assert_eq!(bare.seed, want.seed, "seed 기본값");
+        assert_eq!(bare.val_split, want.val_split, "val_split 기본값");
+        assert_eq!(bare.optimizer, want.optimizer, "optimizer 기본값");
+        assert!(bare.extra.is_empty());
+
+        // 모르는 필드를 섞어도 아는 필드의 기본값은 그대로여야 한다.
+        let mixed: TrainConfig = serde_json::from_str(r#"{"epochs": 3, "미래_설정": {"x": 1}}"#).expect("섞인 객체");
+        assert_eq!(mixed.epochs, 3, "적은 값은 적은 대로");
+        assert_eq!(mixed.batch_size, want.batch_size, "안 적은 값은 기본값");
+        assert_eq!(mixed.extra["미래_설정"], serde_json::json!({"x": 1}));
+    }
+
+    /// `flatten` 은 숫자를 `Content` 로 한 번 거친다. f64·f32·u64 가 그 과정에서
+    /// 바뀌지 않는지 본다 — 조용히 정밀도가 깎이면 학습 설정이 미묘하게 달라진다.
+    #[test]
+    fn flatten_round_trips_numbers_without_loss() {
+        use crate::train::TrainConfig;
+
+        let mut c = TrainConfig {
+            val_split: 0.123_456_789_012_345,
+            grad_clip: 1.0 / 3.0,
+            seed: u64::MAX,
+            ..Default::default()
+        };
+        c.extra.insert("미래".into(), serde_json::json!(1));
+
+        let back: TrainConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).expect("왕복");
+        assert_eq!(back.val_split, c.val_split, "f64 정밀도");
+        assert_eq!(back.grad_clip, c.grad_clip, "f64 정밀도");
+        assert_eq!(back.seed, u64::MAX, "u64 최대값");
+        assert_eq!(back, c);
+    }
+
+    /// 내부 태그 열거형(`#[serde(tag = "type")]`)을 **필드로 가진** 구조체에 `flatten` 을 붙여도
+    /// 태그 키가 `extra` 로 새지 않는다. 태그는 중첩 객체 안에 있기 때문이다.
+    ///
+    /// 태그 열거형 자체(`Source`·`Sink` 등)에는 `extra` 를 붙이지 않았다 — 붙이면 `type` 키를
+    /// 잡아먹어 변형을 못 고른다.
+    #[test]
+    fn a_tagged_enum_field_keeps_its_tag_out_of_extra() {
+        use crate::dataset::{DataSource, DatasetSpec};
+
+        let mut d = DatasetSpec::new(
+            "d",
+            DataSource::Csv {
+                path: "a.csv".into(),
+                input_cols: vec!["x".into()],
+                target_cols: vec!["y".into()],
+                header: true,
+            },
+        );
+        d.extra.insert("미래_데이터셋".into(), serde_json::json!("값"));
+
+        let text = serde_json::to_string(&d).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&text).unwrap();
+        // 태그는 중첩된 `source` 안에 있고, 바깥에는 없다.
+        assert_eq!(raw["source"]["type"], "Csv");
+        assert!(raw.get("type").is_none(), "태그가 바깥으로 새어 나왔다: {text}");
+
+        let back: DatasetSpec = serde_json::from_str(&text).expect("왕복");
+        assert!(matches!(back.source, DataSource::Csv { .. }), "변형을 못 골랐다");
+        assert_eq!(back.extra["미래_데이터셋"], "값");
+        assert!(!back.extra.contains_key("source"), "아는 필드가 extra 로 샜다");
+    }
+
+    /// 잎 구조체까지 `extra` 가 퍼졌는지 한자리에서 본다. 새 구조체를 더할 때 여기를 늘린다.
+    #[test]
+    fn unknown_fields_survive_in_every_document_struct() {
+        use crate::bundle::{BuildSpec, BundleManifest};
+        use crate::dataset::{DataSource, DatasetSpec};
+        use crate::gui::{GuiLayout, WindowSpec};
+        use crate::payload::{Field, FieldKind, PayloadSpec};
+        use crate::pipeline::{Link, Pipeline};
+        use crate::train::{RunRecord, TrainConfig};
+
+        /// 값을 JSON 으로 만들고 모르는 키를 하나 심은 뒤, 다시 읽어 그 키가 살아남는지 본다.
+        fn survives<T>(what: &str, value: T)
+        where
+            T: serde::Serialize + serde::de::DeserializeOwned,
+        {
+            let mut raw = serde_json::to_value(&value).unwrap_or_else(|e| panic!("{what} 직렬화: {e}"));
+            raw.as_object_mut()
+                .unwrap_or_else(|| panic!("{what} 이 JSON 객체가 아니다"))
+                .insert("미래_필드".into(), serde_json::json!({"nested": [1, 2]}));
+
+            let text = serde_json::to_string(&raw).unwrap();
+            let back: T = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{what} 읽기: {e}"));
+            let again = serde_json::to_value(&back).unwrap();
+            assert_eq!(
+                again["미래_필드"],
+                serde_json::json!({"nested": [1, 2]}),
+                "{what}: 모르는 필드가 사라졌다"
+            );
+        }
+
+        survives("ProjectSettings", ProjectSettings::default());
+        survives("TrainConfig", TrainConfig::default());
+        survives(
+            "RunRecord",
+            RunRecord {
+                id: RunId::new(),
+                model: ModelId::new(),
+                dataset: None,
+                config: TrainConfig::default(),
+                started: chrono::Utc::now(),
+                finished: None,
+                status: crate::train::RunStatus::Finished,
+                device_name: String::new(),
+                epochs: Vec::new(),
+                checkpoint: None,
+                best_checkpoint: None,
+                error: None,
+                note: String::new(),
+                extra: Default::default(),
+            },
+        );
+        survives(
+            "DatasetSpec",
+            DatasetSpec::new("d", DataSource::ImageFolder { path: "p".into() }),
+        );
+        survives("PayloadSpec", PayloadSpec::new("p"));
+        survives("Field", Field::new("f", FieldKind::Scalar));
+        survives("Pipeline", Pipeline::new("pl"));
+        survives(
+            "Link",
+            Link {
+                id: LinkId::new(),
+                from: PNodeId::new(),
+                to: PNodeId::new(),
+                extra: Default::default(),
+            },
+        );
+        survives("GuiLayout", GuiLayout::default());
+        survives("WindowSpec", WindowSpec::default());
+        survives("BuildSpec", BuildSpec::default());
+        survives("BundleManifest", BundleManifest::new("app", "1.0"));
+        // 앞서 들어와 있던 컨테이너 구조체도 함께 확인한다.
+        survives("Project", Project::new("p"));
+        survives("ProjectFile", ProjectFile::new(Project::new("p")));
+        survives("ModelDef", ModelDef::new("m"));
+        survives("Node", Node::new(LayerKind::Output, [0.0, 0.0]));
+        survives(
+            "PNode",
+            crate::pipeline::PNode::new(
+                crate::pipeline::PNodeKind::Logic {
+                    logic: crate::pipeline::Logic::Majority { window: 3 },
+                },
+                [0.0, 0.0],
+            ),
+        );
+        survives(
+            "Widget",
+            crate::gui::Widget::new(
+                crate::gui::WidgetKind::Button { text: "버튼".into() },
+                [0.0, 0.0, 10.0, 10.0],
+            ),
+        );
+    }
+
+    /// **아직 `extra` 가 없는 구조체.** 여기 이름이 줄어들면(= 필드를 더했으면) 이 시험이 깨진다.
+    /// 그때 두 README 의 경계 문단도 함께 고쳐야 한다.
+    #[test]
+    fn these_structs_still_drop_unknown_fields() {
+        // `Graph`·`Edge` 는 그릇이지만 아직 `extra` 가 없다. `EpochMetrics` 는 에포크마다 쌓이는
+        // 값이라 통째로 늘어나는 쪽이 비용이 크다.
+        let mut raw = serde_json::to_value(Graph::default()).unwrap();
+        raw.as_object_mut().unwrap().insert("미래".into(), serde_json::json!(1));
+        let back: Graph = serde_json::from_value(raw).expect("읽기");
+        assert!(
+            serde_json::to_value(&back).unwrap().get("미래").is_none(),
+            "Graph 에 extra 가 생겼다면 이 시험과 두 README 를 갱신하라"
         );
     }
 

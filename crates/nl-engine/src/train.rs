@@ -241,6 +241,7 @@ pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
             best_checkpoint: None,
             error: None,
             note: String::new(),
+            extra: Default::default(),
         };
         // 백엔드(특히 GPU 드라이버)가 패닉하면 채널이 조용히 끊긴다. 그러면 UI 가 영원히 기다리므로
         // 패닉을 잡아 `Failed` 이벤트로 바꾼다. 다른 스레드에서 나는 패닉까지 잡을 수는 없다.
