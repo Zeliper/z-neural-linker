@@ -19,3 +19,9 @@ pub const PUBLIC_KEY: Option<&str> = None;
 
 /// 빌더 업데이트 매니페스트 주소. `NL_UPDATE_URL` 환경 변수가 우선한다.
 pub const UPDATE_URL: &str = "https://updates.trustanc.dev/neural-linker/latest.json";
+
+/// 자동 업데이트를 켤 수 있는가. 공개키가 없으면 **확인 자체를 하지 않는다**.
+///
+/// 키가 없는 채로 확인만 하면 서버가 뚫렸을 때 바꿔치기된 매니페스트를 그대로 믿게 된다.
+/// 검증할 수 없으면 아예 묻지 않는 쪽이 안전하다.
+pub const ENABLED: bool = PUBLIC_KEY.is_some();

@@ -302,19 +302,21 @@ impl View {
 }
 
 /// 설정을 실제 장치로 푼다. **백그라운드 스레드에서만 부른다.**
-///
-/// 이 한 줄이 전체에서 유일한 `nl_engine::resolve` 호출 지점이다. 엔진이 이미 확인한 결과만
-/// 돌려주는 `resolve_cached` 를 내놓으면 여기만 바꾸면 된다 — 그때는 UI 스레드에서 불러도 안전해진다.
-fn resolve_device(pref: DevicePref) -> DeviceInfo {
-    nl_engine::resolve(pref).info
+/// 프로젝트 폴더 밖에 파일을 쓰기 전에 묻는 내용 (보안 리뷰 M22).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutsideAsk {
+    /// 무엇을 쓰는 폴더인지 ("산출물").
+    pub what: String,
+    /// 실제로 쓰게 될 폴더.
+    pub dir: PathBuf,
 }
 
 /// 백그라운드 장치 확인이 UI 로 보내는 소식.
 enum DeviceMsg {
     /// 열거된 장치 목록 (콤보·자원 뷰).
     List(Vec<DeviceInfo>),
-    /// 이 설정이 실제로 풀린 장치와 사람이 읽을 한 줄 (상태바·툴팁).
-    Resolved { pref: DevicePref, info: DeviceInfo, note: String },
+    /// 자동 선택까지 끝났다. 이 뒤로는 `nl_engine::resolve_cached` 가 곧바로 답한다.
+    Ready { note: String },
 }
 
 /// 녹화 라벨 스위치로 쓰는 숫자키 0~9.
@@ -424,13 +426,17 @@ pub struct NlApp {
     plan_job: Option<Receiver<Result<Plan, String>>>,
     tool_job: Option<Receiver<ToolEvent>>,
     tool_progress: Option<f32>,
+    /// 진행 중인 설치를 멈추라는 신호. 청크 사이에서 확인된다.
+    tool_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// 프로젝트 폴더 밖에 쓰려 할 때 띄우는 확인 질문.
+    outside_ask: Option<OutsideAsk>,
+    /// 사용자가 방금 승인한 질문. 한 번의 빌드에만 쓰인다.
+    outside_confirmed: Option<OutsideAsk>,
     build_job: Option<Receiver<BuildEvent>>,
     /// 장치 열거·검사 백그라운드 작업. UI 스레드는 이 둘을 절대 직접 부르지 않는다.
     device_job: Option<Receiver<DeviceMsg>>,
-    /// 백그라운드에 확인을 맡긴 설정. 같은 설정으로 두 번 묻지 않는다.
-    device_asked: Option<DevicePref>,
-    /// 확인이 끝난 (설정, 실제로 풀린 장치). 아직 모르면 `None` 이고 UI 는 "확인 중…" 을 보인다.
-    resolved: Option<(DevicePref, DeviceInfo)>,
+    /// 백그라운드 확인을 이미 맡겼는가. 한 번이면 충분하다 — 그 뒤로는 엔진 캐시가 답한다.
+    device_asked: bool,
     /// 장치 확인이 한 번이라도 끝났는가 (하네스 마커를 한 번만 찍으려고).
     devices_ready: bool,
     /// 백그라운드 장치 확인을 할지. 테스트에서만 끈다.
@@ -545,10 +551,12 @@ impl NlApp {
             plan_job: None,
             tool_job: None,
             tool_progress: None,
+            tool_cancel: None,
+            outside_ask: None,
+            outside_confirmed: None,
             build_job: None,
             device_job: None,
-            device_asked: None,
-            resolved: None,
+            device_asked: false,
             devices_ready: false,
             probe_enabled: true,
             ready_logged: false,
@@ -591,16 +599,17 @@ impl NlApp {
     /// 드라이버가 깨진 GPU 는 패닉하거나 20초 타임아웃까지 버티므로, UI 스레드에서 부르면
     /// 창이 그 시간만큼 통째로 멈춘다. 그동안 UI 는 "확인 중…" 으로 즉시 그려진다.
     fn start_device_probe(&mut self) {
-        let pref = self.doc.project.settings.default_device;
-        if !self.probe_enabled || self.device_job.is_some() || self.device_asked == Some(pref) {
+        if !self.probe_enabled || self.device_asked {
             return;
         }
-        self.device_asked = Some(pref);
+        self.device_asked = true;
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("nl-devices".into()).spawn(move || {
             let _ = tx.send(DeviceMsg::List(nl_engine::enumerate()));
-            let info = resolve_device(pref);
-            let _ = tx.send(DeviceMsg::Resolved { pref, info, note: nl_engine::describe(pref) });
+            // 자동 선택만 한 번 돌려 둔다. 구체 장치는 목록이 채워진 순간부터 `resolve_cached` 가
+            // 검사 없이 답하므로 설정을 바꿔도 다시 물을 일이 없다.
+            let _ = nl_engine::resolve(DevicePref::Auto);
+            let _ = tx.send(DeviceMsg::Ready { note: nl_engine::describe(DevicePref::Auto) });
         });
         match spawned {
             Ok(_) => self.device_job = Some(rx),
@@ -615,18 +624,17 @@ impl NlApp {
             Some(rx) => rx.try_iter().collect(),
             None => Vec::new(),
         };
-        let mut resolved_now = false;
+        let mut ready_now = false;
         for msg in msgs {
             match msg {
                 DeviceMsg::List(list) => self.devices = list,
-                DeviceMsg::Resolved { pref, info, note } => {
+                DeviceMsg::Ready { note } => {
                     self.log(format!("장치 확인: {note}"));
-                    self.resolved = Some((pref, info));
-                    resolved_now = true;
+                    ready_now = true;
                 }
             }
         }
-        if resolved_now {
+        if ready_now {
             self.device_job = None;
             if !self.devices_ready {
                 self.devices_ready = true;
@@ -638,17 +646,11 @@ impl NlApp {
         }
         if self.device_job.is_some() {
             ctx.request_repaint_after(REPOLL);
-        } else {
-            // 기본 장치를 바꿨으면 그 장치로 다시 푼다.
-            self.start_device_probe();
         }
     }
 
-    /// 장치 설명 한 줄. 아직 열거 전이면 `nl_engine` 을 부르지 않는다 — 그 호출이 어댑터를 연다.
+    /// 장치 설명 한 줄. `describe` 는 이미 아는 것만 말하고 어댑터를 새로 열지 않아 UI 스레드에서 안전하다.
     fn device_note(&self, pref: DevicePref) -> String {
-        if self.devices.is_empty() && pref != DevicePref::Auto {
-            return "장치를 확인하는 중입니다".into();
-        }
         nl_engine::describe(pref)
     }
 
@@ -722,7 +724,9 @@ impl NlApp {
                 return v.clone();
             }
         }
-        let v = nl_core::validate(&self.doc.project);
+        let mut v = nl_core::validate(&self.doc.project);
+        // 남에게 받은 프로젝트가 바깥 파일을 가리킬 수 있다. 막지는 않고 눈에 띄게만 한다.
+        v.extend(crate::paths::issues(&self.doc.project));
         self.issues_cache = Some((seq, v.clone()));
         v
     }
@@ -1590,9 +1594,54 @@ impl NlApp {
         if finished {
             self.tool_job = None;
             self.tool_progress = None;
+            self.tool_cancel = None;
             self.tool_targets = None;
+            // 진행 창은 끝나면 스스로 닫힌다.
+            self.pending_plan = None;
             self.refresh_tools_if_needed();
             ctx.request_repaint();
+        }
+    }
+
+    /// 산출물 폴더가 프로젝트 폴더 밖이면 물어볼 내용을 만든다.
+    fn outside_build_dir(&self, project_file: &Path) -> Option<OutsideAsk> {
+        let spec = self.doc.project.settings.build.clone()?;
+        let raw = spec.output_dir.clone().unwrap_or_else(|| nl_core::bundle::DEFAULT_OUTPUT_DIR.to_string());
+        crate::paths::outside_project(&raw)?;
+        let base = project::base_dir(project_file);
+        Some(OutsideAsk { what: "산출물".into(), dir: views::build::resolve_out_dir(&base, &spec) })
+    }
+
+    /// 프로젝트 폴더 밖에 쓰기 전 확인 모달.
+    fn outside_modal(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(ask) = self.outside_ask.clone() else { return };
+        let modal = egui::Modal::new(egui::Id::new("outside-dir")).show(ctx, |ui| {
+            ui.set_width(MODAL_WIDTH);
+            ui.heading("프로젝트 폴더 밖에 씁니다");
+            ui.add_space(6.0);
+            plan_row(ui, "무엇을", &format!("{} 폴더", ask.what));
+            plan_row(ui, "어디에", &ask.dir.display().to_string());
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("이 폴더를 만들고 그 안에 파일을 씁니다. 뜻한 자리가 맞는지 확인하세요.")
+                    .color(views::COL_WARN)
+                    .size(11.5),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("계속").clicked() {
+                    self.outside_confirmed = Some(ask.clone());
+                    self.outside_ask = None;
+                    self.start_build(now);
+                }
+                if ui.button("취소").clicked() {
+                    self.views.build.log("산출물 폴더가 프로젝트 밖이라 빌드를 멈췄습니다");
+                    self.outside_ask = None;
+                }
+            });
+        });
+        if self.outside_ask.is_some() && modal.should_close() {
+            self.outside_ask = None;
         }
     }
 
@@ -1614,6 +1663,15 @@ impl NlApp {
                 "크기",
                 &if plan.size > 0 { views::fmt_bytes(plan.size) } else { "모름".into() },
             );
+            // 무엇을 확인하고 무엇을 확인하지 않는지 — 빠진 항목이 보여야 승인 여부를 판단할 수 있다.
+            ui.add_space(8.0);
+            ui.label(RichText::new("확인하는 것").color(views::COL_WEAK));
+            let note = plan.verification_note();
+            for (line, ok) in plan.verification().lines_with(note.as_deref()) {
+                let mark = if ok { "✔" } else { "✖" };
+                let color = if ok { views::COL_OK } else { views::COL_WARN };
+                ui.label(RichText::new(format!("{mark} {line}")).color(color).size(11.5));
+            }
             if !plan.steps.is_empty() {
                 ui.add_space(8.0);
                 ui.label(RichText::new("이렇게 진행합니다").color(views::COL_WEAK));
@@ -1625,20 +1683,45 @@ impl NlApp {
                 });
             }
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("승인하고 설치").clicked() {
-                    self.tool_job = Some(tools::spawn(plan.clone()));
-                    self.tool_progress = Some(0.0);
-                    self.views.build.error = None;
-                    self.pending_plan = None;
+            match self.tool_progress {
+                // 승인한 뒤에는 같은 창이 진행 상황을 보여 준다. 끝나면 스스로 닫힌다.
+                Some(p) => {
+                    ui.add(egui::ProgressBar::new(p).show_percentage());
+                    let cancelling = self
+                        .tool_cancel
+                        .as_ref()
+                        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!cancelling, egui::Button::new("취소")).clicked() {
+                            if let Some(c) = &self.tool_cancel {
+                                c.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            self.views.build.log("설치를 취소하는 중…");
+                        }
+                        if cancelling {
+                            ui.label(RichText::new("취소하는 중…").color(views::COL_WEAK).size(11.5));
+                        }
+                    });
                 }
-                if ui.button("거부").clicked() {
-                    self.views.build.log("설치를 거부했습니다");
-                    self.pending_plan = None;
+                None => {
+                    ui.horizontal(|ui| {
+                        if ui.button("승인하고 설치").clicked() {
+                            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            self.tool_job = Some(tools::spawn(plan.clone(), cancel.clone()));
+                            self.tool_cancel = Some(cancel);
+                            self.tool_progress = Some(0.0);
+                            self.views.build.error = None;
+                        }
+                        if ui.button("거부").clicked() {
+                            self.views.build.log("설치를 거부했습니다");
+                            self.pending_plan = None;
+                        }
+                    });
                 }
-            });
+            }
         });
-        if self.pending_plan.is_some() && modal.should_close() {
+        // 진행 중에는 바깥을 눌러도 닫지 않는다 — 창이 사라지면 취소할 방법이 없어진다.
+        if self.tool_job.is_none() && self.pending_plan.is_some() && modal.should_close() {
             self.pending_plan = None;
         }
         let _ = now;
@@ -1653,6 +1736,14 @@ impl NlApp {
             self.toast("산출물 폴더를 정하려면 프로젝트를 먼저 저장하세요", now);
             return;
         };
+        // 산출물 폴더가 프로젝트 밖이면 한 번 묻는다 — 빌드는 그 폴더를 만들고 파일을 쓴다.
+        if self.outside_confirmed.is_none() {
+            if let Some(q) = self.outside_build_dir(&path) {
+                self.outside_ask = Some(q);
+                return;
+            }
+        }
+        self.outside_confirmed = None;
         let spec = self
             .doc
             .project
@@ -1903,6 +1994,8 @@ impl NlApp {
                 nl_update::Event::Downloaded(p) => lines.push(format!("업데이트: 내려받음 {}", p.display())),
                 nl_update::Event::Applied(a) => lines.push(format!("업데이트: {}", a.message())),
                 nl_update::Event::Failed(e) => lines.push(format!("업데이트 실패: {e}")),
+                // 공개키가 없거나 주소가 https 가 아니면 확인 자체를 하지 않는다.
+                nl_update::Event::Disabled(why) => lines.push(format!("업데이트 사용 불가: {why}")),
                 nl_update::Event::Checking | nl_update::Event::Applying | nl_update::Event::Progress(_) => {}
             }
         }
@@ -2104,8 +2197,7 @@ impl NlApp {
             });
             if refresh {
                 // 열거도 검사도 백그라운드로 — 목록이 길면 UI 스레드가 그만큼 멈춘다.
-                self.resolved = None;
-                self.device_asked = None;
+                self.device_asked = false;
                 self.start_device_probe();
             }
             if let Some(pref) = chosen {
@@ -2305,11 +2397,12 @@ impl NlApp {
             ui.label(format!("{file}{star}"));
             ui.separator();
             let pref = self.doc.project.settings.default_device;
-            // 확인은 백그라운드에서만 한다 — 여기서 `resolve` 를 부르면 매 프레임 드라이버를 두드린다.
-            let dev = match &self.resolved {
-                Some((p, info)) if *p == pref && pref == DevicePref::Auto => format!("자동 → {}", info.name),
-                Some((p, info)) if *p == pref => info.name.clone(),
-                _ => "확인 중…".to_string(),
+            // `resolve_cached` 는 이미 정해진 결과만 본다 — 열거도 검사도 스레드 생성도 하지 않는다.
+            // 아직 아무것도 정해지지 않았으면 `None` 이고, 그 값은 시작할 때 띄운 스레드가 채운다.
+            let dev = match nl_engine::resolve_cached(pref) {
+                Some(r) if pref == DevicePref::Auto => format!("자동 → {}", r.info.name),
+                Some(r) => r.info.name,
+                None => "확인 중…".to_string(),
             };
             ui.label(format!("장치 {dev}")).on_hover_text(self.device_note(pref));
             ui.separator();
@@ -2373,7 +2466,7 @@ impl NlApp {
         // 킬 스위치는 무엇보다 먼저 본다 — 텍스트 칸에 포커스가 있어도, 모달이 떠 있어도 멈춰야 한다.
         self.tick_kill_switch(ctx, now);
         // 모달이 떠 있으면 아래 단축키는 전부 막는다 — 모달이 먼저 답을 받아야 한다.
-        if self.pending_action.is_some() || self.pending_plan.is_some() {
+        if self.pending_action.is_some() || self.pending_plan.is_some() || self.outside_ask.is_some() {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
@@ -2733,6 +2826,7 @@ impl eframe::App for NlApp {
 
         self.unsaved_modal(ctx, now);
         self.tool_modal(ctx, now);
+        self.outside_modal(ctx, now);
         self.update_window(ctx, now);
         self.draw_toasts(ctx, now);
 

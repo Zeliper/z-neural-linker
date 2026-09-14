@@ -208,7 +208,7 @@ fn http_server_and_reply_render_and_validate() {
         let pl = p.pipelines.get_mut(&pid).unwrap();
         let server = PNode::new(
             PNodeKind::Source {
-                source: Source::HttpServer { bind: "127.0.0.1:8787".into(), path: "/infer".into() },
+                source: Source::HttpServer { bind: "127.0.0.1:8787".into(), path: "/infer".into(), token: None },
             },
             [80.0, 460.0],
         );
@@ -254,6 +254,9 @@ fn build_view_renders_with_icon_and_update_settings() {
     // 아이콘 파일이 없어도 오류 문구만 뜨고 패닉하지 않아야 한다.
     h.run();
     h.run();
+
+    // 배포 앱이 마우스·키보드를 움직이게 할지는 빌드 설정에서만 정한다 — 라벨이 바뀌면 찾을 수 없다.
+    assert!(h.query_by_label("입력 무장").is_some(), "빌드 뷰에 '입력 무장' 체크박스가 있어야 한다");
 }
 
 /// 녹화 폼이 열린 상태로 데이터 뷰가 그려지는지 (녹화 자체는 화면이 있어야 하므로 폼까지).
@@ -289,6 +292,9 @@ fn the_consent_modal_stays_inside_a_small_window() {
         .expect("모달이 떠 있어야 한다");
     assert!(rect.width() <= size[0], "모달이 창보다 넓다: {rect:?}");
     assert!(rect.height() <= size[1], "모달이 창보다 높다: {rect:?}");
+    // 무엇을 확인하고 무엇을 확인하지 않는지가 승인 전에 보여야 한다.
+    assert!(h.query_by_label("확인하는 것").is_some(), "검증 범위가 모달에 없다");
+
     // 승인·거부 버튼이 실제로 화면 안에 있어야 누를 수 있다.
     for label in ["승인하고 설치", "거부"] {
         let node = h.get_by_label(label);

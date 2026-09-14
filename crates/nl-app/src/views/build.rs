@@ -74,6 +74,12 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
     if !errors.is_empty() {
         return Err(format!("검증 오류 {}개: {}", errors.len(), errors.join(" / ")));
     }
+    // 프로젝트 폴더 밖 파일은 번들에 넣지 않는다. 남에게 받은 프로젝트가 남의 파일을 실어 나르는
+    // 통로가 되면 안 된다 (보안 리뷰 H9). 경로를 고치면 그대로 빌드된다.
+    let blockers = crate::paths::build_blockers(&project);
+    if !blockers.is_empty() {
+        return Err(format!("프로젝트 폴더 밖 경로 {}개: {}", blockers.len(), blockers.join(" / ")));
+    }
     if spec.targets.is_empty() {
         return Err("대상 플랫폼을 하나 이상 고르세요".into());
     }
@@ -421,6 +427,23 @@ fn spec_editor(
                 next.output_dir = Some(dir);
                 changed = true;
             }
+            ui.end_row();
+
+            // 왼쪽 칸은 비운다 — 체크박스 자신이 "입력 무장" 이라 두 번 쓰면 찾을 때 걸린다.
+            ui.label("");
+            ui.vertical(|ui| {
+                changed |= ui
+                    .checkbox(&mut next.arm_input, "입력 무장")
+                    .on_hover_text("켜면 배포한 앱이 마우스·키보드를 실제로 움직입니다. 꺼 두면 로그만 남깁니다")
+                    .changed();
+                if next.arm_input {
+                    ui.label(
+                        RichText::new("⚠ 받은 사람이 실행하자마자 커서와 키 입력이 움직입니다. 꼭 필요할 때만 켜세요.")
+                            .color(COL_WARN)
+                            .size(11.0),
+                    );
+                }
+            });
             ui.end_row();
 
             ui.label(RichText::new("아이콘").color(COL_WEAK));

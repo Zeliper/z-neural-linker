@@ -209,6 +209,10 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
                 .color(COL_WEAK)
                 .size(11.0),
             );
+            // 한 장도 없는 클래스가 있으면 라벨 키를 잘못 눌렀거나 폴더가 빈 것이다.
+            if let Some(warn) = info.empty_class_warning() {
+                ui.label(RichText::new(format!("⚠ {warn}")).color(COL_WARN).size(11.0));
+            }
         }
         if let Some(p) = &state.preview {
             if p.dataset == *id {
@@ -953,7 +957,7 @@ mod tests {
         let n = labels.len();
         labels.dedup();
         assert_eq!(labels.len(), n, "팔레트에 같은 Transform 이 두 번");
-        assert_eq!(n, 11, "새 Transform 변형을 팔레트에 추가할 것");
+        assert_eq!(n, 12, "새 Transform 변형을 팔레트에 추가할 것");
     }
 
     #[test]

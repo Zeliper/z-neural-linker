@@ -2,6 +2,10 @@
 #
 #   UITEST_FRESH=1 tools/uitest/uitest.sh run tools/uitest/scenarios/smoke.uit
 #
+# 허용 오차는 기본값(`UITEST_TOLERANCE=0.5`, `UITEST_PIXEL_DELTA=8`)으로 세 번 연속 통과했다.
+# 자원 뷰(07)에는 CPU·메모리 수치와 그래프가 들어가 실행마다 조금씩 달라진다. 그 화면 때문에
+# 헛실패가 나면 `UITEST_TOLERANCE=1.0` 정도까지 올려도 뷰가 바뀐 것은 여전히 잡힌다.
+#
 # 골든이 없으면 첫 실행이 만들고 "골든 생성" 으로 알린다. 만들어진 PPM 을 눈으로 확인한 뒤
 # 커밋해야 다음 실행부터 실제 비교가 된다. 갱신 절차는 tools/uitest/README.md 참고.
 #

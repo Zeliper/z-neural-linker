@@ -233,8 +233,8 @@ pub fn inspect_node(
             if matches!(source, Source::Manual) {
                 manual_sender(ui, state, nid, &mut actions, live.running);
             }
-            if let Source::HttpServer { bind, path } = source {
-                http_server_tester(ui, bind, path, live.running);
+            if let Source::HttpServer { bind, path, token } = source {
+                http_server_tester(ui, bind, path, token.as_deref(), live.running);
             }
         }
         PNodeKind::Model { model, payload } => changed |= model_editor(ui, model, payload, ctx),
@@ -387,11 +387,12 @@ fn source_editor(
         Source::GuiEvent { widget } => {
             changed |= widget_picker(ui, widget, ctx, "이 위젯의 이벤트를 받습니다", "src-widget");
         }
-        Source::HttpServer { bind, path } => {
+        Source::HttpServer { bind, path, token } => {
             ui.label(RichText::new("주소:포트").color(COL_WEAK).size(11.0));
             changed |= ui.add(egui::TextEdit::singleline(bind).desired_width(f32::INFINITY)).changed();
+            let loopback = nl_core::pipeline::is_loopback_bind(bind);
             match bind.parse::<std::net::SocketAddr>() {
-                Ok(addr) if addr.ip().is_loopback() => {
+                Ok(_) if loopback => {
                     ui.label(RichText::new("✔ 루프백 — 이 컴퓨터에서만 닿습니다").color(COL_OK).size(11.0));
                 }
                 Ok(_) => {
@@ -410,6 +411,7 @@ fn source_editor(
             if !path.starts_with('/') {
                 ui.label(RichText::new("경로는 / 로 시작해야 합니다").color(COL_WARN).size(11.0));
             }
+            changed |= token_editor(ui, token, loopback);
             ui.label(
                 RichText::new("요청 본문이 값이 됩니다. 응답은 같은 파이프라인의 'HTTP 응답' 싱크가 돌려줍니다.")
                     .color(COL_WEAK)
@@ -421,10 +423,76 @@ fn source_editor(
     changed
 }
 
+/// HTTP 서버 노드의 토큰 편집기.
+///
+/// 토큰은 요청 헤더 `X-NL-Token` 으로 온다. 루프백에 묶인 서버는 이 컴퓨터에서만 닿으므로 비워 둬도
+/// 되지만, 바깥에서 닿는 주소는 토큰이 없으면 누구나 파이프라인을 구동할 수 있다 — `nl_core::validate`
+/// 가 그 조합을 오류로 잡고 여기서도 붉게 알린다.
+fn token_editor(ui: &mut egui::Ui, token: &mut Option<String>, loopback: bool) -> bool {
+    let mut changed = false;
+    ui.add_space(4.0);
+    ui.label(RichText::new("토큰").color(COL_WEAK).size(11.0));
+
+    // 보이기/숨기기는 이 노드의 화면 상태일 뿐이라 문서에 남기지 않는다.
+    let eye_id = ui.id().with("token-visible");
+    let mut visible = ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(eye_id));
+
+    let mut text = token.clone().unwrap_or_default();
+    ui.horizontal(|ui| {
+        let edit = egui::TextEdit::singleline(&mut text).password(!visible).desired_width(200.0);
+        if ui.add(edit).changed() {
+            *token = if text.trim().is_empty() { None } else { Some(text.clone()) };
+            changed = true;
+        }
+        let eye = if visible { "숨기기" } else { "보기" };
+        if ui.small_button(eye).clicked() {
+            visible = !visible;
+            ui.data_mut(|d| d.insert_temp(eye_id, visible));
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.small_button("새로 만들기").on_hover_text("무작위 토큰을 만들어 채웁니다").clicked() {
+            *token = Some(nl_core::pipeline::new_token());
+            changed = true;
+        }
+        if ui
+            .small_button("비우기")
+            .on_hover_text("루프백에 묶은 서버만 토큰 없이 열 수 있습니다")
+            .clicked()
+            && token.is_some()
+        {
+            *token = None;
+            changed = true;
+        }
+    });
+
+    let empty = token.as_ref().is_none_or(|t| t.trim().is_empty());
+    if empty && !loopback {
+        ui.label(
+            RichText::new("✖ 바깥에서 닿는 주소인데 토큰이 없습니다 — 누구나 이 파이프라인을 구동할 수 있습니다")
+                .color(COL_ERROR)
+                .size(11.0),
+        );
+    } else if empty {
+        ui.label(RichText::new("토큰 없음 — 루프백이라 이 컴퓨터에서만 닿습니다").color(COL_WEAK).size(11.0));
+    }
+    ui.label(
+        RichText::new("토큰은 프로젝트 파일에 그대로 저장됩니다. 배포한 앱에서는 NL_HTTP_TOKEN 환경 변수로 덮어쓸 수 있습니다.")
+            .color(COL_WEAK)
+            .size(10.5),
+    );
+    changed
+}
+
 /// 이 서버 노드를 부르는 curl 한 줄.
-pub fn curl_example(bind: &str, path: &str) -> String {
+pub fn curl_example(bind: &str, path: &str, token: Option<&str>) -> String {
     let host = if bind.starts_with("0.0.0.0") { bind.replacen("0.0.0.0", "127.0.0.1", 1) } else { bind.to_string() };
-    format!("curl -X POST http://{host}{path} -d '[0,1]'")
+    // 토큰이 있으면 헤더가 필수다 — 빠뜨린 예시를 복사해 붙이면 401 만 보게 된다.
+    let auth = match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => format!(" -H 'X-NL-Token: {t}'"),
+        None => String::new(),
+    };
+    format!("curl -X POST http://{host}{path}{auth} -d '[0,1]'")
 }
 
 pub fn source_label(s: &Source) -> &'static str {
@@ -561,11 +629,11 @@ fn manual_sender(
 }
 
 /// 실행 중인 HTTP 서버 노드를 바깥에서 불러 보는 칸.
-fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, running: bool) {
+fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, token: Option<&str>, running: bool) {
     ui.add_space(8.0);
     egui::Frame::NONE.fill(COL_SURFACE).inner_margin(8).corner_radius(4).show(ui, |ui| {
         ui.label(RichText::new("바깥에서 불러 보기").strong());
-        let cmd = curl_example(bind, path);
+        let cmd = curl_example(bind, path, token);
         ui.label(RichText::new(&cmd).size(11.0).monospace());
         ui.horizontal(|ui| {
             if ui.button("복사").clicked() {
@@ -1092,11 +1160,32 @@ mod tests {
     #[test]
     fn curl_example_points_at_something_reachable() {
         assert_eq!(
-            curl_example("127.0.0.1:8787", "/infer"),
+            curl_example("127.0.0.1:8787", "/infer", None),
             "curl -X POST http://127.0.0.1:8787/infer -d '[0,1]'"
         );
         // 0.0.0.0 에 묶었어도 부를 때는 루프백으로 부른다.
-        assert!(curl_example("0.0.0.0:9000", "/x").contains("http://127.0.0.1:9000/x"));
+        assert!(curl_example("0.0.0.0:9000", "/x", None).contains("http://127.0.0.1:9000/x"));
+    }
+
+    /// 토큰이 있으면 예시에 헤더가 들어가야 한다 — 빠진 예시를 복사하면 401 만 돌아온다.
+    #[test]
+    fn curl_example_carries_the_token_header() {
+        let cmd = curl_example("127.0.0.1:8787", "/infer", Some("abc123"));
+        assert!(cmd.contains("-H 'X-NL-Token: abc123'"), "{cmd}");
+        // 공백뿐인 토큰은 없는 것으로 본다 (편집기가 그렇게 저장한다).
+        assert!(!curl_example("127.0.0.1:8787", "/infer", Some("  ")).contains("X-NL-Token"));
+    }
+
+    /// 팔레트로 만든 서버는 토큰을 이미 갖고 있어야 한다.
+    #[test]
+    fn a_new_http_server_comes_with_a_token() {
+        let found = crate::pcanvas::source_palette()
+            .into_iter()
+            .find(|s| matches!(s, Source::HttpServer { .. }))
+            .expect("팔레트에 HTTP 서버");
+        let Source::HttpServer { token, .. } = found else { panic!("HTTP 서버") };
+        let token = token.expect("토큰이 채워져 있어야 한다");
+        assert_eq!(token.chars().count(), nl_core::pipeline::TOKEN_LEN);
     }
 
     /// 팔레트의 기본 HttpServer 는 루프백이어야 한다 — 새 노드가 바깥에 열려 있으면 안 된다.

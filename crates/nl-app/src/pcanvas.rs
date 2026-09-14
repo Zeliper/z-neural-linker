@@ -66,7 +66,7 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
             Source::Timer { interval_ms } => format!("{interval_ms}ms 마다"),
             Source::GuiEvent { widget } => format!("위젯 {}", widget.short()),
             Source::Manual => "인스펙터에서 값 보내기".into(),
-            Source::HttpServer { bind, path } => format!("{bind}{path}"),
+            Source::HttpServer { bind, path, .. } => format!("{bind}{path}"),
         },
         PNodeKind::Model { model, payload } => {
             let name = project.models.get(model).map(|m| m.name.clone()).unwrap_or_else(|| "(없는 모델)".into());
@@ -700,7 +700,12 @@ pub fn source_palette() -> Vec<Source> {
         Source::StdinJson,
         Source::File { path: "input.json".into(), interval_ms: 1000 },
         Source::GuiEvent { widget: WidgetId::from_u128(0) },
-        Source::HttpServer { bind: DEFAULT_HTTP_BIND.into(), path: DEFAULT_HTTP_PATH.into() },
+        // 토큰을 미리 채워 둔다 — 나중에 바깥 주소로 바꿔도 인증 없이 열리는 일이 없다.
+        Source::HttpServer {
+            bind: DEFAULT_HTTP_BIND.into(),
+            path: DEFAULT_HTTP_PATH.into(),
+            token: Some(nl_core::pipeline::new_token()),
+        },
     ]
 }
 

@@ -159,6 +159,22 @@ fn update_block(ui: &mut egui::Ui, ctx: &ViewCtx, actions: &mut Vec<ViewAction>)
     ui.separator();
     ui.label(RichText::new(format!("현재 v{}", env!("CARGO_PKG_VERSION"))).color(COL_WEAK));
 
+    // 공개키가 없거나 주소가 https 가 아니면 `nl_update` 가 스스로 `Disabled` 로 남는다.
+    // 그 상태에서는 켜고 끌 것이 없으므로 이유만 알리고 조작 UI 를 감춘다.
+    let disabled = matches!(ctx.update_state, Some(nl_update::State::Disabled(_))) || !crate::update_key::ENABLED;
+    if disabled {
+        let why = match ctx.update_state {
+            Some(nl_update::State::Disabled(w)) => w.clone(),
+            _ => "서명 공개키가 없습니다".to_string(),
+        };
+        ui.label(RichText::new("서명 키 미설정 — 업데이트 비활성").color(COL_WARN).size(11.5));
+        ui.label(RichText::new(why).color(COL_WEAK).size(11.0));
+        ui.label(
+            RichText::new("매니페스트를 검증할 수 없으면 새 버전을 확인하지 않습니다.").color(COL_WEAK).size(11.0),
+        );
+        return;
+    }
+
     let mut check = ctx.update_check;
     if ui
         .checkbox(&mut check, "시작할 때 새 버전 확인")
@@ -202,6 +218,7 @@ pub fn update_status(state: Option<&nl_update::State>) -> (String, egui::Color32
         Some(S::Applying) => ("적용하는 중…".to_string(), COL_WEAK),
         Some(S::Applied(a)) => (a.message().to_string(), COL_OK),
         Some(S::Failed(e)) => (format!("확인 실패: {e}"), COL_WARN),
+        Some(S::Disabled(why)) => (format!("사용 불가: {why}"), COL_WARN),
     }
 }
 

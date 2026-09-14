@@ -5,6 +5,7 @@ pub mod canvas;
 pub mod fonts;
 pub mod inspector;
 pub mod outline;
+pub mod paths;
 pub mod pcanvas;
 pub mod project;
 pub mod record;

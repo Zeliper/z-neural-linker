@@ -8,7 +8,9 @@ use crate::views::fmt_bytes;
 use nl_core::BuildTarget;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 
 /// 런타임 매니페스트 기본 주소. `NL_RUNTIME_MANIFEST` 환경 변수가 있으면 그것이 우선한다.
 pub const DEFAULT_MANIFEST_URL: &str = "https://updates.trustanc.dev/neural-linker/runtimes/latest.json";
@@ -225,6 +227,73 @@ pub struct Plan {
     pub method: Method,
 }
 
+impl Plan {
+    /// nl-bundle 이 준 검증 설명. 그 크레이트가 소유한 계획일 때만 있다.
+    pub fn verification_note(&self) -> Option<String> {
+        match &self.method {
+            Method::BundleTool(inner) => Some(inner.verification_note()),
+            _ => None,
+        }
+    }
+
+    /// 이 계획이 무엇을 확인하는지.
+    pub fn verification(&self) -> Verification {
+        match &self.method {
+            Method::Download { sha256, .. } => {
+                Verification { sha256: !sha256.trim().is_empty(), signature: false, downloads: true }
+            }
+            // nl-bundle 이 계획을 만들 때 이미 정해 둔 값을 그대로 쓴다 — 두 곳에서 따로 판단하면 어긋난다.
+            Method::BundleTool(inner) => {
+                Verification { sha256: inner.verified, signature: false, downloads: true }
+            }
+            Method::CargoBuild { .. } => Verification { sha256: false, signature: false, downloads: false },
+        }
+    }
+}
+
+/// 받은 파일을 무엇으로 확인하는지. 동의 화면이 그대로 보여 준다 (보안 리뷰 M21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Verification {
+    /// 내려받은 바이트를 sha256 으로 맞춰 보는가.
+    pub sha256: bool,
+    /// 서명을 검증하는가. 지금은 어느 경로도 하지 않는다.
+    pub signature: bool,
+    /// 네트워크에서 받아 오는가. 소스 빌드는 아니다.
+    pub downloads: bool,
+}
+
+impl Verification {
+    /// 사람이 읽는 줄 목록. 확인하지 **않는** 것도 적는다 — 빠진 항목이 보여야 판단할 수 있다.
+    ///
+    /// `note` 는 nl-bundle 이 준 한 줄이 있으면 그것을 쓴다 (해시 값까지 적혀 있다).
+    pub fn lines_with(&self, note: Option<&str>) -> Vec<(String, bool)> {
+        let mut v = self.lines();
+        if let Some(n) = note {
+            if !v.is_empty() {
+                v[0] = (n.to_string(), self.sha256);
+            }
+        }
+        v
+    }
+
+    /// 사람이 읽는 줄 목록.
+    pub fn lines(&self) -> Vec<(String, bool)> {
+        if !self.downloads {
+            return vec![("이 컴퓨터에서 직접 빌드합니다 — 내려받는 파일이 없습니다".to_string(), true)];
+        }
+        vec![
+            (
+                if self.sha256 { "sha256 으로 받은 파일을 확인합니다".into() } else { "sha256 이 없어 확인하지 못합니다".to_string() },
+                self.sha256,
+            ),
+            (
+                if self.signature { "서명을 검증합니다".into() } else { "서명 검증은 하지 않습니다".to_string() },
+                self.signature,
+            ),
+        ]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Method {
     /// 매니페스트에서 받은 자산을 내려받아 검증한다.
@@ -257,6 +326,15 @@ pub fn plan_runtime(target: BuildTarget, manifest_url: &str) -> Result<Plan, Str
 
     let manifest_err = match fetch_manifest(manifest_url) {
         Ok(m) => match m.asset_for(target) {
+            // 해시가 없으면 내려받은 것이 무엇인지 확인할 방법이 없다. 실행 파일이라 더더욱
+            // 그냥 실행할 수 없으므로 계획을 아예 만들지 않는다 (보안 리뷰 H5).
+            Some(a) if a.sha256.trim().is_empty() => {
+                format!(
+                    "매니페스트의 {} 자산에 sha256 이 없습니다 — 받은 파일을 확인할 수 없어 내려받지 않습니다. \
+                     매니페스트를 고치거나 런타임을 직접 빌드하세요",
+                    target.label()
+                )
+            }
             Some(a) => {
                 return Ok(Plan {
                     tool: ToolKind::Runtime(target),
@@ -336,12 +414,12 @@ pub enum ToolEvent {
 }
 
 /// 승인된 계획을 백그라운드에서 실행한다. UI 는 채널만 읽는다.
-pub fn spawn(plan: Plan) -> Receiver<ToolEvent> {
+pub fn spawn(plan: Plan, cancel: Arc<AtomicBool>) -> Receiver<ToolEvent> {
     let (tx, rx) = channel();
     let name = "nl-tools".to_string();
     let spawned = std::thread::Builder::new().name(name).spawn(move || {
         let result = match plan.method.clone() {
-            Method::Download { url, sha256 } => download(&url, &sha256, plan.size, &plan.to, &tx),
+            Method::Download { url, sha256 } => download(&url, &sha256, plan.size, &plan.to, &tx, &cancel),
             Method::CargoBuild { workspace } => cargo_build_runtime(&workspace, &plan.to, &tx),
             Method::BundleTool(inner) => run_bundle_tool(&inner, &tx),
         };
@@ -365,6 +443,7 @@ fn download(
     expected_size: u64,
     dest: &Path,
     tx: &std::sync::mpsc::Sender<ToolEvent>,
+    cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
     let _ = tx.send(ToolEvent::Log(format!("내려받는 중: {url}")));
     let resp = ureq::get(url)
@@ -387,6 +466,10 @@ fn download(
     let mut buf = Vec::with_capacity(total.min(MAX_DOWNLOAD) as usize);
     let mut chunk = [0u8; 64 * 1024];
     loop {
+        // 취소는 청크 사이에서만 본다. 받은 것은 버리고 파일은 쓰지 않는다.
+        if cancel.load(Ordering::Relaxed) {
+            return Err("사용자가 취소했습니다".to_string());
+        }
         let n = reader.read(&mut chunk).map_err(|e| format!("읽기 실패: {e}"))?;
         if n == 0 {
             break;
@@ -400,15 +483,16 @@ fn download(
         }
     }
 
-    if !sha256.trim().is_empty() {
-        let got = nl_bundle::sha256_hex(&buf);
-        if !got.eq_ignore_ascii_case(sha256.trim()) {
-            return Err(format!("sha256 이 다릅니다 (기대 {sha256}, 실제 {got}) — 파일을 버렸습니다"));
-        }
-        let _ = tx.send(ToolEvent::Log("sha256 검증 통과".into()));
-    } else {
-        let _ = tx.send(ToolEvent::Log("매니페스트에 sha256 이 없어 검증을 건너뜁니다".into()));
+    // 해시가 없는 계획은 `plan_runtime` 이 만들지 않는다. 여기까지 왔다면 어딘가 잘못된 것이라
+    // 파일을 쓰지 않고 멈춘다 — 검증 없이 실행 파일을 놓는 경로를 남기지 않는다.
+    if sha256.trim().is_empty() {
+        return Err("sha256 이 없어 받은 파일을 확인할 수 없습니다 — 파일을 버렸습니다".to_string());
     }
+    let got = nl_bundle::sha256_hex(&buf);
+    if !got.eq_ignore_ascii_case(sha256.trim()) {
+        return Err(format!("sha256 이 다릅니다 (기대 {sha256}, 실제 {got}) — 파일을 버렸습니다"));
+    }
+    let _ = tx.send(ToolEvent::Log("sha256 검증 통과".into()));
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -582,6 +666,34 @@ mod tests {
         assert!(matches!(plan.method, Method::BundleTool(_)));
         // 계획을 만드는 것만으로는 아무것도 설치되지 않는다.
         assert!(!plan.to.exists() || plan.to.is_file());
+    }
+
+    /// 동의 화면은 확인하는 것과 확인하지 못하는 것을 모두 말해야 한다.
+    #[test]
+    fn verification_tells_both_what_is_and_is_not_checked() {
+        let inno = plan_inno_setup();
+        let v = inno.verification();
+        assert!(v.downloads, "내려받는 계획이다");
+        assert!(!v.signature, "서명 검증은 아직 어느 경로도 하지 않는다");
+        // 줄마다 참·거짓이 붙어 화면에서 ✔/✖ 로 갈린다.
+        let lines = v.lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().any(|(t, _)| t.contains("서명")));
+        // nl-bundle 이 준 설명이 있으면 첫 줄을 대신한다 — 해시 값까지 들어 있다.
+        let note = inno.verification_note().expect("번들 계획에는 설명이 있다");
+        let merged = v.lines_with(Some(&note));
+        assert_eq!(merged[0].0, note);
+        assert_eq!(merged[0].1, v.sha256, "표시와 판정이 어긋나면 안 된다");
+    }
+
+    /// 소스 빌드는 내려받는 것이 없으니 해시 이야기를 하지 않는다.
+    #[test]
+    fn a_source_build_says_it_downloads_nothing() {
+        let v = Verification { sha256: false, signature: false, downloads: false };
+        let lines = v.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].1, "직접 빌드는 경고할 일이 아니다");
+        assert!(lines[0].0.contains("내려받는 파일이 없습니다"));
     }
 
     #[test]
