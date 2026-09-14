@@ -162,6 +162,25 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   학습 시 `require_grad()`, 옵티마이저(SGD/Adam/AdamW)는 `Gradients` 에서 텐서별 grad 를 꺼내 직접 갱신한다
   (burn 의 `Module` 파생에 묶이지 않아 런타임 정의 그래프가 가능).
 - 실행 순서는 core 의 위상정렬 결과를 그대로 쓴다. Dropout/BatchNorm 은 `train: bool` 로 분기.
+- **순환 레이어의 비용과 한계.** `Lstm`/`Gru` 는 시각마다 게이트 커널을 새로 띄우는 구조라 한 스텝 값이 길이에 비례해서 는다.
+  LSTM(은닉 64, 배치 32, 임베딩 32, `return_sequence: false`) 순전파+역전파 **스텝당** 시간 — 6회 측정의 최소값이고
+  공용 개발 머신이라 절대값보다 비율을 보는 편이 낫다:
+
+  | 시퀀스 길이 | 32 | 128 | 512 |
+  |---|---|---|---|
+  | CPU (ndarray, 릴리스 빌드) | 50 ms | 240 ms | 2.5 s |
+  | GPU (Intel UHD 630, wgpu) | 155 ms | 610 ms | 3.1 s |
+
+  **길이 수백이 현실적인 상한이다.** 512 면 스텝당 2~3 초라 1000 스텝짜리 에포크 하나가 한 시간 가까이 간다.
+  짧은 쪽(32~128)에서는 CPU 가 3~4 배 빠르다 — iGPU 는 시각당 약 5 ms 가 커널 디스패치 고정비로 나가고
+  `[32, 64]` 짜리 행렬곱은 그 비용을 메울 만큼 크지 않다. GPU 가 앞서는 구간은 없고, 길이 512 에서야 겨우 비슷해진다.
+  CPU 쪽이 512 에서 유독 가파른 것(시각당 1.6 ms → 4.9 ms)은 자동미분 테이프가 길이에 비례해 커지면서 캐시를 벗어나기 때문이다.
+  더 늘리려면 시각을 묶어 커널 수를 줄이거나(fused cell) 절단 역전파(TBPTT)가 필요한데, 둘 다 아직 없다.
+- **스텝 루프 안에는 장치→호스트 읽기가 없다.** `recurrent`/`self_attention` 은 `narrow`·`linear`·`sigmoid`·`tanh`·`cat`
+  같은 텐서 연산만 쓰고 `into_scalar`/`to_host` 를 부르지 않는다 — 시각마다 동기화가 걸리면 GPU 는 쓸 수 없게 느려진다.
+  호스트로 내려오는 값은 학습 **스텝당 최대 한 번**이고(손실 이벤트가 나갈 차례일 때와 에포크 마지막 스텝),
+  에포크 손실은 장치 텐서로 누적했다가 에포크 끝에 한 번 읽는다. 그래디언트 클리핑도 제곱합을 장치에서 더해 한 번만 읽는다
+  (기본값 `grad_clip: 0.0` 이라 평소에는 이 읽기조차 없다).
 
 ### 학습 (`train.rs`)
 - `Trainer::spawn(model, dataset, config, device) -> (JoinHandle, Receiver<TrainEvent>, Control)`.
@@ -182,6 +201,11 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 ### 추론 (`infer.rs`)
 - `Session::load(model, weights, device)`; `run(&[HostTensor]) -> Vec<HostTensor>`. `codec.rs` 가 페이로드 Transform 을 적용해
   이미지/CSV/JSON ↔ 텐서를 오간다.
+- 필드 하나가 아니라 **페이로드 전체**를 옮길 때는 `codec::{encode_inputs, decode_outputs}` 를 쓴다.
+  `payload.inputs` 순서 = `Graph::input_nodes()` 순서, `payload.outputs` 순서 = `Graph::output_nodes()` 순서가 **계약**이다
+  (이름으로 맞추지 않는다 — 개수가 다르면 오류). 출력 필드가 하나면 값 자체를, 여럿이면 필드 이름을 키로 한 JSON 객체를 돌려준다.
+  입력도 대칭이라 필드가 하나면 값을 그대로 받고(키 하나짜리 객체로 감싸 와도 벗겨 준다), 여럿이면 JSON 객체의 키가 곧 필드 이름이다.
+  파이프라인의 `ModelOutput.field` 와 HTTP 추론 응답이 같은 모양을 보게 하려는 것이다.
 - `Transform::Tokenize { vocab, max_len }`(core 의 `payload.rs`)는 문자 단위 토크나이저다 — `Text` 필드를 Embedding 입력으로
   바꾼다. `vocab` 의 문자 하나가 인덱스 하나이고 **인덱스는 1부터**, 0 은 패딩 겸 미지 문자다(그래서 Embedding 의 `vocab` 은
   글자 수 + 1 이상이어야 한다). 결과는 길이 `max_len` 정수 텐서이고 **인코드 전용**이다.

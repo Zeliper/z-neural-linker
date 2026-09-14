@@ -12,7 +12,7 @@ pub mod tensor;
 pub mod train;
 pub mod weights;
 
-pub use codec::{decode, encode, Value};
+pub use codec::{decode, decode_outputs, encode, encode_inputs, Value};
 pub use data::{preview, scan, Sample};
 pub use device::{enumerate, resolve, DeviceInfo, DeviceKind, Resolved};
 pub use infer::Session;

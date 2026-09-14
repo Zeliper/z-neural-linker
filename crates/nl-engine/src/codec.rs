@@ -8,7 +8,7 @@ use crate::limits::{check_image_size, checked_elems, decode_image, MAX_CLASSES, 
 use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use nl_core::payload::{Field, FieldKind, Transform};
+use nl_core::payload::{Field, FieldKind, PayloadSpec, Transform};
 
 /// 엔진 경계의 바깥 값.
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +90,148 @@ pub fn decode(field: &Field, tensor: &HostTensor) -> Result<Value> {
             }
         }
     })
+}
+
+// ───────────────────────────── 페이로드 단위 매핑 ─────────────────────────────
+
+/// 모델 출력 여러 개를 페이로드 필드 이름으로 묶는다.
+///
+/// **순서 규약**: `outputs` 는 `Graph::output_nodes()` 순서(이름 → id)이고 `payload.outputs` 도 같은
+/// 순서로 적는다. 개수가 다르면 오류다 — 이름으로 맞추지 않으므로 순서가 계약이다.
+///
+/// 필드가 하나면 그 값을 그대로 돌려주고, 둘 이상이면 `{ "필드 이름": 값 }` 객체([`Value::Json`])로 묶는다.
+/// 파이프라인의 `ModelOutput.field` 와 HTTP 추론 응답이 같은 모양을 보게 하기 위한 것이다.
+pub fn decode_outputs(payload: &PayloadSpec, outputs: &[HostTensor]) -> Result<Value> {
+    let fields = &payload.outputs;
+    if fields.len() != outputs.len() {
+        bail!(
+            "페이로드 '{}' 의 출력 필드는 {} 개인데 모델 출력은 {} 개입니다 \
+             (Graph::output_nodes() 순서와 payload.outputs 순서가 같아야 합니다)",
+            payload.name,
+            fields.len(),
+            outputs.len()
+        );
+    }
+    if fields.is_empty() {
+        bail!("페이로드 '{}' 에 출력 필드가 없습니다", payload.name);
+    }
+    if fields.len() == 1 {
+        return decode(&fields[0], &outputs[0]);
+    }
+    check_unique_names(fields, "출력")?;
+
+    let mut map = serde_json::Map::with_capacity(fields.len());
+    for (field, tensor) in fields.iter().zip(outputs) {
+        map.insert(field.name.clone(), value_to_json(decode(field, tensor)?)?);
+    }
+    Ok(Value::Json(serde_json::Value::Object(map)))
+}
+
+/// 바깥 값 하나를 페이로드 입력 필드들로 나눠 인코딩한다 ([`decode_outputs`] 의 반대 방향).
+///
+/// 입력 필드가 하나면 값을 그대로 그 필드에 넣는다. 다만 JSON 객체의 키가 그 필드 이름 하나뿐이면
+/// 벗겨서 쓴다 — HTTP 로는 값 하나도 객체로 감싸 보내는 편이 흔하기 때문이다
+/// (`Json` 필드는 객체 자체가 값이므로 벗기지 않는다).
+///
+/// 필드가 여럿이면 [`Value::Json`] 객체여야 하고 키가 곧 필드 이름이다.
+/// 결과는 `payload.inputs` 순서이며, 이는 `Graph::input_nodes()` 순서와 같아야 한다.
+pub fn encode_inputs(payload: &PayloadSpec, value: &Value) -> Result<Vec<HostTensor>> {
+    let fields = &payload.inputs;
+    if fields.is_empty() {
+        bail!("페이로드 '{}' 에 입력 필드가 없습니다", payload.name);
+    }
+    if fields.len() == 1 {
+        let f = &fields[0];
+        let unwrapped = unwrap_single(f, value);
+        return Ok(vec![encode(f, unwrapped.as_ref().unwrap_or(value))?]);
+    }
+    check_unique_names(fields, "입력")?;
+
+    let Value::Json(serde_json::Value::Object(obj)) = value else {
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        bail!(
+            "입력 필드가 {} 개라 JSON 객체가 필요합니다 (키: {names:?}, 지금 {})",
+            fields.len(),
+            kind_of(value)
+        );
+    };
+    let mut out = Vec::with_capacity(fields.len());
+    for f in fields {
+        let v = obj.get(&f.name).with_context(|| {
+            let have: Vec<&String> = obj.keys().collect();
+            format!("입력에 '{}' 키가 없습니다 (받은 키: {have:?})", f.name)
+        })?;
+        out.push(encode(f, &Value::Json(v.clone()))?);
+    }
+    Ok(out)
+}
+
+/// 키 하나짜리 객체가 그 필드를 감싼 것이면 벗긴다.
+fn unwrap_single(field: &Field, value: &Value) -> Option<Value> {
+    if matches!(field.kind, FieldKind::Json) {
+        return None; // Json 필드는 객체 자체가 값이다
+    }
+    let Value::Json(serde_json::Value::Object(obj)) = value else {
+        return None;
+    };
+    if obj.len() == 1 {
+        if let Some(inner) = obj.get(&field.name) {
+            return Some(Value::Json(inner.clone()));
+        }
+    }
+    None
+}
+
+fn check_unique_names(fields: &[Field], what: &str) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for f in fields {
+        if !seen.insert(f.name.as_str()) {
+            bail!("{what} 필드 이름 '{}' 이 두 번 나옵니다 — 객체 키가 겹칩니다", f.name);
+        }
+    }
+    Ok(())
+}
+
+/// [`Value`] 를 JSON 으로. 객체로 묶을 때 쓴다.
+fn value_to_json(v: Value) -> Result<serde_json::Value> {
+    Ok(match v {
+        Value::Json(j) => j,
+        Value::Text(t) => serde_json::Value::String(t),
+        Value::Number(n) => serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Numbers(v) => serde_json::Value::Array(
+            v.into_iter()
+                .map(|x| {
+                    serde_json::Number::from_f64(x as f64)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect(),
+        ),
+        Value::Tensor(t) => serde_json::json!({ "shape": t.shape, "data": t.data }),
+        // 들어오는 쪽이 data URL 을 받으므로 나가는 쪽도 같은 모양으로 맞춘다.
+        Value::Image { width, height, rgba } => serde_json::Value::String(image_data_url(width, height, &rgba)?),
+    })
+}
+
+/// RGBA 버퍼를 `data:image/png;base64,…` 로.
+fn image_data_url(width: u32, height: u32, rgba: &[u8]) -> Result<String> {
+    check_image_size(width, height, "출력 이미지")?;
+    let need = checked_elems(&[width as usize, height as usize, 4], "출력 이미지")?;
+    if rgba.len() < need {
+        bail!("RGBA 버퍼가 {width}×{height} 에 비해 짧습니다 ({} 바이트)", rgba.len());
+    }
+    let img = image::RgbaImage::from_raw(width, height, rgba[..need].to_vec())
+        .context("RGBA 버퍼를 이미지로 만들 수 없습니다")?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| anyhow::anyhow!("PNG 인코딩 실패: {e}"))?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    ))
 }
 
 fn first_sample(t: &HostTensor) -> (Vec<usize>, Vec<f32>) {
@@ -1279,6 +1421,155 @@ mod tests {
             data: vec![1.0, 2.0],
         };
         assert!(encode(&f, &Value::Tensor(bad)).is_err());
+    }
+
+    // ── 페이로드 단위 매핑 ──
+
+    fn class_field(name: &str, labels: &[&str]) -> Field {
+        let mut f = Field::new(
+            name,
+            FieldKind::ClassLabel {
+                labels: labels.iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        f.decode = vec![Transform::Softmax, Transform::Argmax, Transform::MapLabel];
+        f
+    }
+
+    #[test]
+    fn single_output_payload_returns_the_value_itself() {
+        let mut p = PayloadSpec::new("하나");
+        p.outputs.push(class_field("class", &["고양이", "개"]));
+        let got = decode_outputs(&p, &[HostTensor::new(vec![1, 2], vec![0.1, 2.0])]).unwrap();
+        assert_eq!(got, Value::Text("개".into()));
+    }
+
+    #[test]
+    fn multiple_outputs_become_a_json_object_keyed_by_field_name() {
+        let mut p = PayloadSpec::new("둘");
+        p.outputs.push(class_field("종류", &["고양이", "개"]));
+        p.outputs.push(Field::new("점수", FieldKind::Scalar));
+
+        let got = decode_outputs(
+            &p,
+            &[
+                HostTensor::new(vec![1, 2], vec![0.1, 2.0]),
+                HostTensor::new(vec![1, 1], vec![0.75]),
+            ],
+        )
+        .unwrap();
+        let Value::Json(serde_json::Value::Object(obj)) = got else {
+            panic!("JSON 객체가 아닙니다");
+        };
+        assert_eq!(obj["종류"], serde_json::json!("개"));
+        assert_eq!(obj["점수"].as_f64().unwrap(), 0.75);
+    }
+
+    #[test]
+    fn output_count_mismatch_and_duplicate_names_are_errors() {
+        let mut p = PayloadSpec::new("둘");
+        p.outputs.push(Field::new("a", FieldKind::Scalar));
+        p.outputs.push(Field::new("b", FieldKind::Scalar));
+        let e = format!(
+            "{:#}",
+            decode_outputs(&p, &[HostTensor::new(vec![1, 1], vec![0.0])]).unwrap_err()
+        );
+        assert!(e.contains("2 개") && e.contains("1 개"), "{e}");
+        assert!(e.contains("output_nodes"), "순서 규약을 알려야 합니다: {e}");
+
+        let mut dup = PayloadSpec::new("중복");
+        dup.outputs.push(Field::new("같음", FieldKind::Scalar));
+        dup.outputs.push(Field::new("같음", FieldKind::Scalar));
+        let t = HostTensor::new(vec![1, 1], vec![0.0]);
+        let e = format!("{:#}", decode_outputs(&dup, &[t.clone(), t]).unwrap_err());
+        assert!(e.contains("두 번"), "{e}");
+    }
+
+    #[test]
+    fn encode_inputs_splits_a_json_object_by_field_name() {
+        let mut p = PayloadSpec::new("2입력");
+        p.inputs.push(Field::new("a", FieldKind::Vector { len: 2 }));
+        p.inputs.push(Field::new("b", FieldKind::Vector { len: 3 }));
+
+        let got = encode_inputs(
+            &p,
+            &Value::Json(serde_json::json!({"a": [1.0, 2.0], "b": [3.0, 4.0, 5.0]})),
+        )
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].shape, vec![1, 2]);
+        assert_eq!(got[0].data, vec![1.0, 2.0]);
+        assert_eq!(got[1].data, vec![3.0, 4.0, 5.0]);
+
+        // 키가 빠지면 어떤 키가 필요한지 알려 준다.
+        let e = format!(
+            "{:#}",
+            encode_inputs(&p, &Value::Json(serde_json::json!({"a": [1.0, 2.0]}))).unwrap_err()
+        );
+        assert!(e.contains("'b'"), "{e}");
+
+        // 객체가 아니면 기대 키를 보여 준다.
+        let e = format!("{:#}", encode_inputs(&p, &Value::Numbers(vec![1.0; 5])).unwrap_err());
+        assert!(e.contains("\"a\"") && e.contains("\"b\""), "{e}");
+    }
+
+    #[test]
+    fn encode_inputs_unwraps_a_single_field_object() {
+        let mut p = PayloadSpec::new("1입력");
+        p.inputs.push(Field::new("x", FieldKind::Vector { len: 2 }));
+
+        // 값 그대로도, 키 하나짜리 객체로 감싸도 같은 결과.
+        let bare = encode_inputs(&p, &Value::Numbers(vec![1.0, 2.0])).unwrap();
+        let wrapped = encode_inputs(&p, &Value::Json(serde_json::json!({"x": [1.0, 2.0]}))).unwrap();
+        assert_eq!(bare, wrapped);
+
+        // Json 필드는 객체 자체가 값이라 벗기지 않는다.
+        let mut j = PayloadSpec::new("json");
+        let mut f = Field::new("payload", FieldKind::Json);
+        f.encode = vec![Transform::JsonPointer {
+            pointer: "/payload".into(),
+        }];
+        j.inputs.push(f);
+        let got = encode_inputs(&j, &Value::Json(serde_json::json!({"payload": [7.0, 8.0]}))).unwrap();
+        assert_eq!(got[0].data, vec![7.0, 8.0], "Json 필드를 벗기면 포인터가 어긋난다");
+    }
+
+    #[test]
+    fn round_trip_through_payload_level_helpers() {
+        let p = PayloadSpec::image_classifier("c", 4, 4, vec!["a".into(), "b".into()]);
+        let img = checkerboard(4, 4);
+        let inputs = encode_inputs(&p, &img).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].shape, vec![1, 3, 4, 4]);
+        let out = decode_outputs(&p, &[HostTensor::new(vec![1, 2], vec![5.0, 0.0])]).unwrap();
+        assert_eq!(out, Value::Text("a".into()));
+    }
+
+    #[test]
+    fn json_conversion_covers_image_and_tensor_values() {
+        // decode 는 지금 Text/Number/Numbers 만 내지만, value_to_json 은 Value 전부를 받는다.
+        // 이미지 값은 들어오는 쪽과 같은 data URL 모양으로 나간다.
+        let json = value_to_json(checkerboard(3, 2)).unwrap();
+        let url = json.as_str().expect("data URL 문자열이 아닙니다");
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        let back = image_bytes_from_str(url).unwrap();
+        let img = crate::limits::decode_image(&back, "테스트").unwrap().to_rgba8();
+        assert_eq!((img.width(), img.height()), (3, 2));
+
+        let t = value_to_json(Value::Tensor(HostTensor::new(vec![1, 2], vec![1.0, 2.0]))).unwrap();
+        assert_eq!(t["shape"], serde_json::json!([1, 2]));
+        assert_eq!(t["data"], serde_json::json!([1.0, 2.0]));
+
+        // 유한하지 않은 수는 JSON 에 없으므로 null 로 떨어뜨린다(오류 아님).
+        assert_eq!(value_to_json(Value::Number(f64::NAN)).unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            value_to_json(Value::Numbers(vec![f32::INFINITY])).unwrap(),
+            serde_json::json!([null])
+        );
+
+        // 버퍼가 짧으면 PNG 를 만들지 않고 오류.
+        let e = format!("{:#}", image_data_url(4, 4, &[0u8; 8]).unwrap_err());
+        assert!(e.contains("짧습니다"), "{e}");
     }
 
     #[test]

@@ -1875,6 +1875,56 @@ fn bench_xor_1000_samples_200_epochs() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 순환 레이어의 시퀀스 길이별 비용. 시간축을 한 스텝씩 도는 구조라 길이에 선형으로 는다.
+///
+/// `NL_BENCH=1`, 장치는 `NL_TEST_DEVICE=gpu` 로 바꿀 수 있다.
+#[test]
+fn bench_lstm_sequence_lengths() {
+    if std::env::var("NL_BENCH").as_deref() != Ok("1") {
+        eprintln!("NL_BENCH=1 이 아니어서 건너뜁니다");
+        return;
+    }
+    for len in [32usize, 128, 512] {
+        let dir = temp_dir("bench-lstm");
+        let rows = 256;
+        let ds = memory_sequence_csv(&dir, rows, len, 16);
+        let mut def = sequence_model(
+            len,
+            16,
+            32,
+            vec![LayerKind::Lstm {
+                hidden: 64,
+                bidirectional: false,
+                return_sequence: false,
+            }],
+        );
+        def.train.loss = Loss::CrossEntropy;
+        def.train.metric = Metric::None;
+        def.train.optimizer = Optimizer::Adam {
+            lr: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        };
+        def.train.epochs = 2;
+        def.train.batch_size = 32;
+        def.train.val_split = 0.0;
+        def.train.device = test_device();
+
+        let run = train_to_end(def, ds, &dir);
+        assert_eq!(run.status, RunStatus::Finished);
+        // 첫 에포크는 셰이더 컴파일·할당이 섞이므로 마지막 에포크로 잰다.
+        let last = run.epochs.last().unwrap();
+        let steps = rows.div_ceil(32);
+        println!(
+            "BENCH lstm len={len} hidden=64 batch=32: 스텝당 {:.1} ms (에포크 {:.3}초, {steps} 스텝)",
+            last.seconds * 1000.0 / steps as f64,
+            last.seconds
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 /// 샘플당 데이터가 큰 경우(8×8 이미지 + CNN). 배치 업로드 비용이 드러나는 쪽.
 #[test]
 fn bench_quadrants_cnn() {
