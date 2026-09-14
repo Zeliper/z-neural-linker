@@ -31,6 +31,8 @@
 - 학습 루프(SGD/Adam/AdamW × MSE/CrossEntropy/BCE/MAE), safetensors 체크포인트, 추론 세션
 - 데이터 로더: 합성·CSV·이미지 폴더·화면 녹화
 - 다입출력 학습, 학습률 스케줄(Step/Cosine/Plateau)·워밍업·조기 종료
+- 다출력 페이로드 매핑 `decode_outputs`·`encode_inputs` — 모델이 출력을 여럿 낼 때 페이로드 필드로
+  갈라 담는다 (`cd90a6f`)
 - 크기와 장치를 보고 고르는 **상주 배치** — 데이터셋을 장치에 올려 두고 에포크마다 셔플만 한다
 
 **입출력 (`nl-io`)**
@@ -65,9 +67,17 @@
   `<작업 폴더>/local/` 에 둔 인증서 같은 파일은 번들을 갈아 끼워도 남는다.
   같은 번들인지는 **내용의 지문**으로 본다 — zip 바이트가 아니라 매니페스트·프로젝트·가중치·에셋의
   내용만 해싱하므로 압축 시각 같은 것에 흔들리지 않는다
-- **systemd 사용자 유닛 템플릿**과 `install.sh --service` (`e7a5a12`). 토큰은 `EnvironmentFile=` 로
-  분리하고(유닛은 0644 에 `systemctl cat` 으로 드러난다), `Restart=on-failure` 와 재시작 폭주 가드,
-  최소 권한 옵션을 켜 둔다. 가이드에 "서버로 운영하기" 절이 생겼다
+- **systemd 사용자 유닛 템플릿**과 `install.sh --service` (`e7a5a12`). `Restart=on-failure` 와
+  재시작 폭주 가드, 최소 권한 옵션을 켜 둔다. 가이드에 "서버로 운영하기" 절이 생겼다
+- **`--env-file <파일>`** — `KEY=VALUE` 줄을 읽어 환경 변수로 넣는다 (`6bef30e`). 토큰을 명령줄에
+  적지 않기 위한 것이다. 셸이 아니므로 따옴표를 벗기지도 변수를 치환하지도 않고, 값은 `=` 뒤부터
+  줄 끝까지 그대로다. 줄 양끝 공백은 없앤다 — Windows 파일의 `\r` 이 토큰에 섞이면 인증이 조용히
+  어긋난다. **이미 있는 환경 변수는 덮어쓰지 않아** 한 번만 다른 값으로 띄울 수 있다.
+  systemd 유닛도 `EnvironmentFile=` 대신 이것을 쓴다 — 두 플랫폼이 같은 파일·같은 규칙을 쓰게 했다
+- **Windows 상시 실행** `packaging/windows/install-service.ps1` — 작업 스케줄러 `ONLOGON` 작업을
+  만든다(관리자 권한 불필요). 토큰은 작업에 적히지 않는다. 작업 스케줄러에는 환경 변수를 넣어 주는
+  기능이 없어 `cmd /c "set TOKEN=… && app.exe"` 가 흔히 쓰이는데, 그러면 토큰이 작업 목록과
+  명령줄에 드러난다 — 대신 `--env-file` 이 읽고 스크립트는 그 파일의 ACL 을 현재 사용자로 좁힌다
 
 **명령줄 (`nl-cli`)**
 - `nl` 명령 — `inspect`·`devices`·`train`·`infer`·`run`·`record`·`build`·`sample`.
@@ -103,6 +113,7 @@
 - 릴리스 단계의 실제 내용을 `packaging/lib.sh` 한 곳으로 모아 워크플로와 로컬 스크립트가 같은 함수를 쓴다
 - 릴리스 프로필에서 `nl-*` 패키지의 `overflow-checks` 를 켰다(보안 리뷰 권고)
 - 전 크레이트 포맷을 정리하고 **CI 의 `cargo fmt --check` 를 강제로 바꿨다**(`continue-on-error` 제거) (`6149b01`)
+- 디버그 프로필에서 `nl-engine` 의 `opt-level` 을 2 로 올렸다 — 순환 레이어 테스트가 19배 빨라진다 (`505d431`)
 
 ### 확인한 것
 
@@ -159,6 +170,7 @@
 | NVK 드라이버 GPU | 오픈소스 NVK(nouveau) 드라이버의 NVIDIA GPU 는 wgpu 컴퓨트가 죽는다. `Auto` 가 `probe` 로 걸러 다른 장치를 고른다. 공식 드라이버를 깔면 잡힌다 |
 | Windows 자동 업데이트 | `latest.json` 에 Windows 자산을 아직 넣지 않는다. 자기 자신을 바꿔칠 수 없어 설치 프로그램이 필요한데 CI 러너에 Inno Setup 이 없다. 그때까지 Windows 사용자는 zip 을 받아 덮어쓴다 |
 | 서명 키 미발급 | 공개키가 아직 코드에 박혀 있지 않아 자동 업데이트가 꺼진 상태다. 발급 절차는 `docs/RELEASE.md` |
+| Windows 상시 실행 스크립트 미검증 | `install-service.ps1` 을 Windows 실기에서 돌려 보지 못했다. 개발 기계가 리눅스이고 wine 으로는 작업 스케줄러를 흉내 낼 수 없다. PowerShell 7.6 파서로 구문 검사와 명령 문자열 조립까지만 확인했다. 처음 쓸 때 `schtasks /Run` 으로 띄워 `app.log` 를 보라 |
 | Windows 개인키 권한 | `nl tls-cert` 가 만드는 개인키에 Windows 에서는 권한 비트를 걸지 않는다. 유닉스 권한이 없어 ACL 을 건드리는 대신 "파일이 사용자 폴더 안에 있다" 는 전제에 기댄다. 여러 사람이 쓰는 Windows 기계라면 ACL 을 직접 조이라 |
 | 순환 레이어 성능 | `Lstm`·`Gru` 는 시퀀스 길이에 **선형인 커널 호출**을 낸다. 시점마다 게이트를 한 번씩 계산하므로 길이가 수백이면 눈에 띄게 느리다. 짧은 시퀀스를 먼저 써 보라 |
 | 미처리 낮음 2건 | unmaintained 의존성 3건(L23)과 `Cargo.lock` 의 도달 불가 항목(L25). 둘 다 상위 크레이트가 버전을 고정한 것이라 손댈 수 없다 |

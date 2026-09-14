@@ -5,6 +5,7 @@
 mod app;
 mod cli;
 mod console;
+mod envfile;
 mod signals;
 mod update;
 
@@ -57,6 +58,18 @@ fn wants_console(command: &Command) -> bool {
 }
 
 fn run(opts: Options) -> anyhow::Result<ExitCode> {
+    // 환경 파일을 가장 먼저 읽는다. 토큰은 서버를 열 때 읽히므로 그전에 자리를 잡아야 하고,
+    // 스레드가 뜨기 전이어야 환경 변수를 만지는 것이 안전하다.
+    if let Some(path) = opts.env_file.as_deref() {
+        let names = envfile::load(path)?;
+        // 값은 비밀이라 찍지 않는다. 무엇이 들어갔는지만 알린다.
+        println!(
+            "환경 파일 {} ({}개 적용: {})",
+            path.display(),
+            names.len(),
+            names.join(", ")
+        );
+    }
     let Some(bundle) = load_bundle(opts.bundle_path.as_deref())? else {
         eprintln!("실행할 번들이 없습니다. `.nlapp` 파일을 인자로 주거나 번들이 첨부된 실행 파일로 실행하세요.\n");
         eprintln!("{}", cli::USAGE);
