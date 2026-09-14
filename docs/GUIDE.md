@@ -930,7 +930,8 @@ journalctl --user -u neural-linker-app -o cat | jq -c 'select(.kind=="error")'
 ```
 
 `kind` 는 `started`·`stopped`·`log`·`error`·`value`·`widget`·`preview`·`stats` 중 하나이고,
-`ts` 는 언제나 RFC 3339(UTC)입니다. `stats` 의 `tick`·`hz`·`tick_ms` 는 숫자라 그대로 집계할 수
+`ts` 는 언제나 RFC 3339(UTC)입니다. 노드와 위젯은 **전체 uuid**(`node`·`widget`)와 **이름**
+(`node_name`·`widget_name`)이 함께 나옵니다. 이름이 비어 있으면 종류 라벨이 대신 들어갑니다. `stats` 의 `tick`·`hz`·`tick_ms` 는 숫자라 그대로 집계할 수
 있습니다. 이미지는 크기만 실립니다 — 픽셀을 로그에 넣으면 한 줄이 메가바이트가 됩니다.
 `nl run --log-json` 이 같은 모양을 내므로 개발과 운영 로그를 한데 모아 볼 수 있습니다.
 

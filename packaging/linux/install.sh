@@ -4,14 +4,52 @@
 #   ./install.sh [바이너리 경로]          기본: ../../target/release/nl-app
 #   ./install.sh --service <앱 경로>     위에 더해 배포 앱을 헤드리스 사용자 서비스로 등록한다
 #   ./install.sh --uninstall             서비스까지 함께 제거한다
+#   ./install.sh --help                  사용법
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'USAGE'
+사용법: ./install.sh [옵션] [바이너리 경로]
+
+  (옵션 없음)          빌더·런타임·CLI 를 ~/.local 아래에 설치합니다.
+  --service <앱 경로>  위에 더해 배포 앱을 헤드리스 사용자 서비스로 등록합니다.
+  --uninstall          설치한 것과 서비스를 지웁니다 (환경 파일은 남깁니다).
+  --help, -h           이 도움말을 보여 줍니다.
+
+바이너리 경로를 주지 않으면 스크립트 옆 → 빌드 트리 순으로 찾습니다.
+USAGE
+}
+
 MODE=install
 SERVICE_APP=""
-case "${1:-}" in
-  --uninstall) MODE=uninstall; shift ;;
-  --service)   MODE=service; SERVICE_APP="${2:-}"; shift 2 || true ;;
-esac
+# **모르는 플래그는 거부한다.** 예전에는 그냥 넘겨서 `--headless` 같은 것을 붙여도 설치가 진행됐다.
+# 위치 인자(바이너리 경로)는 하나만 받고, 그 뒤에 더 오면 그것도 오류다.
+BIN_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uninstall) MODE=uninstall; shift ;;
+    --service)
+      MODE=service
+      SERVICE_APP="${2:-}"
+      [[ -n "$SERVICE_APP" ]] || { echo "--service 뒤에 배포 앱 경로가 필요합니다" >&2; exit 2; }
+      shift 2
+      ;;
+    --help|-h) usage; exit 0 ;;
+    -*)
+      echo "모르는 옵션입니다: $1" >&2
+      echo >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      [[ -z "$BIN_ARG" ]] || { echo "인자가 너무 많습니다: $1" >&2; exit 2; }
+      BIN_ARG="$1"
+      shift
+      ;;
+  esac
+done
+set -- ${BIN_ARG:+"$BIN_ARG"}
 
 # 인자로 주면 그것을, 없으면 스크립트 옆(배포 아카이브를 푼 자리) → 빌드 트리 순으로 찾는다.
 if [[ -n "${1:-}" ]]; then

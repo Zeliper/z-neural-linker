@@ -20,12 +20,13 @@ pub use screen::{capture, monitors, Frame, MonitorInfo};
 pub use input::parse_key;
 /// 화면 녹화 → `DataSource::Recorded` 폴더. `FrameSource` 로 다른 프레임 공급원을 끼울 수 있다.
 pub use record::{FrameSource, Recorder, RecorderHandle};
-/// `RunnerEvent` → 한 줄 JSON. 서비스 로그(journald·Loki)로 흘려보낼 때 쓴다.
-/// 빌더·`nl run`·배포 런타임이 **같은 모양**을 내도록 여기 한 군데서만 정한다.
-pub use runner::event_json;
 /// GUI 위젯 이벤트·수동 입력을 실행 중인 파이프라인에 넣는 통로.
 pub use runner::RunnerInput;
 /// `RunnerEvent::ValuePreview` 썸네일의 최장변 상한. 미리보기 위젯 크기를 잡을 때 쓴다.
 pub use runner::PREVIEW_MAX_SIDE;
+/// `RunnerEvent` → 한 줄 JSON. 서비스 로그(journald·Loki)로 흘려보낼 때 쓴다.
+/// 빌더·`nl run`·배포 런타임이 **같은 모양**을 내도록 여기 한 군데서만 정한다.
+/// `EventNames` 가 노드·위젯 이름을 채워 준다 — 짧은 id 는 부딪혀서 로그에서 구분이 안 된다.
+pub use runner::{event_json, EventNames};
 /// 연결을 유지하는 화면 캡처기(반복 캡처용)와 실제로 쓰인 백엔드 이름.
 pub use screen::{Backend, Capturer};

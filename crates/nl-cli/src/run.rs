@@ -61,9 +61,14 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         }
     }
 
+    // 로그에 노드 이름을 붙이려면 파이프라인이 필요한데 `Runner` 가 가져간다. 한 벌 남겨 둔다.
+    let log_pipeline = pipeline.clone();
     let mut runner = Runner::new(l.project.clone(), pipeline, l.base_dir.clone(), device);
     runner.arm_input = args.arm_input;
     let handle = runner.start().context("파이프라인을 시작하지 못했다")?;
+
+    // 로그 줄에 붙일 이름. 파이프라인과 GUI 배치를 함께 넘겨야 위젯 이름까지 나온다.
+    let names = nl_io::EventNames::with_gui(&log_pipeline, &l.project.gui);
 
     let start = Instant::now();
     let deadline = args.seconds.map(|s| start + Duration::from_secs_f64(s));
@@ -94,7 +99,7 @@ pub fn run(args: Args<'_>) -> Result<i32> {
                 if args.log_json {
                     // 값·미리보기·통계까지 **전부** 낸다. 사람용 출력은 시끄러워서 접지만,
                     // 수집기는 그것들이 있어야 처리량과 지연을 볼 수 있다.
-                    println!("{}", nl_io::event_json(&ev));
+                    println!("{}", nl_io::event_json(&ev, &names));
                 } else if let Some(line) = format_event(&l.project, &ev, start) {
                     println!("{line}");
                 }

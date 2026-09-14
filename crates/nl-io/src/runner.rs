@@ -2929,6 +2929,58 @@ fn argmax(v: &[f32]) -> Option<i64> {
 
 // ───────────────────────────── 구조화 로그 ─────────────────────────────
 
+/// 로그 줄에 붙일 이름을 찾아 주는 곳.
+///
+/// 노드 이름은 파이프라인에, 위젯 이름은 프로젝트의 GUI 배치에 있다. 둘을 함께 들고 다니는
+/// 작은 참조 묶음이라 복제 비용이 없다.
+#[derive(Clone, Copy)]
+pub struct EventNames<'a> {
+    pipeline: &'a Pipeline,
+    gui: Option<&'a nl_core::gui::GuiLayout>,
+}
+
+impl<'a> EventNames<'a> {
+    /// 파이프라인만으로. 위젯 이름은 종류 라벨로 떨어진다.
+    pub fn new(pipeline: &'a Pipeline) -> Self {
+        Self { pipeline, gui: None }
+    }
+
+    /// GUI 배치까지 주면 위젯 이름도 제대로 나온다.
+    pub fn with_gui(pipeline: &'a Pipeline, gui: &'a nl_core::gui::GuiLayout) -> Self {
+        Self {
+            pipeline,
+            gui: Some(gui),
+        }
+    }
+
+    /// 노드 이름. 비어 있으면 종류 라벨(`HTTP 서버` 등).
+    fn node(&self, id: PNodeId) -> String {
+        match self.pipeline.nodes.get(&id) {
+            Some(n) if !n.name.is_empty() => n.name.clone(),
+            Some(n) => n.kind.label().to_owned(),
+            // 파이프라인에 없는 노드 — 보통은 없지만 로그가 비어 버리는 것보다 낫다.
+            None => "(모르는 노드)".to_owned(),
+        }
+    }
+
+    /// 위젯 이름. 글자가 있는 종류는 그 글자를, 아니면 종류 라벨을 쓴다.
+    fn widget(&self, id: WidgetId) -> String {
+        use nl_core::gui::WidgetKind as K;
+        let Some(w) = self.gui.and_then(|g| g.widgets.get(&id)) else {
+            return "(모르는 위젯)".to_owned();
+        };
+        let text = match &w.kind {
+            K::Label { text } | K::Button { text } | K::Toggle { text } => text.as_str(),
+            _ => "",
+        };
+        if text.is_empty() {
+            w.kind.label().to_owned()
+        } else {
+            text.to_owned()
+        }
+    }
+}
+
 /// [`RunnerEvent`] 하나를 한 줄 JSON 으로.
 ///
 /// 서비스로 돌릴 때 journald·Loki 같은 수집기가 그대로 먹을 수 있게 하려는 것이다. 사람이 읽는
@@ -2941,15 +2993,19 @@ fn argmax(v: &[f32]) -> Option<i64> {
 /// | --- | --- |
 /// | `started`·`stopped` | (없음) |
 /// | `log` | `level`(`info`), `message` |
-/// | `error` | `level`(`error`), `message`, 노드가 있으면 `node` |
-/// | `value` | `node`, `value` |
-/// | `widget` | `widget`, `value` |
-/// | `preview` | `node`, `width`, `height` |
+/// | `error` | `level`(`error`), `message`, 노드가 있으면 `node`·`node_name` |
+/// | `value` | `node`, `node_name`, `value` |
+/// | `widget` | `widget`, `widget_name`, `value` |
+/// | `preview` | `node`, `node_name`, `width`, `height` |
 /// | `stats` | `tick`, `tick_ms`, `hz` |
+///
+/// **id 는 전체 uuid 로 넣고 이름을 함께 준다.** 짧은 id(앞 8자)는 부딪힌다 — 샘플 프로젝트처럼
+/// id 를 손으로 매긴 문서에서는 모든 노드가 `00000000` 으로 나와 로그에서 구분이 안 됐다.
+/// 이름이 비어 있으면 노드 종류 라벨을 대신 쓴다.
 ///
 /// 이미지는 **크기만** 넣는다. 픽셀을 로그에 실으면 한 줄이 메가바이트가 된다 —
 /// `value` 의 이미지도 `value_to_json` 이 크기와 바이트 수로 접는다.
-pub fn event_json(ev: &RunnerEvent) -> serde_json::Value {
+pub fn event_json(ev: &RunnerEvent, names: &EventNames<'_>) -> serde_json::Value {
     use serde_json::json;
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     match ev {
@@ -2970,20 +3026,23 @@ pub fn event_json(ev: &RunnerEvent) -> serde_json::Value {
             });
             // 노드 없는 오류(실행기 자체)는 키를 아예 빼 둔다. `null` 보다 없는 편이 질의가 쉽다.
             if let Some(n) = node {
-                o["node"] = json!(n.short());
+                o["node"] = json!(n.to_string());
+                o["node_name"] = json!(names.node(*n));
             }
             o
         }
         RunnerEvent::Value { node, value } => json!({
             "ts": ts,
             "kind": "value",
-            "node": node.short(),
+            "node": node.to_string(),
+            "node_name": names.node(*node),
             "value": value_to_json(value),
         }),
         RunnerEvent::Widget { widget, value } => json!({
             "ts": ts,
             "kind": "widget",
-            "widget": widget.short(),
+            "widget": widget.to_string(),
+            "widget_name": names.widget(*widget),
             "value": value_to_json(value),
         }),
         RunnerEvent::ValuePreview {
@@ -2991,7 +3050,8 @@ pub fn event_json(ev: &RunnerEvent) -> serde_json::Value {
         } => json!({
             "ts": ts,
             "kind": "preview",
-            "node": node.short(),
+            "node": node.to_string(),
+            "node_name": names.node(*node),
             "width": width,
             "height": height,
         }),
@@ -3790,6 +3850,17 @@ mod tests {
 
     // ── 구조화 로그 ────────────────────────────────────────────────────
 
+    /// 이름을 붙일 수 있는 작은 파이프라인. 노드 하나에 이름을 주고 하나는 비워 둔다.
+    fn named_pipeline() -> (Pipeline, PNodeId, PNodeId) {
+        let mut p = Pipeline::new("이름");
+        let mut named = PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]);
+        named.name = "요청".into();
+        let named_id = p.add_node(named);
+        // 이름이 빈 노드는 종류 라벨로 떨어져야 한다.
+        let bare_id = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [1.0, 0.0]));
+        (p, named_id, bare_id)
+    }
+
     /// 다섯 종류의 키 집합을 못 박는다. 수집기의 질의가 여기에 기대므로 말없이 바뀌면 안 된다.
     #[test]
     fn event_json_keys_are_fixed_per_kind() {
@@ -3798,80 +3869,191 @@ mod tests {
             k.sort();
             k
         };
-        let node = PNodeId::from_u128(0x1234);
+        let (pl, node, _) = named_pipeline();
+        let names = EventNames::new(&pl);
 
-        let started = event_json(&RunnerEvent::Started);
+        let started = event_json(&RunnerEvent::Started, &names);
         assert_eq!(keys(&started), ["kind", "ts"]);
         assert_eq!(started["kind"], "started");
 
-        let stopped = event_json(&RunnerEvent::Stopped);
+        let stopped = event_json(&RunnerEvent::Stopped, &names);
         assert_eq!(keys(&stopped), ["kind", "ts"]);
         assert_eq!(stopped["kind"], "stopped");
 
-        let log = event_json(&RunnerEvent::Log("열림".into()));
+        let log = event_json(&RunnerEvent::Log("열림".into()), &names);
         assert_eq!(keys(&log), ["kind", "level", "message", "ts"]);
         assert_eq!(log["level"], "info");
         assert_eq!(log["message"], "열림");
 
-        let err = event_json(&RunnerEvent::Error {
-            node: Some(node),
-            message: "깨짐".into(),
-        });
-        assert_eq!(keys(&err), ["kind", "level", "message", "node", "ts"]);
+        let err = event_json(
+            &RunnerEvent::Error {
+                node: Some(node),
+                message: "깨짐".into(),
+            },
+            &names,
+        );
+        assert_eq!(keys(&err), ["kind", "level", "message", "node", "node_name", "ts"]);
         assert_eq!(err["level"], "error");
-        assert_eq!(err["node"], node.short());
+        // 전체 uuid 여야 한다 — 짧은 id 는 부딪힌다.
+        assert_eq!(err["node"], node.to_string());
+        assert_eq!(err["node_name"], "요청");
 
         // 노드 없는 오류는 `node` 키 자체가 없다 — `null` 보다 없는 편이 질의가 쉽다.
-        let bare = event_json(&RunnerEvent::Error {
-            node: None,
-            message: "실행기".into(),
-        });
+        let bare = event_json(
+            &RunnerEvent::Error {
+                node: None,
+                message: "실행기".into(),
+            },
+            &names,
+        );
         assert_eq!(keys(&bare), ["kind", "level", "message", "ts"]);
 
-        let value = event_json(&RunnerEvent::Value {
-            node,
-            value: Value::Numbers(vec![1.0, 2.0]),
-        });
-        assert_eq!(keys(&value), ["kind", "node", "ts", "value"]);
+        let value = event_json(
+            &RunnerEvent::Value {
+                node,
+                value: Value::Numbers(vec![1.0, 2.0]),
+            },
+            &names,
+        );
+        assert_eq!(keys(&value), ["kind", "node", "node_name", "ts", "value"]);
         assert_eq!(value["value"], serde_json::json!([1.0, 2.0]));
+        assert_eq!(value["node_name"], "요청");
+        assert!(
+            value["node"].as_str().expect("문자열").len() > 8,
+            "짧은 id 를 쓰고 있다: {}",
+            value["node"]
+        );
 
-        let stats = event_json(&RunnerEvent::Stats {
-            tick: 7,
-            tick_ms: 1.5,
-            hz: 60.0,
-        });
+        let stats = event_json(
+            &RunnerEvent::Stats {
+                tick: 7,
+                tick_ms: 1.5,
+                hz: 60.0,
+            },
+            &names,
+        );
         assert_eq!(keys(&stats), ["hz", "kind", "tick", "tick_ms", "ts"]);
         // 숫자로 넣는다. 문자열이면 수집기에서 집계가 안 된다.
         assert!(stats["tick"].is_number() && stats["hz"].is_number() && stats["tick_ms"].is_number());
         assert_eq!(stats["tick"], 7);
     }
 
+    /// 이름이 없으면 종류 라벨로 떨어지고, 위젯은 글자가 있으면 그것을 쓴다.
+    #[test]
+    fn names_fall_back_to_kind_labels() {
+        use nl_core::gui::{GuiLayout, Widget, WidgetKind};
+        let (pl, _, bare) = named_pipeline();
+
+        // 이름이 빈 노드 → 종류 라벨.
+        let names = EventNames::new(&pl);
+        let v = event_json(
+            &RunnerEvent::Value {
+                node: bare,
+                value: Value::Number(1.0),
+            },
+            &names,
+        );
+        assert_eq!(v["node_name"], "로그", "이름이 없으면 종류 라벨이어야 한다");
+
+        // 파이프라인에 없는 노드도 로그가 비지 않는다.
+        let ghost = event_json(
+            &RunnerEvent::Value {
+                node: PNodeId::from_u128(0xdead),
+                value: Value::Number(0.0),
+            },
+            &names,
+        );
+        assert_eq!(ghost["node_name"], "(모르는 노드)");
+
+        // 위젯: 글자가 있는 종류는 그 글자, 아니면 종류 라벨.
+        let mut gui = GuiLayout::default();
+        let button = Widget {
+            id: WidgetId::new(),
+            kind: WidgetKind::Button { text: "시작".into() },
+            rect: [0.0; 4],
+            binding: None,
+            parent: None,
+            z: 0,
+            extra: Default::default(),
+        };
+        let plot = Widget {
+            id: WidgetId::new(),
+            kind: WidgetKind::Image,
+            rect: [0.0; 4],
+            binding: None,
+            parent: None,
+            z: 0,
+            extra: Default::default(),
+        };
+        let (bid, pid) = (button.id, plot.id);
+        gui.widgets.insert(bid, button);
+        gui.widgets.insert(pid, plot);
+        let names = EventNames::with_gui(&pl, &gui);
+
+        let w = event_json(
+            &RunnerEvent::Widget {
+                widget: bid,
+                value: Value::Number(1.0),
+            },
+            &names,
+        );
+        assert_eq!(w["widget_name"], "시작");
+        assert_eq!(w["widget"], bid.to_string());
+
+        let w2 = event_json(
+            &RunnerEvent::Widget {
+                widget: pid,
+                value: Value::Number(1.0),
+            },
+            &names,
+        );
+        assert_eq!(w2["widget_name"], "이미지", "글자가 없으면 종류 라벨");
+
+        // GUI 배치를 안 주면 위젯 이름을 알 수 없다고 말한다.
+        let bare_names = EventNames::new(&pl);
+        let w3 = event_json(
+            &RunnerEvent::Widget {
+                widget: bid,
+                value: Value::Number(1.0),
+            },
+            &bare_names,
+        );
+        assert_eq!(w3["widget_name"], "(모르는 위젯)");
+    }
+
     /// 이미지는 크기만 싣는다. 픽셀을 넣으면 한 줄이 메가바이트가 된다.
     #[test]
     fn images_never_put_pixels_in_the_log() {
-        let node = PNodeId::from_u128(9);
+        let (pl, node, _) = named_pipeline();
+        let names = EventNames::new(&pl);
         let big = vec![7u8; 64 * 64 * 4];
-        let preview = event_json(&RunnerEvent::ValuePreview {
-            node,
-            width: 64,
-            height: 64,
-            rgba: big.clone(),
-        });
-        let mut k: Vec<String> = preview.as_object().unwrap().keys().cloned().collect();
-        k.sort();
-        assert_eq!(k, ["height", "kind", "node", "ts", "width"]);
-        assert_eq!(preview["width"], 64);
-
-        let as_value = event_json(&RunnerEvent::Value {
-            node,
-            value: Value::Image {
+        let preview = event_json(
+            &RunnerEvent::ValuePreview {
+                node,
                 width: 64,
                 height: 64,
-                rgba: big,
+                rgba: big.clone(),
             },
-        });
+            &names,
+        );
+        let mut k: Vec<String> = preview.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        assert_eq!(k, ["height", "kind", "node", "node_name", "ts", "width"]);
+        assert_eq!(preview["width"], 64);
+
+        let as_value = event_json(
+            &RunnerEvent::Value {
+                node,
+                value: Value::Image {
+                    width: 64,
+                    height: 64,
+                    rgba: big,
+                },
+            },
+            &names,
+        );
         let text = as_value.to_string();
-        assert!(text.len() < 300, "이미지 줄이 너무 길다 ({} 바이트)", text.len());
+        assert!(text.len() < 400, "이미지 줄이 너무 길다 ({} 바이트)", text.len());
         assert_eq!(as_value["value"]["image"]["width"], 64);
         assert_eq!(as_value["value"]["image"]["bytes"], 64 * 64 * 4);
     }
@@ -3879,7 +4061,9 @@ mod tests {
     /// `ts` 는 RFC 3339 다. 수집기가 시각으로 파싱한다.
     #[test]
     fn the_timestamp_parses_as_rfc3339() {
-        let v = event_json(&RunnerEvent::Started);
+        let (pl, _, _) = named_pipeline();
+        let names = EventNames::new(&pl);
+        let v = event_json(&RunnerEvent::Started, &names);
         let ts = v["ts"].as_str().expect("ts 는 문자열");
         chrono::DateTime::parse_from_rfc3339(ts).unwrap_or_else(|e| panic!("{ts}: {e}"));
         assert!(ts.ends_with('Z'), "UTC 여야 한다: {ts}");
