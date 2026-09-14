@@ -96,6 +96,10 @@ try {
     Write-Warning "여러 사람이 쓰는 기계라면 $EnvFile 의 권한을 직접 확인하세요."
 }
 
+# systemd 유닛에는 `Environment=MALLOC_ARENA_MAX=2` 가 있지만 여기에는 대응이 없다. 그것은
+# **glibc 전용** 설정이고, Windows 빌드는 MSVC 런타임의 힙을 쓴다 — 스레드별 아레나라는 개념
+# 자체가 없어 넣어도 아무 일도 하지 않는다. Windows 에서 RSS 가 계속 는다면 다른 원인이다.
+#
 # 작업이 실행할 명령. 토큰은 여기 없다 — 앱이 --env-file 에서 읽는다.
 # 표준 출력을 파일로 넘겨야 로그가 남는다. 작업 스케줄러는 출력을 잡아 두지 않는다.
 $inner = '"{0}" --headless --device {1} --work-dir "{2}" --env-file "{3}" >> "{4}" 2>&1' -f `
