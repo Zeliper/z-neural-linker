@@ -707,7 +707,9 @@ pub fn curl_example(bind: &str, path: &str, token: Option<&str>, tls: bool) -> S
     };
     // TLS 를 켜면 주소가 https 다. 자체 서명 인증서는 curl 이 거부하므로 `-k` 를 함께 보여 준다.
     let (scheme, insecure) = if tls { ("https", " -k") } else { ("http", "") };
-    format!("curl{insecure} -X POST {scheme}://{host}{path}{auth} -d '[0,1]'")
+    // 본문은 "길이 2 벡터" 자리 표시다. 샘플(XOR)의 입력은 −1~1 이고 `[0, 1]` 은 그 데이터의
+    // 경계라 복사해 붙이면 아무 쪽으로나 답한다 — 0 에서 떨어진 값을 보여 준다.
+    format!("curl{insecure} -X POST {scheme}://{host}{path}{auth} -d '[0.8,-0.8]'")
 }
 
 pub fn source_label(s: &Source) -> &'static str {
@@ -1541,7 +1543,7 @@ mod tests {
     fn curl_example_points_at_something_reachable() {
         assert_eq!(
             curl_example("127.0.0.1:8787", "/infer", None, false),
-            "curl -X POST http://127.0.0.1:8787/infer -d '[0,1]'"
+            "curl -X POST http://127.0.0.1:8787/infer -d '[0.8,-0.8]'"
         );
         // 0.0.0.0 에 묶었어도 부를 때는 루프백으로 부른다.
         assert!(curl_example("0.0.0.0:9000", "/x", None, false).contains("http://127.0.0.1:9000/x"));

@@ -66,6 +66,14 @@ const MAX_STEP_POINTS: usize = 4000;
 /// 학습률 곡선의 높이(px). 손실 곡선(240)보다 낮게 둬 보조 정보임을 드러낸다.
 const LR_PLOT_HEIGHT: f32 = 110.0;
 
+/// 진행 줄의 `에포크 3/50`.
+///
+/// 엔진의 `EpochMetrics::epoch` 는 **1부터** 센다 (`for epoch in 1..=cfg.epochs`). 여기에 1 을 더하면
+/// 다 끝났을 때 `51/50` 이 된다 — 실제로 그렇게 보이던 것을 고쳤다.
+fn epoch_label(epoch: usize, total: usize) -> String {
+    format!("에포크 {epoch}/{total}")
+}
+
 /// 학습률 표기. 1e-3 처럼 작은 값이라 고정 소수점으로는 0.001 이 0.00 으로 뭉개진다.
 fn fmt_lr(v: f64) -> String {
     if v == 0.0 {
@@ -450,7 +458,7 @@ fn live(ui: &mut egui::Ui, ctx: &ViewCtx) {
     });
     if let Some(last) = t.run.epochs.last() {
         ui.horizontal(|ui| {
-            ui.label(format!("에포크 {}/{}", last.epoch + 1, t.run.config.epochs));
+            ui.label(epoch_label(last.epoch, t.run.config.epochs));
             ui.label(format!("학습 손실 {}", fmt_metric(last.train_loss)));
             if let Some(v) = last.val_loss {
                 ui.label(format!("검증 손실 {}", fmt_metric(v)));
@@ -528,13 +536,20 @@ fn plot(ui: &mut egui::Ui, ctx: &ViewCtx, state: &TrainViewState) {
         .iter()
         .filter_map(|e| e.lr.map(|v| [epoch_x(e.epoch, batches), v]))
         .collect();
-    if lr.len() >= 2 {
+    // 엔진은 스케줄이 없어도 lr 을 채운다. 값이 내내 같으면 곡선은 아무것도 말해 주지 않으면서
+    // 110px 을 먹으므로, **실제로 변할 때만** 그린다 (스케줄·워밍업).
+    let varies = lr
+        .first()
+        .is_some_and(|f| lr.iter().any(|p| (p[1] - f[1]).abs() > f64::EPSILON));
+    if lr.len() >= 2 && varies {
         ui.add_space(6.0);
         Plot::new("lr-plot")
             .height(LR_PLOT_HEIGHT)
             .legend(Legend::default())
             .x_axis_label(if batches > 0 { "스텝" } else { "에포크" })
             .y_axis_label("학습률")
+            // 기본 눈금은 0.001 을 `0` 으로 뭉갠다 — 표와 같은 표기를 쓴다.
+            .y_axis_formatter(|m, _| fmt_lr(m.value))
             .show(ui, |p| {
                 p.line(Line::new("학습률", PlotPoints::from(lr)).width(2.0).color(COL_WARN));
             });
@@ -726,6 +741,13 @@ mod tests {
         assert_eq!(merged.device_name, "GPU 0");
         assert_eq!(merged.epochs.len(), 1);
         assert_eq!(merged.epochs[0].epoch, 9);
+    }
+
+    /// 마지막 에포크가 끝나도 `51/50` 이 되면 안 된다 — 엔진의 에포크 번호는 1부터다.
+    #[test]
+    fn the_epoch_line_never_overshoots_the_total() {
+        assert_eq!(epoch_label(1, 50), "에포크 1/50");
+        assert_eq!(epoch_label(50, 50), "에포크 50/50");
     }
 
     #[test]

@@ -52,6 +52,8 @@ pub fn show(
     state: &mut GuiViewState,
     gui: &mut GuiState,
     preview: bool,
+    // 지금 돌고 있는 파이프라인 이름. 없으면 미리보기가 값을 받지 못한다.
+    running: Option<&str>,
 ) -> GuiViewOut {
     let mut out = GuiViewOut::default();
     let layout = &ctx.project.gui;
@@ -100,7 +102,21 @@ pub fn show(
                     out.actions.push(ViewAction::SetGuiPreview(on));
                 }
                 if preview {
-                    ui.label(RichText::new("● 미리보기 중 — 편집은 꺼짐").color(COL_SELECT));
+                    // 어느 파이프라인이 위젯을 먹이는지 적어 준다. 이것이 없으면 값 위젯이 `—` 인 것이
+                    // 고장인지 "그 파이프라인이 이 위젯을 안 먹인다" 인지 구별할 수 없다.
+                    match running {
+                        Some(name) => {
+                            ui.label(
+                                RichText::new(format!("● 미리보기 중 · {name} 실행 — 편집은 꺼짐")).color(COL_SELECT),
+                            );
+                        }
+                        None => {
+                            ui.label(
+                                RichText::new("● 미리보기 중 — 실행 중인 파이프라인이 없어 값이 들어오지 않습니다")
+                                    .color(COL_WARN),
+                            );
+                        }
+                    }
                 }
             });
         });

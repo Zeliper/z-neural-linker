@@ -11,8 +11,10 @@ API·외부 앱 파이프라인에 연결한 뒤, 프로그램 안에서 GUI 를
 
 ## 무엇을 할 수 있나
 
-- **모델** — 우클릭 팔레트에서 레이어 17종을 놓고 포트를 끌어 잇는다. 형상은 실시간으로 추론되어 노드에
-  `[B, 16]` 으로 붙고, 순환·형상 오류는 빨간 테두리와 문제 목록으로 알려 준다.
+- **모델** — 우클릭 팔레트에서 레이어 20종을 놓고 포트를 끌어 잇는다. 형상은 실시간으로 추론되어 노드에
+  `[B, 16]` 으로 붙고, 순환·형상 오류는 빨간 테두리와 문제 목록으로 알려 준다. LSTM·GRU·멀티헤드 어텐션이
+  들어 있고, **템플릿**(잔차 블록·트랜스포머 블록·합성곱 블록)은 여러 레이어를 되돌리기 한 번 단위로 놓는다.
+  학습한 모델은 **ONNX(opset 17)** 로 내보낼 수 있다.
 - **데이터** — 합성 4종(XOR·두 나선·선형 회귀·사분면 이미지), CSV, 이미지 폴더, **화면 녹화**.
   녹화 중 숫자키 0~9 로 라벨을 바꾼다.
 - **학습** — SGD/Adam/AdamW, CrossEntropy/MSE/BCE/MAE, 손실 곡선과 실행 기록. 체크포인트는 safetensors.
@@ -47,7 +49,7 @@ GUI 없이 프로젝트를 다룬다. 종료 코드는 `0` 성공, `1` 문제를
 nl inspect p.nlproj                         # 내용과 검증 결과
 nl devices --probe                          # 장치 목록 (실제로 돌려 보기)
 nl train p.nlproj --model "XOR MLP" --epochs 20
-nl infer p.nlproj --model XOR --input '[0,1]'
+nl infer p.nlproj --model XOR --input '[0.8,-0.8]'
 nl run p.nlproj --for 10                    # 파이프라인을 헤드리스로
 nl record out/ --fps 4 --for 30             # 화면을 찍어 학습용 폴더로
 nl build p.nlproj --target all --out dist   # 배포판 만들기

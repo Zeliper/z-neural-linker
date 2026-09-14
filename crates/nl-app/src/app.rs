@@ -3858,9 +3858,23 @@ impl NlApp {
                 }
             }
             View::Gui => {
+                // 실행 중인 파이프라인 이름을 먼저 뽑는다 — `view_ctx!` 가 doc 을 빌린 뒤에는 못 읽는다.
+                let running: Option<String> = self
+                    .runner
+                    .as_ref()
+                    .filter(|r| r.is_running())
+                    .and_then(|r| self.doc.project.pipelines.get(&r.pipeline))
+                    .map(|p| p.name.clone());
                 let gui_out = {
                     let ctx = view_ctx!(self, now);
-                    views::gui::show(ui, &ctx, &mut self.views.gui, &mut self.gui_state, self.gui_preview)
+                    views::gui::show(
+                        ui,
+                        &ctx,
+                        &mut self.views.gui,
+                        &mut self.gui_state,
+                        self.gui_preview,
+                        running.as_deref(),
+                    )
                 };
                 out.extend(gui_out.actions);
                 for ev in gui_out.events {
