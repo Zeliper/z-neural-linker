@@ -455,6 +455,14 @@ pub struct NlApp {
     pub(crate) autosave_file: bool,
     /// 복구 직후에는 원본 자동 저장을 멈춘다 — 되살린 내용이 원본을 조용히 덮으면 안 된다.
     file_autosave_held: bool,
+    /// 지금 문서 파일을 마지막으로 읽거나 쓴 시각. 외부 변경을 알아채는 기준이다.
+    file_seen_at: Option<std::time::SystemTime>,
+    /// 연 파일이 이 앱보다 새 형식이었는가. 저장할 때 한 번 더 알린다.
+    doc_newer_format: bool,
+    /// 덮어쓸지 물어볼 파일.
+    overwrite_ask: Option<PathBuf>,
+    /// 사용자가 덮어써도 좋다고 한 파일. 그 한 번의 저장에만 쓰인다.
+    overwrite_confirmed: Option<PathBuf>,
     /// 프로젝트 폴더 밖에 쓰려 할 때 띄우는 확인 질문.
     outside_ask: Option<OutsideAsk>,
     /// 사용자가 방금 승인한 질문. 한 번의 빌드에만 쓰인다.
@@ -597,6 +605,10 @@ impl NlApp {
             recovery_dir: recovery::default_dir(),
             autosave_file: stored("autosave_file", false),
             file_autosave_held: false,
+            file_seen_at: None,
+            doc_newer_format: false,
+            overwrite_ask: None,
+            overwrite_confirmed: None,
             outside_ask: None,
             outside_confirmed: None,
             build_job: None,
@@ -808,14 +820,32 @@ impl NlApp {
             self.save_as(now);
             return;
         };
+        // 열어 둔 사이에 남이(또는 다른 창이) 파일을 고쳤으면 묻는다 (보안 리뷰 L2).
+        // 승인 없이 덮어쓰면 그 변경이 소리 없이 사라진다.
+        if self.overwrite_confirmed.as_deref() != Some(path.as_path())
+            && project::changed_outside(&path, self.file_seen_at)
+        {
+            self.overwrite_ask = Some(path);
+            return;
+        }
+        self.overwrite_confirmed = None;
         let snapshot = self.snapshot_for_save();
         match project::save(&path, &snapshot) {
             Ok(()) => {
                 self.doc.modified = false;
+                self.file_seen_at = project::modified_at(&path);
                 // 원본에 들어갔으니 복구 스냅샷은 더 필요 없다. 사용자가 Ctrl+S 로 확정했으므로
                 // 복구 직후 걸어 둔 원본 자동 저장 보류도 푼다.
                 self.discard_recovery(now);
                 self.file_autosave_held = false;
+                if self.doc_newer_format {
+                    // 한 번 저장하고 나면 그 파일은 더 이상 새 형식이 아니다 — 다시 알릴 것도 없다.
+                    self.doc_newer_format = false;
+                    self.toast(
+                        "새 형식이던 항목은 이번 저장에서 빠졌습니다 — 원본이 필요하면 .bak 을 보세요",
+                        now,
+                    );
+                }
                 self.recent.push(&path);
                 self.toast(
                     format!("저장됨: {}", crate::views::short_path(&path.display().to_string())),
@@ -852,9 +882,13 @@ impl NlApp {
                 if l.newer {
                     self.toast("이 파일은 앱보다 새 형식입니다 — 모르는 항목은 저장 시 사라집니다", now);
                 }
+                // 저장할 때 한 번 더 알리려고 기억해 둔다 (보안 리뷰 L3). 토스트는 몇 초 뒤 사라지고,
+                // 그사이 편집하다 Ctrl+S 를 누르면 모르는 항목이 조용히 빠진다.
+                self.doc_newer_format = l.newer;
                 self.doc.set_snapshot(l.project);
                 self.doc.file_path = Some(path.to_path_buf());
                 self.doc.modified = false;
+                self.file_seen_at = project::modified_at(path);
                 self.after_document_swap();
                 self.recent.push(path);
                 self.toast(format!("열었습니다: {}", views::tilde(path)), now);
@@ -1140,6 +1174,7 @@ impl NlApp {
             }
             ViewAction::RunArtifact(p) => self.run_artifact(&p, now),
             ViewAction::PickIcon => self.pick_icon(now),
+            ViewAction::PickTlsFile { pipeline, node, key } => self.pick_tls_file(pipeline, node, key, now),
             ViewAction::StartRecordForm => {
                 self.views.data.record_form = Some(views::data::RecordForm::default());
                 self.set_view(View::Data);
@@ -1216,6 +1251,61 @@ impl NlApp {
         self.doc.apply_local(vec![Op::SetSettings { settings }]);
         self.views.build.icon_dirty = true;
         self.toast("아이콘을 골랐습니다", now);
+    }
+
+    /// HTTP 서버 노드의 인증서·키 PEM 을 고른다.
+    ///
+    /// 프로젝트 폴더 밖 파일은 **받지 않는다.** 다른 컴퓨터에서 그 프로젝트를 열면 없는 경로가 되고,
+    /// 개인키를 홈 어딘가에서 끌어다 쓰는 습관은 그대로 배포 사고가 된다.
+    fn pick_tls_file(&mut self, pipeline: nl_core::PipelineId, node: PNodeId, key: bool, now: f64) {
+        let what = if key { "개인키" } else { "인증서" };
+        let mut dialog = rfd::FileDialog::new().add_filter("PEM", &["pem", "crt", "key"]);
+        if let Some(dir) = self.doc.file_path.as_deref().map(project::base_dir) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else { return };
+
+        let Some(file) = self.doc.file_path.clone() else {
+            self.toast(
+                "프로젝트를 먼저 저장하세요 — 인증서 경로는 프로젝트 폴더 기준입니다",
+                now,
+            );
+            return;
+        };
+        let stored = relative_to(&project::base_dir(&file), &path);
+        if let Some(why) = crate::paths::outside_project(&stored) {
+            self.toast(
+                format!(
+                    "{what}가 프로젝트 폴더 밖입니다 ({}) — 폴더 안으로 옮기고 다시 고르세요",
+                    why.label()
+                ),
+                now,
+            );
+            return;
+        }
+
+        let Some(pl) = self.doc.project.pipelines.get(&pipeline) else {
+            return;
+        };
+        let Some(n) = pl.nodes.get(&node) else { return };
+        let mut next = n.clone();
+        let nl_core::pipeline::PNodeKind::Source {
+            source: nl_core::pipeline::Source::HttpServer { tls, .. },
+        } = &mut next.kind
+        else {
+            return;
+        };
+        let cfg = tls.get_or_insert_with(|| nl_core::pipeline::TlsConfig {
+            cert_pem: String::new(),
+            key_pem: String::new(),
+        });
+        if key {
+            cfg.key_pem = stored;
+        } else {
+            cfg.cert_pem = stored;
+        }
+        self.doc.apply_local(vec![Op::UpsertPNode { pipeline, node: next }]);
+        self.toast(format!("{what}를 골랐습니다"), now);
     }
 
     fn set_view(&mut self, view: View) {
@@ -2008,6 +2098,46 @@ impl NlApp {
         }
         if close {
             self.recover_candidates.clear();
+        }
+    }
+
+    /// 열어 둔 사이에 파일이 바뀌었을 때 덮어쓸지 묻는다 (보안 리뷰 L2).
+    fn overwrite_modal(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(path) = self.overwrite_ask.clone() else { return };
+        let modal = egui::Modal::new(egui::Id::new("overwrite")).show(ctx, |ui| {
+            ui.set_width(MODAL_WIDTH);
+            ui.heading("파일이 바뀌었습니다");
+            ui.add_space(6.0);
+            plan_row(ui, "파일", &views::tilde(&path));
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("연 뒤에 이 파일이 바깥에서 바뀌었습니다. 덮어쓰면 그 변경이 사라집니다.")
+                    .color(views::COL_WARN)
+                    .size(11.5),
+            );
+            ui.label(
+                RichText::new("덮어쓰기 전에 지금 내용을 .bak 으로 한 벌 남깁니다.")
+                    .color(views::COL_WEAK)
+                    .size(11.0),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("덮어쓰기").clicked() {
+                    self.overwrite_confirmed = Some(path.clone());
+                    self.overwrite_ask = None;
+                    self.save(now);
+                }
+                if ui.button("다른 이름으로…").clicked() {
+                    self.overwrite_ask = None;
+                    self.save_as(now);
+                }
+                if ui.button("취소").clicked() {
+                    self.overwrite_ask = None;
+                }
+            });
+        });
+        if self.overwrite_ask.is_some() && modal.should_close() {
+            self.overwrite_ask = None;
         }
     }
 
@@ -2954,6 +3084,7 @@ impl NlApp {
         if self.pending_action.is_some()
             || self.pending_plan.is_some()
             || self.outside_ask.is_some()
+            || self.overwrite_ask.is_some()
             || !self.recover_candidates.is_empty()
         {
             return;
@@ -3328,6 +3459,7 @@ impl eframe::App for NlApp {
         self.unsaved_modal(ctx, now);
         self.tool_modal(ctx, now);
         self.outside_modal(ctx, now);
+        self.overwrite_modal(ctx, now);
         self.update_window(ctx, now);
         self.draw_toasts(ctx, now);
 
@@ -3540,9 +3672,14 @@ pub fn duplicate_pnode_ops(
 
 /// 배포 아카이브(tar.gz)를 임시 폴더에 풀어 실행 파일을 띄운다. 돌려주는 값은 실행한 경로.
 fn extract_and_run(archive: &Path) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("nl-app-try-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // 폴더 이름을 pid 로 지으면 남이 먼저 그 자리에 만들어 두고 실행 파일을 바꿔치울 수 있다
+    // (보안 리뷰 L22). `tempfile` 이 무작위 이름으로 0700 폴더를 만든다.
+    // `keep()` 으로 소유권을 놓아 준다 — 방금 띄운 프로세스가 그 폴더에서 돌고 있다.
+    let dir = tempfile::Builder::new()
+        .prefix("nl-app-try-")
+        .tempdir()
+        .map_err(|e| format!("임시 폴더를 만들지 못했습니다: {e}"))?
+        .keep();
     let file = std::fs::File::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
     let gz = flate2::read::GzDecoder::new(file);
     tar::Archive::new(gz)

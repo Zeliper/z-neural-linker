@@ -552,22 +552,22 @@ impl NlApp {
             } => {
                 ui.horizontal(|ui| {
                     ui.label("은닉 크기");
-                    changed |= ui.add(DragValue::new(hidden).range(1..=100_000)).changed();
+                    changed |= ui.add(DragValue::new(hidden).range(1..=4096)).changed();
                 });
                 changed |= ui
                     .checkbox(bidirectional, "양방향")
-                    .on_hover_text("두 방향을 마지막 차원에서 이어 붙입니다 — 출력 폭이 두 배가 됩니다")
+                    .on_hover_text("두 방향을 마지막 차원에서 이어 붙입니다 — 출력 폭이 2배가 됩니다")
                     .changed();
                 changed |= ui
                     .checkbox(return_sequence, "시퀀스 전체 출력")
-                    .on_hover_text("끄면 마지막 시점의 상태만 내보냅니다")
+                    .on_hover_text("켜면 [L, H], 끄면 마지막 시점만 담은 [H] 를 내보냅니다")
                     .changed();
             }
             LayerKind::MultiHeadAttention { heads, dropout } => {
                 ui.horizontal(|ui| {
                     ui.label("헤드 수");
                     changed |= ui
-                        .add(DragValue::new(heads).range(1..=1024))
+                        .add(DragValue::new(heads).range(1..=64))
                         .on_hover_text("입력의 마지막 차원이 이 값으로 나누어떨어져야 합니다")
                         .changed();
                 });

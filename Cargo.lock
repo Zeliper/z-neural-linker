@@ -5389,6 +5389,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "tempfile",
  "ureq 3.4.1",
  "uuid",
  "winit",

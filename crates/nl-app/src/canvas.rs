@@ -1264,6 +1264,24 @@ fn lighten(c: Color32, amount: u8) -> Color32 {
 
 #[cfg(test)]
 mod tests {
+    /// 팔레트에 빠진 레이어가 없는지. 새 `LayerKind` 를 넣고 팔레트를 잊으면 캔버스에서 만들 수 없다.
+    #[test]
+    fn the_layer_palette_covers_every_kind() {
+        let p = nl_core::LayerKind::palette();
+        assert_eq!(p.len(), 20, "새 LayerKind 를 팔레트에 추가할 것");
+        // 같은 종류가 두 번 들어가면 메뉴에 중복으로 보인다.
+        let mut labels: Vec<&str> = p.iter().map(|k| k.spec().label).collect();
+        labels.sort_unstable();
+        let n = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "팔레트에 같은 레이어가 두 번");
+        // 모든 분류에 순서가 있어야 서브메뉴가 만들어진다.
+        for kind in &p {
+            let cat = kind.spec().category;
+            assert!(category_order(cat) < 100, "{cat:?} 에 팔레트 순서가 없다");
+        }
+    }
+
     use super::*;
     use nl_core::{Act, Node};
 

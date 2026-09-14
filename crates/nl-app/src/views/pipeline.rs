@@ -248,12 +248,12 @@ pub fn inspect_node(
     ui.add_space(6.0);
     match &mut next.kind {
         PNodeKind::Source { source } => {
-            changed |= source_editor(ui, source, ctx, &mut actions, pid);
+            changed |= source_editor(ui, source, ctx, &mut actions, pid, nid);
             if matches!(source, Source::Manual) {
                 manual_sender(ui, state, nid, &mut actions, live.running);
             }
-            if let Source::HttpServer { bind, path, token, .. } = source {
-                http_server_tester(ui, bind, path, token.as_deref(), live.running);
+            if let Source::HttpServer { bind, path, token, tls } = source {
+                http_server_tester(ui, bind, path, token.as_deref(), tls.is_some(), live.running);
             }
         }
         PNodeKind::Model { model, payload } => changed |= model_editor(ui, model, payload, ctx),
@@ -361,6 +361,7 @@ fn source_editor(
     ctx: &ViewCtx,
     actions: &mut Vec<ViewAction>,
     pid: PipelineId,
+    nid: PNodeId,
 ) -> bool {
     let mut changed = false;
     ui.label(RichText::new("소스 종류").color(COL_WEAK).size(11.5));
@@ -443,9 +444,7 @@ fn source_editor(
         Source::GuiEvent { widget } => {
             changed |= widget_picker(ui, widget, ctx, "이 위젯의 이벤트를 받습니다", "src-widget");
         }
-        // `tls` 는 아직 인스펙터에 없다 — 인증서 파일 선택 UI 는 별도 작업이다.
-        // 그때까지 프로젝트 파일에 적힌 값은 그대로 보존된다(여기서 건드리지 않으므로).
-        Source::HttpServer { bind, path, token, .. } => {
+        Source::HttpServer { bind, path, token, tls } => {
             ui.label(RichText::new("주소:포트").color(COL_WEAK).size(11.0));
             changed |= ui
                 .add(egui::TextEdit::singleline(bind).desired_width(f32::INFINITY))
@@ -482,6 +481,7 @@ fn source_editor(
                 ui.label(RichText::new("경로는 / 로 시작해야 합니다").color(COL_WARN).size(11.0));
             }
             changed |= token_editor(ui, token, loopback);
+            changed |= tls_editor(ui, tls, loopback, ctx, pid, nid, actions);
             ui.label(
                 RichText::new("요청 본문이 값이 됩니다. 응답은 같은 파이프라인의 'HTTP 응답' 싱크가 돌려줍니다.")
                     .color(COL_WEAK)
@@ -570,8 +570,131 @@ fn token_editor(ui: &mut egui::Ui, token: &mut Option<String>, loopback: bool) -
     changed
 }
 
+/// HTTP 서버 노드의 HTTPS 설정.
+///
+/// 인증서와 키는 **경로만** 프로젝트에 적는다. 파일 자체는 배포물에 들어가지 않고, 배포한 앱은
+/// 실행 폴더 기준으로 그 경로를 찾는다. 키를 어디에 두고 누가 읽을 수 있게 할지는 사용자 몫이라
+/// 빌더가 대신 만들지 않는다 — 자체 서명이 필요하면 `nl tls-cert` 를 쓰라고 안내만 한다.
+fn tls_editor(
+    ui: &mut egui::Ui,
+    tls: &mut Option<nl_core::pipeline::TlsConfig>,
+    loopback: bool,
+    ctx: &ViewCtx,
+    pid: PipelineId,
+    nid: PNodeId,
+    actions: &mut Vec<ViewAction>,
+) -> bool {
+    let mut changed = false;
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("HTTPS")
+        .default_open(tls.is_some())
+        .show(ui, |ui| {
+            let mut on = tls.is_some();
+            if ui
+                .checkbox(&mut on, "TLS 로 열기")
+                .on_hover_text("끄면 평문 http 로 엽니다 — 토큰과 본문이 전선 위에 그대로 흐릅니다")
+                .changed()
+            {
+                *tls = on.then(|| nl_core::pipeline::TlsConfig {
+                    // 기본 경로는 `nl tls-cert` 가 만드는 자리와 맞춰 둔다 — 대개 그대로 쓰면 된다.
+                    cert_pem: "certs/cert.pem".into(),
+                    key_pem: "certs/key.pem".into(),
+                });
+                changed = true;
+            }
+            let Some(cfg) = tls.as_mut() else {
+                if !loopback {
+                    // `nl_core::validate` 가 같은 조합을 경고로 잡는다. 여기서 미리 보여 준다.
+                    ui.label(
+                        RichText::new("⚠ 바깥에서 닿는 주소인데 TLS 가 없습니다 — 토큰과 본문이 평문으로 오갑니다")
+                            .color(COL_WARN)
+                            .size(11.0),
+                    );
+                }
+                return;
+            };
+
+            changed |= pem_row(ui, "인증서 PEM", &mut cfg.cert_pem, ctx, (pid, nid), false, actions);
+            changed |= pem_row(ui, "개인키 PEM", &mut cfg.key_pem, ctx, (pid, nid), true, actions);
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("자체 서명 인증서가 필요하면").color(COL_WEAK).size(11.0));
+            let cmd = tls_cert_command(ctx.base_dir);
+            ui.label(RichText::new(&cmd).size(11.0).monospace());
+            if ui.small_button("복사").clicked() {
+                ui.ctx().copy_text(cmd);
+            }
+            ui.label(
+                RichText::new(
+                    "인증서와 키는 배포물에 들어가지 않습니다. 배포한 앱은 실행 폴더 기준으로 이 경로를 찾습니다.",
+                )
+                .color(COL_WEAK)
+                .size(10.5),
+            );
+        });
+    changed
+}
+
+/// PEM 한 줄: 경로 표시 + 고르기 버튼 + 프로젝트 폴더 밖 경고.
+///
+/// `at` 은 "어느 파이프라인의 어느 노드인지" 다 — 고르기 액션이 그 노드를 찾아가야 한다.
+fn pem_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    ctx: &ViewCtx,
+    at: (PipelineId, PNodeId),
+    key: bool,
+    actions: &mut Vec<ViewAction>,
+) -> bool {
+    let (pid, nid) = at;
+    let mut changed = false;
+    ui.label(RichText::new(label).color(COL_WEAK).size(11.0));
+    ui.horizontal(|ui| {
+        changed |= ui.add(egui::TextEdit::singleline(value).desired_width(220.0)).changed();
+        if ui.small_button("고르기…").clicked() {
+            actions.push(ViewAction::PickTlsFile {
+                pipeline: pid,
+                node: nid,
+                key,
+            });
+        }
+    });
+    if value.trim().is_empty() {
+        ui.label(
+            RichText::new("비어 있으면 서버가 열리지 않습니다")
+                .color(COL_WARN)
+                .size(11.0),
+        );
+    } else if let Some(why) = crate::paths::outside_project(value) {
+        // 프로젝트 폴더 밖 파일은 다른 컴퓨터에서 열 때 없는 경로가 된다.
+        ui.label(
+            RichText::new(format!(
+                "✖ 프로젝트 폴더 밖입니다 ({}) — 폴더 안으로 옮기세요",
+                why.label()
+            ))
+            .color(COL_ERROR)
+            .size(11.0),
+        );
+    } else if ctx.saved() {
+        let full = crate::views::build::resolve_path(ctx.base_dir, value);
+        if !full.exists() {
+            ui.label(RichText::new("이 경로에 파일이 없습니다").color(COL_WARN).size(11.0));
+        }
+    }
+    changed
+}
+
+/// 자체 서명 인증서를 만드는 명령. 프로젝트 폴더를 알면 그 폴더를 넣어 준다.
+pub fn tls_cert_command(base_dir: Option<&std::path::Path>) -> String {
+    let dir = base_dir
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    format!("nl tls-cert {dir} --hosts localhost,127.0.0.1")
+}
+
 /// 이 서버 노드를 부르는 curl 한 줄.
-pub fn curl_example(bind: &str, path: &str, token: Option<&str>) -> String {
+pub fn curl_example(bind: &str, path: &str, token: Option<&str>, tls: bool) -> String {
     let host = if bind.starts_with("0.0.0.0") {
         bind.replacen("0.0.0.0", "127.0.0.1", 1)
     } else {
@@ -582,7 +705,9 @@ pub fn curl_example(bind: &str, path: &str, token: Option<&str>) -> String {
         Some(t) => format!(" -H 'X-NL-Token: {t}'"),
         None => String::new(),
     };
-    format!("curl -X POST http://{host}{path}{auth} -d '[0,1]'")
+    // TLS 를 켜면 주소가 https 다. 자체 서명 인증서는 curl 이 거부하므로 `-k` 를 함께 보여 준다.
+    let (scheme, insecure) = if tls { ("https", " -k") } else { ("http", "") };
+    format!("curl{insecure} -X POST {scheme}://{host}{path}{auth} -d '[0,1]'")
 }
 
 pub fn source_label(s: &Source) -> &'static str {
@@ -762,7 +887,7 @@ fn manual_sender(
 }
 
 /// 실행 중인 HTTP 서버 노드를 바깥에서 불러 보는 칸.
-fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, token: Option<&str>, running: bool) {
+fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, token: Option<&str>, tls: bool, running: bool) {
     ui.add_space(8.0);
     egui::Frame::NONE
         .fill(COL_SURFACE)
@@ -770,7 +895,7 @@ fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, token: Option<&
         .corner_radius(4)
         .show(ui, |ui| {
             ui.label(RichText::new("바깥에서 불러 보기").strong());
-            let cmd = curl_example(bind, path, token);
+            let cmd = curl_example(bind, path, token, tls);
             ui.label(RichText::new(&cmd).size(11.0).monospace());
             ui.horizontal(|ui| {
                 if ui.button("복사").clicked() {
@@ -1415,20 +1540,45 @@ mod tests {
     #[test]
     fn curl_example_points_at_something_reachable() {
         assert_eq!(
-            curl_example("127.0.0.1:8787", "/infer", None),
+            curl_example("127.0.0.1:8787", "/infer", None, false),
             "curl -X POST http://127.0.0.1:8787/infer -d '[0,1]'"
         );
         // 0.0.0.0 에 묶었어도 부를 때는 루프백으로 부른다.
-        assert!(curl_example("0.0.0.0:9000", "/x", None).contains("http://127.0.0.1:9000/x"));
+        assert!(curl_example("0.0.0.0:9000", "/x", None, false).contains("http://127.0.0.1:9000/x"));
     }
 
     /// 토큰이 있으면 예시에 헤더가 들어가야 한다 — 빠진 예시를 복사하면 401 만 돌아온다.
     #[test]
     fn curl_example_carries_the_token_header() {
-        let cmd = curl_example("127.0.0.1:8787", "/infer", Some("abc123"));
+        let cmd = curl_example("127.0.0.1:8787", "/infer", Some("abc123"), false);
         assert!(cmd.contains("-H 'X-NL-Token: abc123'"), "{cmd}");
         // 공백뿐인 토큰은 없는 것으로 본다 (편집기가 그렇게 저장한다).
-        assert!(!curl_example("127.0.0.1:8787", "/infer", Some("  ")).contains("X-NL-Token"));
+        assert!(!curl_example("127.0.0.1:8787", "/infer", Some("  "), false).contains("X-NL-Token"));
+    }
+
+    /// TLS 를 켜면 주소가 https 로 바뀌고, 자체 서명을 받아들이는 `-k` 가 함께 보여야 한다.
+    #[test]
+    fn curl_example_switches_to_https_with_tls() {
+        let plain = curl_example("127.0.0.1:8787", "/infer", None, false);
+        assert!(plain.starts_with("curl -X POST http://"), "{plain}");
+
+        let secure = curl_example("127.0.0.1:8787", "/infer", Some("t"), true);
+        assert!(secure.contains("https://127.0.0.1:8787/infer"), "{secure}");
+        assert!(
+            secure.contains(" -k "),
+            "자체 서명 인증서를 받아들이는 옵션이 있어야 한다: {secure}"
+        );
+        assert!(secure.contains("X-NL-Token: t"), "토큰 헤더는 그대로: {secure}");
+    }
+
+    /// 자체 서명 안내는 프로젝트 폴더를 알면 그 폴더를 넣어 준다 — 그대로 붙여 넣을 수 있어야 한다.
+    #[test]
+    fn the_tls_cert_command_points_at_the_project_folder() {
+        let cmd = tls_cert_command(Some(std::path::Path::new("/home/me/proj")));
+        assert!(cmd.starts_with("nl tls-cert /home/me/proj"), "{cmd}");
+        assert!(cmd.contains("--hosts"), "{cmd}");
+        // 저장 전에는 현재 폴더를 쓴다.
+        assert!(tls_cert_command(None).starts_with("nl tls-cert ."));
     }
 
     /// 팔레트로 만든 서버는 토큰을 이미 갖고 있어야 한다.

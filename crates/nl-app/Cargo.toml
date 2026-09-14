@@ -40,6 +40,8 @@ egui_plot.workspace = true
 winit.workspace = true
 rfd.workspace = true
 
+tempfile.workspace = true
+
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }
 

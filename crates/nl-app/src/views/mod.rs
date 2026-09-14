@@ -135,6 +135,12 @@ pub enum ViewAction {
     RunArtifact(PathBuf),
     /// 아이콘 PNG 고르기.
     PickIcon,
+    /// HTTP 서버 노드의 TLS 인증서·키 PEM 을 고른다.
+    PickTlsFile {
+        pipeline: PipelineId,
+        node: PNodeId,
+        key: bool,
+    },
     // 녹화
     /// 녹화 폼을 연다.
     StartRecordForm,
