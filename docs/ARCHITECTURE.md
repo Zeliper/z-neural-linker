@@ -40,8 +40,8 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 
 | 크레이트 | 역할 | 의존 |
 |---|---|---|
-| `nl-core` | 프로젝트 문서 모델, 레이어 그래프, 형상 추론, 페이로드/데이터셋/파이프라인/GUI 레이아웃 스펙, op·undo·diff, 번들 포맷 | serde 만 |
-| `nl-engine` | burn 기반 **런타임 정의 그래프** 인터프리터, 장치 선택(CPU ndarray / GPU wgpu), 학습 루프(스레드 + 이벤트 채널), 체크포인트(safetensors), 추론 세션 | nl-core, burn |
+| [`nl-core`](../crates/nl-core/README.md) | 프로젝트 문서 모델, 레이어 그래프, 형상 추론, 페이로드/데이터셋/파이프라인/GUI 레이아웃 스펙, op·undo·diff, 번들 포맷 | serde 만 |
+| [`nl-engine`](../crates/nl-engine/README.md) | burn 기반 **런타임 정의 그래프** 인터프리터, 장치 선택(CPU ndarray / GPU wgpu), 학습 루프(스레드 + 이벤트 채널), 체크포인트(safetensors), 추론 세션 | nl-core, burn |
 | [`nl-io`](../crates/nl-io/README.md) | 화면 캡처(Linux: libwayshot·xdg-desktop-portal·x11rb, 그 밖: xcap), 입력 시뮬레이션(enigo), HTTP 호출·**자체 인바운드 HTTP 서버(`httpd`)**, WebSocket(tungstenite+rustls), 화면 녹화기(`Recorder`), 자원 조회(sysinfo), **파이프라인 실행기 `Runner`** | nl-core, nl-engine |
 | `nl-gui` | 빌더 미리보기와 런타임이 **같은 픽셀을 그리도록** 공유하는 egui 요소: `GuiLayout` 렌더러(`render_layout`), 위젯 상태(`GuiState`)·이벤트(`GuiEvent`), 편집/실행 두 모드(`RenderMode`), 한글 폰트·테마 | nl-core, nl-engine, egui |
 | `nl-bundle` | `.nlapp` zip 읽기/쓰기, 런타임 바이너리 첨부, 배포 아카이브(tar.gz/zip), Windows 설치 프로그램(Inno Setup) 생성, 아이콘 변환(PNG→ICO), 업데이트 매니페스트 생성, 외부 도구 설치·크로스 빌드 계획 | nl-core, nl-update, zip, image |
