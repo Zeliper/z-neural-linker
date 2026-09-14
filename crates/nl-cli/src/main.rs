@@ -12,7 +12,6 @@ mod infer;
 mod inspect;
 mod record;
 mod run;
-mod sample;
 mod train;
 
 use anyhow::Result;
@@ -154,6 +153,9 @@ enum Command {
         /// Windows 설치 프로그램에 적을 배포자.
         #[arg(long, default_value = "Neural Linker")]
         publisher: String,
+        /// 배포 앱이 마우스·키보드를 실제로 조작하도록 허용한다. 기본은 금지.
+        #[arg(long)]
+        arm_input: bool,
     },
     /// XOR 샘플 프로젝트를 만든다.
     Sample {
@@ -210,7 +212,7 @@ fn dispatch() -> Result<i32> {
             };
             record::run(record::Args { out: &out, monitor, x, y, width, height, fps, seconds, allowed })
         }
-        Command::Build { project, target, out, name, version, pipeline, runtime, icon, publisher } => {
+        Command::Build { project, target, out, name, version, pipeline, runtime, icon, publisher, arm_input } => {
             build::run(build::Args {
                 project: &project,
                 target: &target,
@@ -221,6 +223,7 @@ fn dispatch() -> Result<i32> {
                 runtime: runtime.as_deref(),
                 icon: icon.as_deref(),
                 publisher: &publisher,
+                arm_input,
             })
         }
         Command::Sample { out } => make_sample(&out),
@@ -228,7 +231,8 @@ fn dispatch() -> Result<i32> {
 }
 
 fn make_sample(out: &std::path::Path) -> Result<i32> {
-    let project = sample::xor_project();
+    // 샘플은 `nl-core` 한 곳에 있다 — 빌더의 "샘플 열기" 와 정확히 같은 프로젝트가 나온다.
+    let project = nl_core::sample::xor_project();
     common::save_project_atomic(out, &project)?;
     println!("{} {}", common::bold("샘플"), out.display());
     println!("  {} {}", common::dim("모델"), project.models.values().next().map(|m| m.name.as_str()).unwrap_or(""));
@@ -316,6 +320,57 @@ mod tests {
         assert!(Cli::try_parse_from(["nl", "inspect"]).is_err());
     }
 
+    /// nl-core 샘플이 파일을 거쳐도 온전한지: 검증 문제 없음 + 파이프라인 2개 + GUI 4위젯 + 빌드 설정.
+    /// 빌더와 명령줄이 같은 것을 쓰는지 지키는 자리다 (nl-core 는 nl-app 을 볼 수 없어 여기서 확인한다).
+    #[test]
+    fn the_core_sample_survives_a_file_round_trip() {
+        use nl_core::Severity;
+        let dir = std::env::temp_dir().join(format!("nl-cli-core-sample-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("xor.nlproj");
+        assert_eq!(make_sample(&path).unwrap(), 0);
+
+        let p = common::load_project(&path).unwrap().project;
+        let errors: Vec<_> =
+            nl_core::validate(&p).into_iter().filter(|i| i.severity == Severity::Error).collect();
+        assert!(errors.is_empty(), "검증 오류: {errors:?}");
+
+        assert_eq!(p.pipelines.len(), 2, "시험 + 추론 API");
+        assert!(p.pipelines.values().any(|x| x.name == "XOR 시험"));
+        assert!(p.pipelines.values().any(|x| x.name == "추론 API"));
+        assert_eq!(p.gui.widgets.len(), 4, "GUI 위젯 4개");
+        let build = p.settings.build.as_ref().expect("빌드 설정이 파일을 거치며 사라졌다");
+        assert_eq!(build.app_name, "XOR 분류기");
+        assert!(!build.arm_input);
+
+        // 모델·데이터셋·페이로드도 그대로.
+        assert_eq!(p.models.len(), 1);
+        assert_eq!(p.datasets.len(), 1);
+        assert_eq!(p.payloads.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// CNN 샘플도 같은 왕복을 견딘다.
+    #[test]
+    fn the_cnn_sample_survives_a_file_round_trip() {
+        use nl_core::Severity;
+        let dir = std::env::temp_dir().join(format!("nl-cli-cnn-sample-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cnn.nlproj");
+        common::save_project_atomic(&path, &nl_core::sample::quadrants_cnn_project()).unwrap();
+
+        let p = common::load_project(&path).unwrap().project;
+        let errors: Vec<_> =
+            nl_core::validate(&p).into_iter().filter(|i| i.severity == Severity::Error).collect();
+        assert!(errors.is_empty(), "검증 오류: {errors:?}");
+        assert_eq!(p.models.len(), 1);
+        assert_eq!(p.pipelines.len(), 1, "CNN 은 추론 API 하나만");
+        assert!(p.pipelines.values().all(|x| x.name == "추론 API"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// `nl sample` → 파일 → `inspect` 가 읽을 수 있는지 왕복으로 확인한다.
     #[test]
     fn sample_round_trips_through_the_project_file() {
@@ -327,7 +382,7 @@ mod tests {
         assert!(path.is_file());
 
         let mut loaded = common::load_project(&path).unwrap().project;
-        let mut expected = sample::xor_project();
+        let mut expected = nl_core::sample::xor_project();
         // `created` 는 만든 시각이라 비교에서 뺀다 (나머지는 전부 같아야 한다).
         expected.created = loaded.created;
         assert_eq!(loaded, expected, "저장/읽기로 프로젝트가 달라졌다");

@@ -26,5 +26,8 @@ sha2.workspace = true
 # `nl infer --image` 가 이미지를 읽는다
 image.workspace = true
 
+[dev-dependencies]
+# 종단 테스트가 배포판에 HTTP 요청을 보낸다 (nl-io 는 이미 일반 의존성이라 새로 추가되는 것은 없다).
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

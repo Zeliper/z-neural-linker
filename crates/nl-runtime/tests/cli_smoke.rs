@@ -8,7 +8,16 @@ use std::process::Command;
 
 const EXE: &str = env!("CARGO_BIN_EXE_nl-runtime");
 
+/// `app::ARM_INPUT_NOTICE` 의 핵심 문구. nl-runtime 은 바이너리 전용이라 통합 테스트가 상수를 직접 볼 수 없어
+/// 여기에 적어 둔다. 상수를 고치면 이 문자열도 같이 고쳐야 한다.
+const ARM_NOTICE_PHRASE: &str = "마우스·키보드를 실제로 조작합니다";
+
 fn demo_zip() -> Vec<u8> {
+    demo_zip_with(false)
+}
+
+/// `arm_input` 을 켠/끈 번들. 무장 여부가 실행 로그에 그대로 드러나는지 보려고 갈라 둔다.
+fn demo_zip_with(arm_input: bool) -> Vec<u8> {
     let mut project = Project::new("스모크");
     let mut pipeline = Pipeline::new("스모크 파이프라인");
     pipeline.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [0.0, 0.0]));
@@ -23,6 +32,7 @@ fn demo_zip() -> Vec<u8> {
     let mut manifest = BundleManifest::new("스모크 앱", "9.9.9");
     manifest.entry_pipeline = Some(pid);
     manifest.autostart = true;
+    manifest.arm_input = arm_input;
     let mut bundle = Bundle::new(manifest, project);
     bundle.weights.insert("w.safetensors".into(), vec![1, 2, 3, 4]);
     bundle.to_zip().unwrap()
@@ -75,4 +85,41 @@ fn attached_bundle_runs_without_arguments() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "종료 코드 {:?}\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");
+}
+
+/// 입력 무장은 **번들이 명시적으로 허용해야** 켜진다.
+/// 켜지 않고 만든 배포판은 로그에 무장 문구가 없어야 한다.
+#[test]
+fn a_bundle_without_arm_input_never_says_it_is_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("평범.nlapp");
+    std::fs::write(&file, demo_zip_with(false)).unwrap();
+
+    let out = Command::new(EXE)
+        .args(["--headless", "--run-for", "1", "--device", "cpu"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");
+    assert!(!stdout.contains("무장"), "무장하지 않았는데 무장 문구가 있다:\n{stdout}");
+    assert!(!stdout.contains(ARM_NOTICE_PHRASE), "{stdout}");
+}
+
+/// 켜서 만든 배포판은 시작할 때 한 줄로 알린다.
+#[test]
+fn a_bundle_with_arm_input_announces_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("무장.nlapp");
+    std::fs::write(&file, demo_zip_with(true)).unwrap();
+
+    let out = Command::new(EXE)
+        .args(["--headless", "--run-for", "1", "--device", "cpu"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains(ARM_NOTICE_PHRASE), "무장 안내가 없다:\n{stdout}");
 }

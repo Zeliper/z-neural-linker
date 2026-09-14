@@ -101,14 +101,13 @@ fn format_event(project: &nl_core::Project, ev: &RunnerEvent, start: Instant) ->
             log::debug!("값 {} = {}", node.short(), brief(value));
             return None;
         }
-        // 이미지 축소판은 그릴 화면이 없다. 크기만 로그로 남긴다.
+        // 미리보기 축소판은 터미널에서 쓸 데가 없다.
         RunnerEvent::ValuePreview { node, width, height, .. } => {
-            log::debug!("이미지 {} = {width}×{height}", node.short());
+            log::debug!("미리보기 {} {width}x{height}", node.short());
             return None;
         }
-        // 틱 통계는 초당 하나씩 꾸준히 온다. 줄을 채우지 않도록 로그로만 남긴다.
         RunnerEvent::Stats { tick, tick_ms, hz } => {
-            log::debug!("틱 {tick} · {hz:.1} Hz · {tick_ms:.1} ms");
+            log::debug!("틱 {tick} · {hz:.1}Hz · 틱당 {tick_ms:.1}ms");
             return None;
         }
     })

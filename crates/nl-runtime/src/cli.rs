@@ -15,7 +15,13 @@ pub const USAGE: &str = "\
   --no-update           시작할 때 새 버전을 확인하지 않습니다.
                         (매니페스트 주소는 NL_UPDATE_URL 환경 변수로 덮어쓸 수 있습니다.)
   --version, -V         버전을 출력합니다.
-  --help, -h            이 도움말을 출력합니다.";
+  --help, -h            이 도움말을 출력합니다.
+
+환경 변수
+  NL_HTTP_TOKEN         파이프라인의 HTTP 서버 노드가 요구할 토큰을 덮어씁니다.
+  NL_HTTP_TOKEN_<포트>  그 포트의 서버에만 적용합니다 (NL_HTTP_TOKEN 보다 우선).
+                        번들에 박힌 토큰은 받은 사람이 모두 볼 수 있으므로, 서버로 돌릴 때는
+                        실행 환경에서 새 토큰을 주는 편이 안전합니다.";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
