@@ -564,16 +564,50 @@ fn start_http_server(
     })
 }
 
-/// 프로젝트 폴더 안에서 인증서와 키를 읽어 TLS 받개를 만든다.
+/// 인증서와 키를 읽어 TLS 받개를 만든다.
 ///
-/// 두 경로 모두 [`resolve_inside`] 를 지난다 — 설정 파일에 `../../etc/ssl/private/...` 을 적어
-/// 남의 키를 읽어 가는 길을 막는다. 개인키는 비밀이라 **내용을 오류 메시지에 담지 않는다**.
+/// 찾는 곳이 둘이다. 먼저 `base_dir`, 없으면 **실행 파일이 있는 폴더**다. 둘 다
+/// [`resolve_inside`] 를 지나므로 `../../etc/ssl/private/...` 같은 경로로 남의 키를
+/// 읽어 가지 못한다. 개인키는 비밀이라 **내용을 오류 메시지에 담지 않는다**.
+///
+/// 실행 파일 폴더까지 보는 이유가 있다. 배포 앱(`nl-runtime`)의 `base_dir` 은 번들을 푼
+/// **임시 폴더**다. 인증서는 개인키를 품고 있어 번들에 담지 않으므로, 임시 폴더만 보면
+/// 배포판은 인증서를 영원히 찾지 못한다. 설치한 기계의 실행 파일 옆에 두고 쓰는 것이 맞다.
+/// `nl run` 은 `base_dir` 이 곧 프로젝트 폴더라 첫 번째 자리에서 바로 찾는다.
 fn load_tls(base_dir: &Path, cfg: &nl_core::TlsConfig) -> Result<crate::httpd::TlsAcceptor, String> {
-    let cert_path = resolve_inside(base_dir, &cfg.cert_pem).map_err(|e| format!("인증서 {e}"))?;
-    let key_path = resolve_inside(base_dir, &cfg.key_pem).map_err(|e| format!("개인키 {e}"))?;
-    let cert = std::fs::read(&cert_path).map_err(|e| format!("인증서를 읽지 못했다 ({}): {e}", cert_path.display()))?;
-    let key = std::fs::read(&key_path).map_err(|e| format!("개인키를 읽지 못했다 ({}): {e}", key_path.display()))?;
+    let cert = read_tls_file(base_dir, &cfg.cert_pem).map_err(|e| format!("인증서 {e}"))?;
+    let key = read_tls_file(base_dir, &cfg.key_pem).map_err(|e| format!("개인키 {e}"))?;
     crate::httpd::TlsAcceptor::from_pem(&cert, &key)
+}
+
+/// `base_dir` → 실행 파일 폴더 순으로 찾아 읽는다. 두 곳 모두 담장 검사를 지난다.
+fn read_tls_file(base_dir: &Path, rel: &str) -> Result<Vec<u8>, String> {
+    // 담장 검사부터. 경로 자체가 잘못됐으면 어느 폴더에서든 거부다.
+    let in_base = resolve_inside(base_dir, rel)?;
+    match std::fs::read(&in_base) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("를 읽지 못했다 ({}): {e}", in_base.display()));
+        }
+        Err(_) => {}
+    }
+
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    if let Some(dir) = exe_dir {
+        // 같은 폴더를 두 번 보지 않는다 — 메시지가 헷갈린다.
+        if dir != base_dir {
+            if let Ok(beside) = resolve_inside(&dir, rel) {
+                if let Ok(bytes) = std::fs::read(&beside) {
+                    return Ok(bytes);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "를 찾지 못했다 ({rel}) — 프로젝트 폴더나 실행 파일 옆에 두어라"
+    ))
 }
 
 /// 경로 비교를 위해 앞에 `/` 를 붙이고 뒤쪽 `/` 는 뗀다. 빈 값은 `/`.
@@ -3738,6 +3772,54 @@ mod tests {
         );
         assert!(ev.is_some(), "인증서 오류가 보고되지 않았다");
         h.stop();
+    }
+
+    /// 배포판을 위해 실행 파일 옆도 본다 — 번들에는 개인키를 담지 않기 때문이다.
+    ///
+    /// 배포 앱의 `base_dir` 은 번들을 푼 임시 폴더라, 여기가 없으면 설치한 기계에 둔
+    /// 인증서를 영원히 못 찾는다.
+    #[test]
+    fn a_certificate_is_also_looked_for_beside_the_executable() {
+        let base = tmp_dir("tls-besideexe");
+        let exe_dir = std::env::current_exe()
+            .expect("실행 파일 경로")
+            .parent()
+            .expect("실행 파일 폴더")
+            .to_path_buf();
+        // 다른 시험과 부딪히지 않게 이 시험만의 이름을 쓴다.
+        let name = format!("nl-tls-beside-{}.pem", std::process::id());
+        let (cert, key) = self_signed();
+        std::fs::write(exe_dir.join(&name), &cert).expect("인증서 쓰기");
+        let key_name = format!("nl-tls-beside-{}.key", std::process::id());
+        std::fs::write(exe_dir.join(&key_name), &key).expect("키 쓰기");
+
+        let made = load_tls(
+            &base,
+            &nl_core::TlsConfig {
+                cert_pem: name.clone(),
+                key_pem: key_name.clone(),
+            },
+        );
+        let _ = std::fs::remove_file(exe_dir.join(&name));
+        let _ = std::fs::remove_file(exe_dir.join(&key_name));
+        assert!(made.is_ok(), "실행 파일 옆 인증서를 못 찾았다: {:?}", made.err());
+    }
+
+    /// 어느 쪽에도 없으면 어디를 봤는지 알려 준다.
+    #[test]
+    fn a_missing_certificate_says_where_it_looked() {
+        let base = tmp_dir("tls-missing");
+        let err = load_tls(
+            &base,
+            &nl_core::TlsConfig {
+                cert_pem: "certs/none.crt".into(),
+                key_pem: "certs/none.key".into(),
+            },
+        )
+        .err()
+        .expect("없는 인증서가 통과했다");
+        assert!(err.contains("인증서"), "{err}");
+        assert!(err.contains("실행 파일 옆"), "찾은 자리를 안 알려 준다: {err}");
     }
 
     /// 인증서 경로는 프로젝트 폴더 밖으로 나갈 수 없다.

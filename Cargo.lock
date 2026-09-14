@@ -5435,6 +5435,7 @@ dependencies = [
  "nl-core",
  "nl-engine",
  "nl-io",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2",

@@ -302,6 +302,128 @@ pub fn install_signal_handler() {
 #[cfg(not(unix))]
 pub fn install_signal_handler() {}
 
+// ───────────────────────────── TLS 주입 ─────────────────────────────
+
+/// `--tls-cert` / `--tls-key` / `--http-node` 를 한 덩어리로.
+pub struct TlsInject<'a> {
+    pub cert: Option<&'a Path>,
+    pub key: Option<&'a Path>,
+    /// 이 이름의 `HttpServer` 노드에만 붙인다. 없으면 전부.
+    pub node: Option<&'a str>,
+}
+
+/// 프로젝트의 `HttpServer` 노드에 `tls` 를 끼워 넣는다. 붙인 노드 수를 돌려준다.
+///
+/// **프로젝트 파일은 건드리지 않는다.** 메모리 위의 사본만 바뀌므로, 인증서 경로가 실수로
+/// 저장소에 커밋되는 일이 없다. 배포판에 남기고 싶으면 `nl build` 에 같은 옵션을 준다.
+pub fn apply_tls(project: &mut Project, inject: &TlsInject<'_>, base_dir: &Path) -> Result<usize> {
+    use nl_core::{PNodeKind, Source, TlsConfig};
+
+    let (cert, key) = match (inject.cert, inject.key) {
+        (Some(c), Some(k)) => (c, k),
+        (None, None) => {
+            // 노드만 지정하고 인증서를 안 준 경우를 조용히 넘기지 않는다.
+            if inject.node.is_some() {
+                bail!("--http-node 는 --tls-cert/--tls-key 와 함께 써야 한다");
+            }
+            return Ok(0);
+        }
+        _ => bail!("--tls-cert 와 --tls-key 는 둘 다 주어야 한다"),
+    };
+
+    let cert_rel = relative_inside(base_dir, cert, "--tls-cert")?;
+    let key_rel = relative_inside(base_dir, key, "--tls-key")?;
+    // 없는 파일을 가리킨 채 배포하면 배포판이 켜질 때 비로소 터진다. 여기서 먼저 잡는다.
+    for (opt, rel) in [("--tls-cert", &cert_rel), ("--tls-key", &key_rel)] {
+        let full = base_dir.join(rel);
+        if !full.exists() {
+            bail!(
+                "{opt} 가 가리키는 파일이 없다: {} ('nl tls-cert' 로 만들 수 있다)",
+                full.display()
+            );
+        }
+    }
+
+    let cfg = TlsConfig {
+        cert_pem: cert_rel,
+        key_pem: key_rel,
+    };
+
+    let mut hit = 0usize;
+    let mut seen_names: Vec<String> = Vec::new();
+    for pl in project.pipelines.values_mut() {
+        for n in pl.nodes.values_mut() {
+            let PNodeKind::Source {
+                source: Source::HttpServer { tls, .. },
+            } = &mut n.kind
+            else {
+                continue;
+            };
+            seen_names.push(n.name.clone());
+            if let Some(want) = inject.node {
+                if n.name != want {
+                    continue;
+                }
+            }
+            *tls = Some(cfg.clone());
+            hit += 1;
+        }
+    }
+
+    if hit == 0 {
+        if let Some(want) = inject.node {
+            bail!(
+                "--http-node {want} 에 맞는 HTTP 서버 노드가 없다 (있는 것: {})",
+                if seen_names.is_empty() {
+                    "없음".to_string()
+                } else {
+                    seen_names.join(", ")
+                }
+            );
+        }
+        bail!("이 프로젝트에 HTTP 서버 노드가 없어 TLS 를 붙일 곳이 없다");
+    }
+    Ok(hit)
+}
+
+/// 경로를 프로젝트 폴더 기준 상대 경로로 바꾼다. 밖을 가리키면 오류.
+///
+/// 실행기가 어차피 담장 검사를 하지만, 빌드할 때 걸러 주는 편이 낫다 —
+/// 배포판을 만들고 나서 켤 때 알게 되면 늦다.
+fn relative_inside(base_dir: &Path, path: &Path, opt: &str) -> Result<String> {
+    let rel = if path.is_absolute() {
+        let base_real = base_dir.canonicalize().unwrap_or_else(|_| base_dir.to_path_buf());
+        let p_real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        p_real.strip_prefix(&base_real).map(Path::to_path_buf).map_err(|_| {
+            anyhow!(
+                "{opt} 는 프로젝트 폴더 안이어야 한다: {} (기준 {})",
+                path.display(),
+                base_dir.display()
+            )
+        })?
+    } else {
+        path.to_path_buf()
+    };
+
+    let mut out = String::new();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(seg) => {
+                if !out.is_empty() {
+                    out.push('/');
+                }
+                out.push_str(&seg.to_string_lossy());
+            }
+            std::path::Component::CurDir => {}
+            _ => bail!("{opt} 가 프로젝트 폴더 밖을 가리킨다: {}", path.display()),
+        }
+    }
+    if out.is_empty() {
+        bail!("{opt} 가 비어 있다");
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +466,105 @@ mod tests {
         assert_eq!(find_model(&p, &full[..8]).unwrap().id, m.id);
         let err = find_model(&p, "없는모델").unwrap_err().to_string();
         assert!(err.contains("찾을 수 없다"), "{err}");
+    }
+
+    /// TLS 주입은 프로젝트 파일이 아니라 메모리 위 사본만 바꾼다.
+    #[test]
+    fn tls_injection_touches_every_http_server_node() {
+        let dir = std::env::temp_dir().join(format!("nl-cli-inject-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("certs")).unwrap();
+        std::fs::write(dir.join("certs/server.crt"), "x").unwrap();
+        std::fs::write(dir.join("certs/server.key"), "x").unwrap();
+
+        let mut p = nl_core::sample::xor_project();
+        let inject = TlsInject {
+            cert: Some(Path::new("certs/server.crt")),
+            key: Some(Path::new("certs/server.key")),
+            node: None,
+        };
+        let n = apply_tls(&mut p, &inject, &dir).expect("주입");
+        assert!(n >= 1, "붙은 노드가 없다");
+        let tls_count = p
+            .pipelines
+            .values()
+            .flat_map(|pl| pl.nodes.values())
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    nl_core::PNodeKind::Source {
+                        source: nl_core::Source::HttpServer { tls: Some(_), .. }
+                    }
+                )
+            })
+            .count();
+        assert_eq!(tls_count, n, "센 것과 붙은 것이 다르다");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tls_injection_rejects_half_a_pair_and_bad_paths() {
+        let dir = std::env::temp_dir().join(format!("nl-cli-inject-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = nl_core::sample::xor_project();
+
+        // 한쪽만 준 경우.
+        let only_cert = TlsInject {
+            cert: Some(Path::new("a.crt")),
+            key: None,
+            node: None,
+        };
+        let err = apply_tls(&mut p, &only_cert, &dir).unwrap_err().to_string();
+        assert!(err.contains("둘 다"), "{err}");
+
+        // 프로젝트 폴더 밖.
+        let outside = TlsInject {
+            cert: Some(Path::new("../secret.crt")),
+            key: Some(Path::new("../secret.key")),
+            node: None,
+        };
+        let err = apply_tls(&mut p, &outside, &dir).unwrap_err().to_string();
+        assert!(err.contains("밖을 가리킨다"), "{err}");
+
+        // 없는 파일.
+        let missing = TlsInject {
+            cert: Some(Path::new("certs/none.crt")),
+            key: Some(Path::new("certs/none.key")),
+            node: None,
+        };
+        let err = apply_tls(&mut p, &missing, &dir).unwrap_err().to_string();
+        assert!(err.contains("파일이 없다"), "{err}");
+
+        // 없는 노드 이름.
+        std::fs::create_dir_all(dir.join("certs")).unwrap();
+        std::fs::write(dir.join("certs/server.crt"), "x").unwrap();
+        std::fs::write(dir.join("certs/server.key"), "x").unwrap();
+        let wrong_node = TlsInject {
+            cert: Some(Path::new("certs/server.crt")),
+            key: Some(Path::new("certs/server.key")),
+            node: Some("없는노드"),
+        };
+        let err = apply_tls(&mut p, &wrong_node, &dir).unwrap_err().to_string();
+        assert!(err.contains("없는노드"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 아무 옵션도 없으면 아무 일도 일어나지 않는다.
+    #[test]
+    fn no_tls_options_means_no_change() {
+        let mut p = nl_core::sample::xor_project();
+        let before = serde_json::to_string(&p).unwrap();
+        let n = apply_tls(
+            &mut p,
+            &TlsInject {
+                cert: None,
+                key: None,
+                node: None,
+            },
+            Path::new("."),
+        )
+        .expect("빈 주입");
+        assert_eq!(n, 0);
+        assert_eq!(serde_json::to_string(&p).unwrap(), before, "프로젝트가 바뀌었다");
     }
 
     #[test]

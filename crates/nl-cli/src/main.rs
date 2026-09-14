@@ -12,6 +12,7 @@ mod infer;
 mod inspect;
 mod record;
 mod run;
+mod tlscert;
 mod train;
 
 use anyhow::Result;
@@ -100,6 +101,15 @@ enum Command {
         arm_input: bool,
         #[arg(long)]
         device: Option<String>,
+        /// HTTP 서버 노드를 https 로 연다. 프로젝트 폴더 기준 상대 경로.
+        #[arg(long, value_name = "경로", requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// 위 인증서의 개인키. 프로젝트 폴더 기준 상대 경로.
+        #[arg(long, value_name = "경로", requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+        /// 이 이름의 HTTP 서버 노드에만 TLS 를 붙인다. 기본은 전부.
+        #[arg(long, value_name = "이름")]
+        http_node: Option<String>,
     },
     /// 화면을 찍어 학습용 폴더를 만든다.
     Record {
@@ -156,6 +166,29 @@ enum Command {
         /// 배포 앱이 마우스·키보드를 실제로 조작하도록 허용한다. 기본은 금지.
         #[arg(long)]
         arm_input: bool,
+        /// HTTP 서버 노드를 https 로 연다. 프로젝트 폴더 기준 상대 경로.
+        #[arg(long, value_name = "경로", requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// 위 인증서의 개인키. 프로젝트 폴더 기준 상대 경로.
+        #[arg(long, value_name = "경로", requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+        /// 이 이름의 HTTP 서버 노드에만 TLS 를 붙인다. 기본은 전부.
+        #[arg(long, value_name = "이름")]
+        http_node: Option<String>,
+    },
+    /// HTTP 서버 노드용 자체 서명 인증서를 만든다.
+    TlsCert {
+        /// 인증서를 놓을 폴더. 보통 프로젝트 폴더다. 그 아래 `certs/` 를 만든다.
+        out_dir: PathBuf,
+        /// 인증서에 넣을 이름들 (쉼표로 구분). IP 처럼 생긴 것은 IP 로 넣는다.
+        #[arg(long, default_value = "localhost,127.0.0.1")]
+        hosts: String,
+        /// 유효 기간(일).
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+        /// 이미 있는 인증서를 덮어쓴다.
+        #[arg(long)]
+        force: bool,
     },
     /// XOR 샘플 프로젝트를 만든다.
     Sample {
@@ -227,12 +260,20 @@ fn dispatch() -> Result<i32> {
             seconds,
             arm_input,
             device,
+            tls_cert,
+            tls_key,
+            http_node,
         } => run::run(run::Args {
             project: &project,
             pipeline: pipeline.as_deref(),
             seconds,
             arm_input,
             device: device.as_deref(),
+            tls: common::TlsInject {
+                cert: tls_cert.as_deref(),
+                key: tls_key.as_deref(),
+                node: http_node.as_deref(),
+            },
         }),
         Command::Record {
             out,
@@ -272,6 +313,9 @@ fn dispatch() -> Result<i32> {
             icon,
             publisher,
             arm_input,
+            tls_cert,
+            tls_key,
+            http_node,
         } => build::run(build::Args {
             project: &project,
             target: &target,
@@ -283,6 +327,22 @@ fn dispatch() -> Result<i32> {
             icon: icon.as_deref(),
             publisher: &publisher,
             arm_input,
+            tls: common::TlsInject {
+                cert: tls_cert.as_deref(),
+                key: tls_key.as_deref(),
+                node: http_node.as_deref(),
+            },
+        }),
+        Command::TlsCert {
+            out_dir,
+            hosts,
+            days,
+            force,
+        } => tlscert::run(tlscert::Args {
+            out_dir: &out_dir,
+            hosts: &hosts,
+            days,
+            force,
         }),
         Command::Sample { out, kind, list } => {
             if list {

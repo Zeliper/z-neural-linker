@@ -29,11 +29,17 @@ pub struct Args<'a> {
     pub publisher: &'a str,
     /// 배포 앱이 실제 마우스·키보드 입력을 보내도 되는지. 기본 금지.
     pub arm_input: bool,
+    /// `--tls-cert/--tls-key/--http-node`. **경로만** 번들에 들어간다 — 인증서 파일은 담지 않는다.
+    pub tls: TlsInject<'a>,
 }
 
 pub fn run(args: Args<'_>) -> Result<i32> {
-    let l = load_project(args.project)?;
+    let mut l = load_project(args.project)?;
     let targets = parse_targets(args.target)?;
+
+    // 번들에 담기는 것은 `tls` 의 **경로 문자열뿐**이다. 인증서 파일은 넣지 않는다 —
+    // 개인키가 든 `.nlapp` 은 그 자체가 유출이기 때문이다. 배포 앱은 실행 파일 옆에서 찾는다.
+    let tls_nodes = apply_tls(&mut l.project, &args.tls, &l.base_dir)?;
 
     let app_name = args.name.unwrap_or(&l.project.name).to_string();
     let version = args.version.unwrap_or("0.1.0").to_string();
@@ -97,6 +103,18 @@ pub fn run(args: Args<'_>) -> Result<i32> {
     }
     if args.arm_input {
         println!("  {}", yellow("입력 무장 — 이 앱은 마우스·키보드를 실제로 조작한다"));
+    }
+    if tls_nodes > 0 {
+        let cert = args.tls.cert.map(Path::display);
+        println!("  {} HTTP 서버 노드 {tls_nodes}개가 https 로 열린다", dim("TLS"));
+        if let Some(c) = cert {
+            println!(
+                "  {}",
+                yellow(&format!(
+                    "인증서 파일은 번들에 담지 않는다 — 설치한 기계의 실행 파일 옆에 {c} 를 그대로 두어라"
+                ))
+            );
+        }
     }
 
     let zip = bundle.to_zip().context("번들 zip 을 만들지 못했다")?;
