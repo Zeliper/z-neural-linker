@@ -619,8 +619,12 @@ nl build p.nlproj --target all --name "내 앱" --version 1.0.0 \
    --pipeline "XOR 시험" --icon icon.png --publisher "Trust A&C"
 nl build p.nlproj --arm-input                # 배포 앱이 마우스·키보드를 실제로 조작하도록 허용 (기본 금지)
 
-nl sample new.nlproj                         # XOR 샘플 프로젝트를 만든다
+nl sample --list                             # 만들 수 있는 샘플 목록
+nl sample new.nlproj                         # XOR 샘플 (기본)
+nl sample cnn.nlproj --kind cnn              # 사분면 CNN 샘플 (이미지 분류)
 ```
+
+샘플은 빌더의 `샘플 열기` 메뉴와 **같은 프로젝트**입니다. 만들자마자 학습·빌드까지 이어집니다.
 
 모델·데이터셋·파이프라인은 **이름으로도 id 앞부분으로도** 지목할 수 있습니다.
 
