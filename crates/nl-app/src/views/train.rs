@@ -377,15 +377,28 @@ fn controls(
                 match live {
                     None => {
                         let ready = dataset_id.is_some();
-                        ui.add_enabled_ui(ready, |ui| {
-                            if ui.button(RichText::new("▶ 학습 시작").color(COL_OK)).clicked() {
+                        // 이 창에 세션이 없어도 엔진 쪽에 도는 학습이 있을 수 있다. 엔진이 거절하기
+                        // 전에 여기서 먼저 막고, 왜 못 누르는지 툴팁으로 말해 준다.
+                        let busy = nl_engine::active_count() > 0;
+                        ui.add_enabled_ui(ready && !busy, |ui| {
+                            if ui
+                                .button(RichText::new("▶ 학습 시작").color(COL_OK))
+                                .on_hover_text(if busy {
+                                    "학습이 이미 진행 중"
+                                } else {
+                                    "학습을 시작합니다"
+                                })
+                                .clicked()
+                            {
                                 actions.push(ViewAction::StartTrain {
                                     model: model_id,
                                     dataset: dataset_id.unwrap(),
                                 });
                             }
                         });
-                        if !ready {
+                        if busy {
+                            ui.label(RichText::new("학습이 이미 진행 중").color(COL_WARN).size(11.5));
+                        } else if !ready {
                             ui.label(RichText::new("데이터셋을 고르세요").color(COL_WARN).size(11.5));
                         } else if !ctx.saved() {
                             ui.label(

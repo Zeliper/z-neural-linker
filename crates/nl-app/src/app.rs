@@ -1573,6 +1573,12 @@ impl NlApp {
             self.toast("이미 학습이 진행 중입니다", now);
             return;
         }
+        // 이 창의 세션이 없어도 엔진 쪽에 도는 학습이 있을 수 있다. 엔진도 거절하지만 그 메시지는
+        // `TrainRequest::allow_concurrent` 같은 내부 이름을 담고 있어 사용자에게 보일 말이 아니다.
+        if nl_engine::active_count() > 0 {
+            self.toast("학습이 이미 진행 중입니다 — 끝나기를 기다리세요", now);
+            return;
+        }
         if self.doc.file_path.is_none() {
             self.toast("학습 기록을 남길 폴더가 필요합니다 — 프로젝트를 먼저 저장하세요", now);
             self.save_as(now);
@@ -1607,6 +1613,9 @@ impl NlApp {
             base_dir,
             run_dir: run_dir.clone(),
             resume_from: None,
+            // 빌더는 학습을 하나만 돌린다. 장치·메모리를 두 학습이 나눠 쓰면 둘 다 느려지고,
+            // 실행 기록·체크포인트 폴더가 겹쳐 어느 쪽 결과인지 알 수 없게 된다.
+            allow_concurrent: false,
         };
         match TrainSession::start(req, run_dir, now) {
             Ok(s) => {
@@ -3067,10 +3076,15 @@ impl NlApp {
                         .and_then(|m| self.doc.project.models.get(&m))
                         .and_then(|m| m.train.dataset)
                         .is_some();
-                    ui.add_enabled_ui(ready, |ui| {
+                    // 이 창에 세션이 없어도 엔진 쪽에 도는 학습이 있을 수 있다 (다른 창·앞선 세션의
+                    // 잔여). 엔진이 거절하기 전에 여기서 먼저 막아 준다.
+                    let busy = nl_engine::active_count() > 0;
+                    ui.add_enabled_ui(ready && !busy, |ui| {
                         if ui
                             .button(RichText::new("▶ 학습 시작").color(views::COL_OK))
-                            .on_hover_text(if ready {
+                            .on_hover_text(if busy {
+                                "학습이 이미 진행 중"
+                            } else if ready {
                                 "학습 뷰에서 자세히"
                             } else {
                                 "모델에 데이터셋을 지정하세요"
