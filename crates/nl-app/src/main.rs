@@ -20,7 +20,10 @@ fn main() -> eframe::Result<()> {
                 eprintln!("--write-sample 뒤에 파일 경로가 필요합니다");
                 std::process::exit(2);
             };
-            let name = args.next().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "xor".into());
+            let name = args
+                .next()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "xor".into());
             let project = match name.as_str() {
                 "cnn" => nl_app::sample::cnn_project(),
                 "new" => nl_app::sample::new_project(),

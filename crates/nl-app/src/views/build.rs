@@ -64,13 +64,25 @@ pub fn run_build(req: BuildRequest, tx: &Sender<BuildEvent>) {
 }
 
 fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), String> {
-    let BuildRequest { project, spec, base_dir, out_dir, runtimes, built_with, icon, publisher } = req;
+    let BuildRequest {
+        project,
+        spec,
+        base_dir,
+        out_dir,
+        runtimes,
+        built_with,
+        icon,
+        publisher,
+    } = req;
 
     // 1. 검증. 오류가 하나라도 있으면 만들지 않는다 — 깨진 앱을 배포하는 것이 더 나쁘다.
     send(BuildEvent::Log("검증 중…".into()));
     let issues = nl_core::validate(&project);
-    let errors: Vec<String> =
-        issues.iter().filter(|i| i.severity == Severity::Error).map(|i| i.message.clone()).collect();
+    let errors: Vec<String> = issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .map(|i| i.message.clone())
+        .collect();
     if !errors.is_empty() {
         return Err(format!("검증 오류 {}개: {}", errors.len(), errors.join(" / ")));
     }
@@ -78,7 +90,11 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
     // 통로가 되면 안 된다 (보안 리뷰 H9). 경로를 고치면 그대로 빌드된다.
     let blockers = crate::paths::build_blockers(&project);
     if !blockers.is_empty() {
-        return Err(format!("프로젝트 폴더 밖 경로 {}개: {}", blockers.len(), blockers.join(" / ")));
+        return Err(format!(
+            "프로젝트 폴더 밖 경로 {}개: {}",
+            blockers.len(),
+            blockers.join(" / ")
+        ));
     }
     if spec.targets.is_empty() {
         return Err("대상 플랫폼을 하나 이상 고르세요".into());
@@ -105,8 +121,14 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
     };
     let mut bundle = Bundle::new(manifest, bundle_project);
     bundle.weights = weights;
-    let zip = bundle.to_zip().map_err(|e| format!("번들을 만들지 못했습니다: {e:#}"))?;
-    send(BuildEvent::Log(format!("번들 {} ({} 모델)", fmt_bytes(zip.len() as u64), bundle.weights.len())));
+    let zip = bundle
+        .to_zip()
+        .map_err(|e| format!("번들을 만들지 못했습니다: {e:#}"))?;
+    send(BuildEvent::Log(format!(
+        "번들 {} ({} 모델)",
+        fmt_bytes(zip.len() as u64),
+        bundle.weights.len()
+    )));
     send(BuildEvent::Progress(0.45));
 
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
@@ -121,7 +143,11 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         let runtime = runtimes
             .get(target)
             .ok_or_else(|| format!("{} 런타임 바이너리가 없습니다 — 도구 상태를 확인하세요", target.label()))?;
-        send(BuildEvent::Log(format!("{} · 런타임 {}", target.label(), runtime.display())));
+        send(BuildEvent::Log(format!(
+            "{} · 런타임 {}",
+            target.label(),
+            runtime.display()
+        )));
 
         let exe_name = match target {
             BuildTarget::LinuxX64 => slug.clone(),
@@ -133,19 +159,25 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         // Windows 는 설치 프로그램을 먼저 시도한다. 컴파일러가 없으면 zip 으로 떨어진다.
         let mut made: Option<(BuildArtifact, nl_bundle::AssetKind)> = None;
         if *target == BuildTarget::WindowsX64 {
-            match nl_bundle::windows_installer(&staged, &spec.app_name, &spec.app_version, &publisher, &out_dir, icon)
-            {
+            match nl_bundle::windows_installer(&staged, &spec.app_name, &spec.app_version, &publisher, &out_dir, icon) {
                 Ok(Some(art)) => {
                     send(BuildEvent::Log(format!("설치 프로그램 → {}", art.path.display())));
                     made = Some((
-                        BuildArtifact { target: *target, path: art.path, size: art.size, sha256: art.sha256 },
+                        BuildArtifact {
+                            target: *target,
+                            path: art.path,
+                            size: art.size,
+                            sha256: art.sha256,
+                        },
                         nl_bundle::AssetKind::Installer,
                     ));
                 }
                 Ok(None) => send(BuildEvent::Log(
                     "Inno Setup 컴파일러가 없어 zip 으로 만듭니다 (.iss 스크립트는 남겨 뒀습니다)".into(),
                 )),
-                Err(e) => send(BuildEvent::Log(format!("설치 프로그램을 만들지 못해 zip 으로 갑니다: {e:#}"))),
+                Err(e) => send(BuildEvent::Log(format!(
+                    "설치 프로그램을 만들지 못해 zip 으로 갑니다: {e:#}"
+                ))),
             }
         }
         let (artifact, kind) = match made {
@@ -159,14 +191,21 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
                     &out_dir,
                 )
                 .icon(icon);
-                let art = nl_bundle::archive_with(opts)
-                    .map_err(|e| format!("아카이브를 만들지 못했습니다: {e:#}"))?;
+                let art = nl_bundle::archive_with(opts).map_err(|e| format!("아카이브를 만들지 못했습니다: {e:#}"))?;
                 send(BuildEvent::Log(format!("{} → {}", target.label(), art.path.display())));
                 let kind = match target {
                     BuildTarget::LinuxX64 => nl_bundle::AssetKind::Binary,
                     BuildTarget::WindowsX64 => nl_bundle::AssetKind::Installer,
                 };
-                (BuildArtifact { target: *target, path: art.path, size: art.size, sha256: art.sha256 }, kind)
+                (
+                    BuildArtifact {
+                        target: *target,
+                        path: art.path,
+                        size: art.size,
+                        sha256: art.sha256,
+                    },
+                    kind,
+                )
             }
         };
         artifacts.push((artifact, kind));
@@ -181,7 +220,11 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         .map(|(a, kind)| {
             (
                 crate::tools::short_key(a.target).to_string(),
-                nl_bundle::Artifact { path: a.path.clone(), sha256: a.sha256.clone(), size: a.size },
+                nl_bundle::Artifact {
+                    path: a.path.clone(),
+                    sha256: a.sha256.clone(),
+                    size: a.size,
+                },
                 *kind,
             )
         })
@@ -227,29 +270,50 @@ fn collect_models(
                 mm.weights = None;
             }
             if included {
-                send(BuildEvent::Log(format!("모델 '{}' 은 가중치가 없어 건너뜁니다", m.name)));
+                send(BuildEvent::Log(format!(
+                    "모델 '{}' 은 가중치가 없어 건너뜁니다",
+                    m.name
+                )));
             }
             continue;
         };
         let path = base_dir.join(rel);
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("모델 '{}' 의 가중치를 읽지 못했습니다 ({}): {e}", m.name, path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| {
+            format!(
+                "모델 '{}' 의 가중치를 읽지 못했습니다 ({}): {e}",
+                m.name,
+                path.display()
+            )
+        })?;
         let file = format!("{}.{}", id.short(), weights_ext(rel));
-        send(BuildEvent::Log(format!("모델 '{}' 가중치 {} → weights/{file}", m.name, fmt_bytes(bytes.len() as u64))));
+        send(BuildEvent::Log(format!(
+            "모델 '{}' 가중치 {} → weights/{file}",
+            m.name,
+            fmt_bytes(bytes.len() as u64)
+        )));
         weights.insert(file.clone(), bytes);
-        models.push(BundledModel { model: *id, weights_file: file.clone() });
+        models.push(BundledModel {
+            model: *id,
+            weights_file: file.clone(),
+        });
         if let Some(mm) = out.models.get_mut(id) {
             mm.weights = Some(format!("weights/{file}"));
         }
     }
     if models.is_empty() {
-        send(BuildEvent::Log("번들에 담을 가중치가 없습니다 — 모델은 무작위 초기값으로 돕니다".into()));
+        send(BuildEvent::Log(
+            "번들에 담을 가중치가 없습니다 — 모델은 무작위 초기값으로 돕니다".into(),
+        ));
     }
     Ok((out, models, weights))
 }
 
 fn weights_ext(rel: &str) -> String {
-    Path::new(rel).extension().and_then(|e| e.to_str()).unwrap_or("safetensors").to_string()
+    Path::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("safetensors")
+        .to_string()
 }
 
 // ───────────────────────────── 뷰 ─────────────────────────────
@@ -291,15 +355,15 @@ fn refresh_icon(ui: &egui::Ui, ctx: &ViewCtx, state: &mut BuildViewState, spec: 
     state.icon_error = None;
     state.icon_preview = None;
     let Some(path) = resolved else { return };
-    match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| {
-        image::load_from_memory(&b).map_err(|e| format!("PNG 를 읽지 못했습니다: {e}"))
-    }) {
+    match std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| image::load_from_memory(&b).map_err(|e| format!("PNG 를 읽지 못했습니다: {e}")))
+    {
         Ok(img) => {
             let rgba = img.to_rgba8();
             let size = [rgba.width() as usize, rgba.height() as usize];
             let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-            state.icon_preview =
-                Some(ui.ctx().load_texture("build-icon", color, egui::TextureOptions::LINEAR));
+            state.icon_preview = Some(ui.ctx().load_texture("build-icon", color, egui::TextureOptions::LINEAR));
         }
         Err(e) => state.icon_error = Some(format!("{}: {e}", path.display())),
     }
@@ -316,7 +380,12 @@ pub fn resolve_path(base: Option<&Path>, rel: &str) -> PathBuf {
 
 pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut BuildViewState, tools: &[ToolState]) -> Vec<ViewAction> {
     let mut actions = Vec::new();
-    let spec = ctx.project.settings.build.clone().unwrap_or_else(|| BuildSpec::from_project(ctx.project));
+    let spec = ctx
+        .project
+        .settings
+        .build
+        .clone()
+        .unwrap_or_else(|| BuildSpec::from_project(ctx.project));
 
     refresh_icon(ui, ctx, state, &spec);
     egui::ScrollArea::vertical().id_salt("build-scroll").show(ui, |ui| {
@@ -344,232 +413,283 @@ fn spec_editor(
 ) {
     let mut next = spec.clone();
     let mut changed = false;
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-        ui.label(RichText::new("배포 설정").size(15.0).strong());
-        ui.separator();
-        egui::Grid::new("build-spec").num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-            ui.label(RichText::new("앱 이름").color(COL_WEAK));
-            changed |= ui.add(egui::TextEdit::singleline(&mut next.app_name).desired_width(260.0)).changed();
-            ui.end_row();
-            ui.label(RichText::new("버전").color(COL_WEAK));
-            ui.vertical(|ui| {
-                changed |= ui.add(egui::TextEdit::singleline(&mut next.app_version).desired_width(120.0)).changed();
-                // 번들 만들기가 semver 를 강제한다. 빌드를 눌러 실패하기 전에 여기서 알려 준다.
-                if let Err(e) = semver::Version::parse(next.app_version.trim()) {
-                    ui.label(
-                        RichText::new(format!("✖ semver 가 아닙니다 ({e}) — 예: 0.1.0")).color(COL_ERROR).size(11.0),
-                    );
-                }
-            });
-            ui.end_row();
-
-            ui.label(RichText::new("대상").color(COL_WEAK));
-            ui.horizontal(|ui| {
-                for t in BuildTarget::ALL {
-                    let mut on = next.targets.contains(&t);
-                    if ui.checkbox(&mut on, t.label()).changed() {
-                        if on {
-                            next.targets.push(t);
-                            next.targets.sort();
-                            next.targets.dedup();
-                        } else {
-                            next.targets.retain(|x| *x != t);
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(10)
+        .corner_radius(5)
+        .show(ui, |ui| {
+            ui.label(RichText::new("배포 설정").size(15.0).strong());
+            ui.separator();
+            egui::Grid::new("build-spec")
+                .num_columns(2)
+                .spacing([12.0, 5.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("앱 이름").color(COL_WEAK));
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut next.app_name).desired_width(260.0))
+                        .changed();
+                    ui.end_row();
+                    ui.label(RichText::new("버전").color(COL_WEAK));
+                    ui.vertical(|ui| {
+                        changed |= ui
+                            .add(egui::TextEdit::singleline(&mut next.app_version).desired_width(120.0))
+                            .changed();
+                        // 번들 만들기가 semver 를 강제한다. 빌드를 눌러 실패하기 전에 여기서 알려 준다.
+                        if let Err(e) = semver::Version::parse(next.app_version.trim()) {
+                            ui.label(
+                                RichText::new(format!("✖ semver 가 아닙니다 ({e}) — 예: 0.1.0"))
+                                    .color(COL_ERROR)
+                                    .size(11.0),
+                            );
                         }
-                        changed = true;
-                    }
-                }
-            });
-            ui.end_row();
+                    });
+                    ui.end_row();
 
-            ui.label(RichText::new("진입 파이프라인").color(COL_WEAK));
-            let label = next
-                .entry_pipeline
-                .and_then(|p| ctx.project.pipelines.get(&p))
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "(없음)".into());
-            egui::ComboBox::from_id_salt("build-entry").selected_text(label).show_ui(ui, |ui| {
-                if ui.selectable_label(next.entry_pipeline.is_none(), "(없음)").clicked() {
-                    next.entry_pipeline = None;
-                    changed = true;
-                }
-                for (id, p) in &ctx.project.pipelines {
-                    if ui.selectable_label(next.entry_pipeline == Some(*id), &p.name).clicked() {
-                        next.entry_pipeline = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
-            ui.end_row();
-
-            ui.label(RichText::new("시작 동작").color(COL_WEAK));
-            changed |= ui
-                .checkbox(&mut next.autostart, "실행하면 파이프라인 자동 시작")
-                .on_hover_text("끄면 GUI 의 시작 버튼이나 제어 바로 시작합니다")
-                .changed();
-            ui.end_row();
-
-            ui.label(RichText::new("기본 장치").color(COL_WEAK));
-            let dev_label = ctx
-                .devices
-                .iter()
-                .find(|d| d.pref == next.default_device)
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| next.default_device.label());
-            egui::ComboBox::from_id_salt("build-device").selected_text(dev_label).show_ui(ui, |ui| {
-                if ui.selectable_label(next.default_device == DevicePref::Auto, "자동").clicked() {
-                    next.default_device = DevicePref::Auto;
-                    changed = true;
-                }
-                for d in ctx.devices {
-                    if ui.selectable_label(next.default_device == d.pref, super::device_label(d)).clicked() {
-                        next.default_device = d.pref;
-                        changed = true;
-                    }
-                }
-            });
-            ui.end_row();
-
-            ui.label(RichText::new("산출물 폴더").color(COL_WEAK));
-            let mut dir = next.output_dir.clone().unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_string());
-            if ui.add(egui::TextEdit::singleline(&mut dir).desired_width(260.0)).changed() {
-                next.output_dir = Some(dir);
-                changed = true;
-            }
-            ui.end_row();
-
-            // 왼쪽 칸은 비운다 — 체크박스 자신이 "입력 무장" 이라 두 번 쓰면 찾을 때 걸린다.
-            ui.label("");
-            ui.vertical(|ui| {
-                changed |= ui
-                    .checkbox(&mut next.arm_input, "입력 무장")
-                    .on_hover_text("켜면 배포한 앱이 마우스·키보드를 실제로 움직입니다. 꺼 두면 로그만 남깁니다")
-                    .changed();
-                if next.arm_input {
-                    ui.label(
-                        RichText::new("⚠ 받은 사람이 실행하자마자 커서와 키 입력이 움직입니다. 꼭 필요할 때만 켜세요.")
-                            .color(COL_WARN)
-                            .size(11.0),
-                    );
-                }
-            });
-            ui.end_row();
-
-            ui.label(RichText::new("아이콘").color(COL_WEAK));
-            ui.horizontal(|ui| {
-                if let Some(t) = &state.icon_preview {
-                    ui.add(egui::Image::new(t).fit_to_exact_size(egui::Vec2::splat(40.0)));
-                }
-                match &next.icon {
-                    Some(p) => {
-                        ui.label(RichText::new(super::short_path(p)).size(11.0)).on_hover_text(p);
-                    }
-                    None => {
-                        ui.label(RichText::new("(없음)").color(COL_WEAK).size(11.0));
-                    }
-                }
-                if ui.small_button("PNG 고르기…").clicked() {
-                    actions.push(ViewAction::PickIcon);
-                }
-                if next.icon.is_some() && ui.small_button("지우기").clicked() {
-                    next.icon = None;
-                    changed = true;
-                }
-            });
-            ui.end_row();
-        });
-        if let Some(e) = &state.icon_error {
-            ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.0));
-        }
-
-        ui.add_space(6.0);
-        ui.label(RichText::new("배포 앱 자동 업데이트").strong());
-        egui::Grid::new("build-update").num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-            ui.label(RichText::new("자산 기본 주소").color(COL_WEAK));
-            let mut base = next.update_base_url.clone().unwrap_or_default();
-            if ui
-                .add(egui::TextEdit::singleline(&mut base).desired_width(320.0).hint_text("https://example.com/앱/0.1.0"))
-                .on_hover_text("latest.json 의 자산 주소는 여기에 파일 이름을 붙여 만듭니다")
-                .changed()
-            {
-                next.update_base_url = (!base.trim().is_empty()).then_some(base);
-                changed = true;
-            }
-            ui.end_row();
-
-            ui.label(RichText::new("매니페스트 주소").color(COL_WEAK));
-            let mut url = next.update_url.clone().unwrap_or_default();
-            ui.vertical(|ui| {
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut url)
-                            .desired_width(320.0)
-                            .hint_text("https://example.com/앱/latest.json"),
-                    )
-                    .on_hover_text("비우면 배포 앱의 자동 업데이트가 꺼집니다")
-                    .changed()
-                {
-                    next.update_url = (!url.trim().is_empty()).then_some(url.clone());
-                    changed = true;
-                }
-                // 배포 앱은 https 가 아닌 주소를 거부한다. 여기서 먼저 알려 주지 않으면
-                // 받은 사람만 "업데이트 사용 불가" 를 보게 된다.
-                if let Some(u) = next.update_url.as_deref() {
-                    if let Err(e) = nl_update::require_https(u) {
-                        ui.label(RichText::new(format!("✖ {e:#}")).color(COL_ERROR).size(11.0));
-                    }
-                }
-            });
-            ui.end_row();
-
-            ui.label(RichText::new("서명 공개키").color(COL_WEAK));
-            let mut key = next.update_public_key.clone().unwrap_or_default();
-            if ui
-                .add(egui::TextEdit::singleline(&mut key).desired_width(320.0).hint_text("minisign 공개키 (RWQ…)"))
-                .on_hover_text("비우면 배포 앱이 매니페스트 서명을 검증하지 않습니다")
-                .changed()
-            {
-                next.update_public_key = (!key.trim().is_empty()).then_some(key);
-                changed = true;
-            }
-            ui.end_row();
-
-            ui.label(RichText::new("자동 내려받기").color(COL_WEAK));
-            changed |= ui
-                .checkbox(&mut next.auto_update, "새 버전을 알아서 내려받기 (적용은 사용자 확인)")
-                .changed();
-            ui.end_row();
-        });
-
-        ui.add_space(4.0);
-        ui.label(RichText::new("포함할 모델").color(COL_WEAK).size(11.5));
-        if ctx.project.models.is_empty() {
-            ui.label(RichText::new("모델이 없습니다").color(COL_WEAK).size(11.0));
-        }
-        for (id, m) in &ctx.project.models {
-            let has_weights = m.weights.is_some();
-            let mut on = next.models.contains(id) && has_weights;
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(has_weights, |ui| {
-                    if ui.checkbox(&mut on, &m.name).changed() {
-                        if on {
-                            next.models.push(*id);
-                            next.models.dedup();
-                        } else {
-                            next.models.retain(|x| x != id);
+                    ui.label(RichText::new("대상").color(COL_WEAK));
+                    ui.horizontal(|ui| {
+                        for t in BuildTarget::ALL {
+                            let mut on = next.targets.contains(&t);
+                            if ui.checkbox(&mut on, t.label()).changed() {
+                                if on {
+                                    next.targets.push(t);
+                                    next.targets.sort();
+                                    next.targets.dedup();
+                                } else {
+                                    next.targets.retain(|x| *x != t);
+                                }
+                                changed = true;
+                            }
                         }
+                    });
+                    ui.end_row();
+
+                    ui.label(RichText::new("진입 파이프라인").color(COL_WEAK));
+                    let label = next
+                        .entry_pipeline
+                        .and_then(|p| ctx.project.pipelines.get(&p))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "(없음)".into());
+                    egui::ComboBox::from_id_salt("build-entry")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(next.entry_pipeline.is_none(), "(없음)").clicked() {
+                                next.entry_pipeline = None;
+                                changed = true;
+                            }
+                            for (id, p) in &ctx.project.pipelines {
+                                if ui.selectable_label(next.entry_pipeline == Some(*id), &p.name).clicked() {
+                                    next.entry_pipeline = Some(*id);
+                                    changed = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(RichText::new("시작 동작").color(COL_WEAK));
+                    changed |= ui
+                        .checkbox(&mut next.autostart, "실행하면 파이프라인 자동 시작")
+                        .on_hover_text("끄면 GUI 의 시작 버튼이나 제어 바로 시작합니다")
+                        .changed();
+                    ui.end_row();
+
+                    ui.label(RichText::new("기본 장치").color(COL_WEAK));
+                    let dev_label = ctx
+                        .devices
+                        .iter()
+                        .find(|d| d.pref == next.default_device)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| next.default_device.label());
+                    egui::ComboBox::from_id_salt("build-device")
+                        .selected_text(dev_label)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(next.default_device == DevicePref::Auto, "자동")
+                                .clicked()
+                            {
+                                next.default_device = DevicePref::Auto;
+                                changed = true;
+                            }
+                            for d in ctx.devices {
+                                if ui
+                                    .selectable_label(next.default_device == d.pref, super::device_label(d))
+                                    .clicked()
+                                {
+                                    next.default_device = d.pref;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label(RichText::new("산출물 폴더").color(COL_WEAK));
+                    let mut dir = next
+                        .output_dir
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_string());
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut dir).desired_width(260.0))
+                        .changed()
+                    {
+                        next.output_dir = Some(dir);
                         changed = true;
+                    }
+                    ui.end_row();
+
+                    // 왼쪽 칸은 비운다 — 체크박스 자신이 "입력 무장" 이라 두 번 쓰면 찾을 때 걸린다.
+                    ui.label("");
+                    ui.vertical(|ui| {
+                        changed |= ui
+                            .checkbox(&mut next.arm_input, "입력 무장")
+                            .on_hover_text(
+                                "켜면 배포한 앱이 마우스·키보드를 실제로 움직입니다. 꺼 두면 로그만 남깁니다",
+                            )
+                            .changed();
+                        if next.arm_input {
+                            ui.label(
+                                RichText::new(
+                                    "⚠ 받은 사람이 실행하자마자 커서와 키 입력이 움직입니다. 꼭 필요할 때만 켜세요.",
+                                )
+                                .color(COL_WARN)
+                                .size(11.0),
+                            );
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(RichText::new("아이콘").color(COL_WEAK));
+                    ui.horizontal(|ui| {
+                        if let Some(t) = &state.icon_preview {
+                            ui.add(egui::Image::new(t).fit_to_exact_size(egui::Vec2::splat(40.0)));
+                        }
+                        match &next.icon {
+                            Some(p) => {
+                                ui.label(RichText::new(super::short_path(p)).size(11.0))
+                                    .on_hover_text(p);
+                            }
+                            None => {
+                                ui.label(RichText::new("(없음)").color(COL_WEAK).size(11.0));
+                            }
+                        }
+                        if ui.small_button("PNG 고르기…").clicked() {
+                            actions.push(ViewAction::PickIcon);
+                        }
+                        if next.icon.is_some() && ui.small_button("지우기").clicked() {
+                            next.icon = None;
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                });
+            if let Some(e) = &state.icon_error {
+                ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.0));
+            }
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("배포 앱 자동 업데이트").strong());
+            egui::Grid::new("build-update")
+                .num_columns(2)
+                .spacing([12.0, 5.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("자산 기본 주소").color(COL_WEAK));
+                    let mut base = next.update_base_url.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut base)
+                                .desired_width(320.0)
+                                .hint_text("https://example.com/앱/0.1.0"),
+                        )
+                        .on_hover_text("latest.json 의 자산 주소는 여기에 파일 이름을 붙여 만듭니다")
+                        .changed()
+                    {
+                        next.update_base_url = (!base.trim().is_empty()).then_some(base);
+                        changed = true;
+                    }
+                    ui.end_row();
+
+                    ui.label(RichText::new("매니페스트 주소").color(COL_WEAK));
+                    let mut url = next.update_url.clone().unwrap_or_default();
+                    ui.vertical(|ui| {
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut url)
+                                    .desired_width(320.0)
+                                    .hint_text("https://example.com/앱/latest.json"),
+                            )
+                            .on_hover_text("비우면 배포 앱의 자동 업데이트가 꺼집니다")
+                            .changed()
+                        {
+                            next.update_url = (!url.trim().is_empty()).then_some(url.clone());
+                            changed = true;
+                        }
+                        // 배포 앱은 https 가 아닌 주소를 거부한다. 여기서 먼저 알려 주지 않으면
+                        // 받은 사람만 "업데이트 사용 불가" 를 보게 된다.
+                        if let Some(u) = next.update_url.as_deref() {
+                            if let Err(e) = nl_update::require_https(u) {
+                                ui.label(RichText::new(format!("✖ {e:#}")).color(COL_ERROR).size(11.0));
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(RichText::new("서명 공개키").color(COL_WEAK));
+                    let mut key = next.update_public_key.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut key)
+                                .desired_width(320.0)
+                                .hint_text("minisign 공개키 (RWQ…)"),
+                        )
+                        .on_hover_text("비우면 배포 앱이 매니페스트 서명을 검증하지 않습니다")
+                        .changed()
+                    {
+                        next.update_public_key = (!key.trim().is_empty()).then_some(key);
+                        changed = true;
+                    }
+                    ui.end_row();
+
+                    ui.label(RichText::new("자동 내려받기").color(COL_WEAK));
+                    changed |= ui
+                        .checkbox(&mut next.auto_update, "새 버전을 알아서 내려받기 (적용은 사용자 확인)")
+                        .changed();
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("포함할 모델").color(COL_WEAK).size(11.5));
+            if ctx.project.models.is_empty() {
+                ui.label(RichText::new("모델이 없습니다").color(COL_WEAK).size(11.0));
+            }
+            for (id, m) in &ctx.project.models {
+                let has_weights = m.weights.is_some();
+                let mut on = next.models.contains(id) && has_weights;
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(has_weights, |ui| {
+                        if ui.checkbox(&mut on, &m.name).changed() {
+                            if on {
+                                next.models.push(*id);
+                                next.models.dedup();
+                            } else {
+                                next.models.retain(|x| x != id);
+                            }
+                            changed = true;
+                        }
+                    });
+                    if has_weights {
+                        ui.label(
+                            RichText::new(super::short_path(m.weights.as_deref().unwrap_or("")))
+                                .color(COL_OK)
+                                .size(11.0),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("가중치 없음 — 먼저 학습하세요")
+                                .color(COL_WARN)
+                                .size(11.0),
+                        );
                     }
                 });
-                if has_weights {
-                    ui.label(
-                        RichText::new(super::short_path(m.weights.as_deref().unwrap_or(""))).color(COL_OK).size(11.0),
-                    );
-                } else {
-                    ui.label(RichText::new("가중치 없음 — 먼저 학습하세요").color(COL_WARN).size(11.0));
-                }
-            });
-        }
-    });
+            }
+        });
     if changed {
         let mut settings = ctx.project.settings.clone();
         settings.build = Some(next);
@@ -578,71 +698,77 @@ fn spec_editor(
 }
 
 fn tools_table(ui: &mut egui::Ui, tools: &[ToolState], state: &mut BuildViewState, actions: &mut Vec<ViewAction>) {
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("도구 상태").size(15.0).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("↻ 다시 검사").clicked() {
-                    actions.push(ViewAction::RecheckTools);
-                }
-            });
-        });
-        ui.separator();
-        if tools.is_empty() {
-            ui.label(RichText::new("대상을 고르면 필요한 도구를 검사합니다").color(COL_WEAK));
-            return;
-        }
-        for t in tools {
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(10)
+        .corner_radius(5)
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (icon, color) = if t.ok() {
-                    ("✔", COL_OK)
-                } else if t.kind.optional() {
-                    ("⚠", COL_WARN)
-                } else {
-                    ("✖", COL_ERROR)
-                };
-                ui.label(RichText::new(icon).color(color));
-                ui.label(t.kind.label());
-                ui.label(RichText::new(&t.note).color(COL_WEAK).size(11.0));
-                if !t.ok() {
-                    match t.kind {
-                        ToolKind::Runtime(target) => {
-                            if ui
-                                .small_button("설치…")
-                                .on_hover_text("무엇을 어디서 받아 어디에 놓는지 먼저 보여 줍니다")
-                                .clicked()
-                            {
-                                actions.push(ViewAction::ToolPlan(target));
+                ui.label(RichText::new("도구 상태").size(15.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("↻ 다시 검사").clicked() {
+                        actions.push(ViewAction::RecheckTools);
+                    }
+                });
+            });
+            ui.separator();
+            if tools.is_empty() {
+                ui.label(RichText::new("대상을 고르면 필요한 도구를 검사합니다").color(COL_WEAK));
+                return;
+            }
+            for t in tools {
+                ui.horizontal(|ui| {
+                    let (icon, color) = if t.ok() {
+                        ("✔", COL_OK)
+                    } else if t.kind.optional() {
+                        ("⚠", COL_WARN)
+                    } else {
+                        ("✖", COL_ERROR)
+                    };
+                    ui.label(RichText::new(icon).color(color));
+                    ui.label(t.kind.label());
+                    ui.label(RichText::new(&t.note).color(COL_WEAK).size(11.0));
+                    if !t.ok() {
+                        match t.kind {
+                            ToolKind::Runtime(target) => {
+                                if ui
+                                    .small_button("설치…")
+                                    .on_hover_text("무엇을 어디서 받아 어디에 놓는지 먼저 보여 줍니다")
+                                    .clicked()
+                                {
+                                    actions.push(ViewAction::ToolPlan(target));
+                                }
                             }
-                        }
-                        ToolKind::InnoSetup => {
-                            if ui
-                                .small_button("설치…")
-                                .on_hover_text("jrsoftware.org 에서 Inno Setup 6 을 내려받아 설치합니다")
-                                .clicked()
-                            {
-                                actions.push(ViewAction::ToolPlanInno);
+                            ToolKind::InnoSetup => {
+                                if ui
+                                    .small_button("설치…")
+                                    .on_hover_text("jrsoftware.org 에서 Inno Setup 6 을 내려받아 설치합니다")
+                                    .clicked()
+                                {
+                                    actions.push(ViewAction::ToolPlanInno);
+                                }
+                                ui.label(RichText::new(ToolKind::InnoSetup.why()).color(COL_WEAK).size(11.0));
                             }
-                            ui.label(RichText::new(ToolKind::InnoSetup.why()).color(COL_WEAK).size(11.0));
                         }
                     }
-                }
+                });
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("런타임 매니페스트").color(COL_WEAK).size(11.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.manifest_url)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(crate::tools::DEFAULT_MANIFEST_URL),
+                )
+                .on_hover_text("NL_RUNTIME_MANIFEST 환경 변수가 있으면 그것이 우선합니다");
             });
-        }
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("런타임 매니페스트").color(COL_WEAK).size(11.0));
-            ui.add(
-                egui::TextEdit::singleline(&mut state.manifest_url)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(crate::tools::DEFAULT_MANIFEST_URL),
-            )
-            .on_hover_text("NL_RUNTIME_MANIFEST 환경 변수가 있으면 그것이 우선합니다");
+            ui.label(
+                RichText::new("Inno Setup 이 없으면 Windows 산출물은 zip 으로만 만듭니다.")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
         });
-        ui.label(
-            RichText::new("Inno Setup 이 없으면 Windows 산출물은 zip 으로만 만듭니다.").color(COL_WEAK).size(11.0),
-        );
-    });
 }
 
 fn run_section(
@@ -658,33 +784,57 @@ fn run_section(
     let missing: Vec<&ToolState> = tools.iter().filter(|t| !t.ok() && !t.kind.optional()).collect();
     let ready = errors == 0 && !spec.targets.is_empty() && missing.is_empty() && !state.running && ctx.saved();
 
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(ready, |ui| {
-                if ui.button(RichText::new("🔨 빌드").color(COL_OK)).clicked() {
-                    actions.push(ViewAction::BuildStart);
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(10)
+        .corner_radius(5)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(ready, |ui| {
+                    if ui.button(RichText::new("🔨 빌드").color(COL_OK)).clicked() {
+                        actions.push(ViewAction::BuildStart);
+                    }
+                });
+                if state.running {
+                    ui.add(
+                        egui::ProgressBar::new(state.progress.unwrap_or(0.0))
+                            .desired_width(200.0)
+                            .show_percentage(),
+                    );
+                }
+                if !ctx.saved() {
+                    ui.label(
+                        RichText::new("프로젝트를 먼저 저장하세요 (산출물 폴더 기준)")
+                            .color(COL_WARN)
+                            .size(11.5),
+                    );
+                } else if errors > 0 {
+                    ui.label(
+                        RichText::new(format!("검증 오류 {errors}개를 먼저 고치세요"))
+                            .color(COL_ERROR)
+                            .size(11.5),
+                    );
+                } else if spec.targets.is_empty() {
+                    ui.label(RichText::new("대상 플랫폼을 고르세요").color(COL_WARN).size(11.5));
+                } else if let Some(t) = missing.first() {
+                    ui.label(
+                        RichText::new(format!("{} 이(가) 없습니다", t.kind.label()))
+                            .color(COL_ERROR)
+                            .size(11.5),
+                    );
                 }
             });
-            if state.running {
-                ui.add(egui::ProgressBar::new(state.progress.unwrap_or(0.0)).desired_width(200.0).show_percentage());
+            if let Some(e) = &state.error {
+                ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.5));
             }
-            if !ctx.saved() {
-                ui.label(RichText::new("프로젝트를 먼저 저장하세요 (산출물 폴더 기준)").color(COL_WARN).size(11.5));
-            } else if errors > 0 {
-                ui.label(RichText::new(format!("검증 오류 {errors}개를 먼저 고치세요")).color(COL_ERROR).size(11.5));
-            } else if spec.targets.is_empty() {
-                ui.label(RichText::new("대상 플랫폼을 고르세요").color(COL_WARN).size(11.5));
-            } else if let Some(t) = missing.first() {
-                ui.label(RichText::new(format!("{} 이(가) 없습니다", t.kind.label())).color(COL_ERROR).size(11.5));
+            if let Some(dir) = out_dir_display(ctx, spec) {
+                ui.label(
+                    RichText::new(format!("산출물 폴더: {}", dir.display()))
+                        .color(COL_WEAK)
+                        .size(11.0),
+                );
             }
         });
-        if let Some(e) = &state.error {
-            ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.5));
-        }
-        if let Some(dir) = out_dir_display(ctx, spec) {
-            ui.label(RichText::new(format!("산출물 폴더: {}", dir.display())).color(COL_WEAK).size(11.0));
-        }
-    });
 }
 
 /// 실제로 쓰일 산출물 폴더 (프로젝트가 저장돼 있을 때만).
@@ -695,7 +845,10 @@ pub fn out_dir_display(ctx: &ViewCtx, spec: &BuildSpec) -> Option<PathBuf> {
 
 /// 상대 경로는 프로젝트 폴더 기준, 절대 경로는 그대로.
 pub fn resolve_out_dir(base: &Path, spec: &BuildSpec) -> PathBuf {
-    let raw = spec.output_dir.clone().unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_string());
+    let raw = spec
+        .output_dir
+        .clone()
+        .unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_string());
     let p = PathBuf::from(raw);
     if p.is_absolute() {
         p
@@ -708,51 +861,74 @@ fn artifacts_table(ui: &mut egui::Ui, state: &mut BuildViewState, actions: &mut 
     if state.artifacts.is_empty() {
         return;
     }
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-        ui.label(RichText::new("산출물").size(15.0).strong());
-        ui.separator();
-        egui::Grid::new("build-artifacts").num_columns(5).spacing([12.0, 4.0]).show(ui, |ui| {
-            for h in ["대상", "파일", "크기", "sha256", ""] {
-                ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
-            }
-            ui.end_row();
-            for a in &state.artifacts {
-                ui.label(a.target.label());
-                let name = a.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                ui.label(RichText::new(name).color(COL_SELECT)).on_hover_text(a.path.display().to_string());
-                ui.label(fmt_bytes(a.size));
-                ui.label(RichText::new(&a.sha256[..a.sha256.len().min(12)]).size(11.0))
-                    .on_hover_text(&a.sha256);
-                ui.horizontal(|ui| {
-                    if ui.small_button("폴더 열기").clicked() {
-                        if let Some(d) = a.path.parent() {
-                            actions.push(ViewAction::OpenPath(d.to_path_buf()));
-                        }
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(10)
+        .corner_radius(5)
+        .show(ui, |ui| {
+            ui.label(RichText::new("산출물").size(15.0).strong());
+            ui.separator();
+            egui::Grid::new("build-artifacts")
+                .num_columns(5)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for h in ["대상", "파일", "크기", "sha256", ""] {
+                        ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
                     }
-                    let runnable_here =
-                        a.target == BuildTarget::LinuxX64 && crate::tools::host_target() == Some(BuildTarget::LinuxX64);
-                    if runnable_here
-                        && ui.small_button("지금 실행").on_hover_text("아카이브를 풀어 앱을 띄웁니다").clicked()
-                    {
-                        actions.push(ViewAction::RunArtifact(a.path.clone()));
+                    ui.end_row();
+                    for a in &state.artifacts {
+                        ui.label(a.target.label());
+                        let name = a
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        ui.label(RichText::new(name).color(COL_SELECT))
+                            .on_hover_text(a.path.display().to_string());
+                        ui.label(fmt_bytes(a.size));
+                        ui.label(RichText::new(&a.sha256[..a.sha256.len().min(12)]).size(11.0))
+                            .on_hover_text(&a.sha256);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("폴더 열기").clicked() {
+                                if let Some(d) = a.path.parent() {
+                                    actions.push(ViewAction::OpenPath(d.to_path_buf()));
+                                }
+                            }
+                            let runnable_here = a.target == BuildTarget::LinuxX64
+                                && crate::tools::host_target() == Some(BuildTarget::LinuxX64);
+                            if runnable_here
+                                && ui
+                                    .small_button("지금 실행")
+                                    .on_hover_text("아카이브를 풀어 앱을 띄웁니다")
+                                    .clicked()
+                            {
+                                actions.push(ViewAction::RunArtifact(a.path.clone()));
+                            }
+                        });
+                        ui.end_row();
                     }
                 });
-                ui.end_row();
-            }
         });
-    });
 }
 
 fn log_section(ui: &mut egui::Ui, state: &BuildViewState) {
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-        ui.label(RichText::new("빌드 로그").size(13.0).strong());
-        ui.separator();
-        egui::ScrollArea::vertical().id_salt("build-log").max_height(220.0).stick_to_bottom(true).show(ui, |ui| {
-            for line in &state.log {
-                ui.label(RichText::new(line).size(11.0));
-            }
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(10)
+        .corner_radius(5)
+        .show(ui, |ui| {
+            ui.label(RichText::new("빌드 로그").size(13.0).strong());
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("build-log")
+                .max_height(220.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &state.log {
+                        ui.label(RichText::new(line).size(11.0));
+                    }
+                });
         });
-    });
 }
 
 #[cfg(test)]
@@ -831,14 +1007,20 @@ mod tests {
         let mut p = crate::sample::xor_project();
         let mid = *p.models.keys().next().unwrap();
         p.models.get_mut(&mid).unwrap().weights = Some("runs/w.safetensors".into());
-        let spec = BuildSpec { models: vec![mid], ..BuildSpec::from_project(&p) };
+        let spec = BuildSpec {
+            models: vec![mid],
+            ..BuildSpec::from_project(&p)
+        };
 
         let (out, models, weights) = collect_models(&p, &spec, &dir, &|_| {}).unwrap();
         assert_eq!(models.len(), 1);
         let file = models[0].weights_file.clone();
         assert_eq!(weights.get(&file).map(|b| b.as_slice()), Some(&b"weights"[..]));
         // 런타임이 찾는 경로 규약: project.json 의 weights 는 `weights/<file>`.
-        assert_eq!(out.models[&mid].weights.as_deref(), Some(format!("weights/{file}").as_str()));
+        assert_eq!(
+            out.models[&mid].weights.as_deref(),
+            Some(format!("weights/{file}").as_str())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -847,7 +1029,10 @@ mod tests {
         let mut p = crate::sample::xor_project();
         let mid = *p.models.keys().next().unwrap();
         p.models.get_mut(&mid).unwrap().weights = Some("runs/w.safetensors".into());
-        let spec = BuildSpec { models: vec![], ..BuildSpec::from_project(&p) };
+        let spec = BuildSpec {
+            models: vec![],
+            ..BuildSpec::from_project(&p)
+        };
         let (out, models, weights) = collect_models(&p, &spec, Path::new("/nope"), &|_| {}).unwrap();
         assert!(models.is_empty() && weights.is_empty());
         assert_eq!(out.models[&mid].weights, None, "번들에 없는 가중치를 가리키면 안 된다");

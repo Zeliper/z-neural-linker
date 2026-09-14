@@ -56,7 +56,10 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
                 if region.width == 0 {
                     format!("모니터 {} 전체 · {fps:.0}fps", region.monitor)
                 } else {
-                    format!("{}×{} @{},{} · {fps:.0}fps", region.width, region.height, region.x, region.y)
+                    format!(
+                        "{}×{} @{},{} · {fps:.0}fps",
+                        region.width, region.height, region.x, region.y
+                    )
                 }
             }
             Source::HttpPoll { url, interval_ms, .. } => format!("{} · {interval_ms}ms", short_url(url)),
@@ -69,7 +72,11 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
             Source::HttpServer { bind, path, .. } => format!("{bind}{path}"),
         },
         PNodeKind::Model { model, payload } => {
-            let name = project.models.get(model).map(|m| m.name.clone()).unwrap_or_else(|| "(없는 모델)".into());
+            let name = project
+                .models
+                .get(model)
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "(없는 모델)".into());
             match payload.and_then(|p| project.payloads.get(&p)) {
                 Some(p) => format!("{name} · {}", p.name),
                 None => name,
@@ -89,7 +96,11 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
             Sink::StdoutJson => "표준 출력".into(),
             Sink::GuiWidget { widget } => format!("위젯 {}", widget.short()),
             Sink::File { path, append } => {
-                format!("{}{}", crate::views::short_path(path), if *append { " (덧붙임)" } else { "" })
+                format!(
+                    "{}{}",
+                    crate::views::short_path(path),
+                    if *append { " (덧붙임)" } else { "" }
+                )
             }
             Sink::Log => "로그".into(),
             Sink::HttpReply { server } => format!("← 서버 {}", server.short()),
@@ -248,8 +259,13 @@ impl PipelineCanvas {
             return;
         };
         let b = b.expand(20.0);
-        let avail = Vec2::new((viewport.width() - FIT_MARGIN).max(80.0), (viewport.height() - FIT_MARGIN).max(80.0));
-        let zoom = (avail.x / b.width().max(1.0)).min(avail.y / b.height().max(1.0)).clamp(ZOOM_MIN, ZOOM_MAX);
+        let avail = Vec2::new(
+            (viewport.width() - FIT_MARGIN).max(80.0),
+            (viewport.height() - FIT_MARGIN).max(80.0),
+        );
+        let zoom = (avail.x / b.width().max(1.0))
+            .min(avail.y / b.height().max(1.0))
+            .clamp(ZOOM_MIN, ZOOM_MAX);
         self.camera.zoom = zoom;
         self.camera.pan = b.center().to_vec2() - viewport.size() / (2.0 * zoom);
     }
@@ -273,10 +289,18 @@ impl PipelineCanvas {
             self.box_select = None;
             self.initialized = false;
         }
-        if self.node_drag.map(|d| !pipeline.nodes.contains_key(&d.id)).unwrap_or(false) {
+        if self
+            .node_drag
+            .map(|d| !pipeline.nodes.contains_key(&d.id))
+            .unwrap_or(false)
+        {
             self.node_drag = None;
         }
-        if self.link_drag.map(|d| !pipeline.nodes.contains_key(&d.from)).unwrap_or(false) {
+        if self
+            .link_drag
+            .map(|d| !pipeline.nodes.contains_key(&d.from))
+            .unwrap_or(false)
+        {
             self.link_drag = None;
         }
         sel.prune_pipeline(pipeline);
@@ -300,7 +324,11 @@ impl PipelineCanvas {
         let bg = ui.interact(viewport, ui.id().with("pipe-bg"), Sense::click_and_drag());
         let mods = ui.input(|i| i.modifiers);
         let (pointer, press_origin, released) = ui.input(|i| {
-            (i.pointer.interact_pos(), i.pointer.press_origin(), i.pointer.button_released(egui::PointerButton::Primary))
+            (
+                i.pointer.interact_pos(),
+                i.pointer.press_origin(),
+                i.pointer.button_released(egui::PointerButton::Primary),
+            )
         });
         if self.swallow_drag && !ui.input(|i| i.pointer.any_down()) {
             self.swallow_drag = false;
@@ -308,7 +336,11 @@ impl PipelineCanvas {
 
         if bg.drag_started_by(egui::PointerButton::Primary) && mods.alt {
             let origin = press_origin.or(pointer).unwrap_or(viewport.center());
-            self.box_select = Some(BoxSelect { origin, current: origin, additive: mods.shift || mods.command });
+            self.box_select = Some(BoxSelect {
+                origin,
+                current: origin,
+                additive: mods.shift || mods.command,
+            });
         }
         let panning = bg.dragged_by(egui::PointerButton::Primary) || bg.dragged_by(egui::PointerButton::Middle);
         if panning && self.box_select.is_none() && !self.swallow_drag {
@@ -318,7 +350,12 @@ impl PipelineCanvas {
             let (zoom_delta, scroll, hover) =
                 ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
             if zoom_delta != 1.0 {
-                zoom_at(&mut self.camera, viewport, hover.unwrap_or_else(|| viewport.center()), zoom_delta);
+                zoom_at(
+                    &mut self.camera,
+                    viewport,
+                    hover.unwrap_or_else(|| viewport.center()),
+                    zoom_delta,
+                );
             }
             if scroll != Vec2::ZERO {
                 self.camera.pan -= scroll / self.camera.zoom;
@@ -365,14 +402,21 @@ impl PipelineCanvas {
             if Some(lid) == detached {
                 continue;
             }
-            let (Some(fw), Some(tw)) = (world_rect(link.from), world_rect(link.to)) else { continue };
+            let (Some(fw), Some(tw)) = (world_rect(link.from), world_rect(link.to)) else {
+                continue;
+            };
             let p0 = self.camera.to_screen(viewport, output_port_pos(fw));
             let p3 = self.camera.to_screen(viewport, input_port_pos(tw, 0, 1));
             let (p1, p2) = control_points(p0, p3);
             let selected = sel.primary == Selection::Link(pid, lid);
             let color = if selected { COL_SELECT } else { COL_LINK };
             let stroke = Stroke::new(if selected { 2.6 } else { 1.8 } * zoom.clamp(0.6, 1.4), color);
-            painter.add(CubicBezierShape::from_points_stroke([p0, p1, p2, p3], false, Color32::TRANSPARENT, stroke));
+            painter.add(CubicBezierShape::from_points_stroke(
+                [p0, p1, p2, p3],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            ));
             let dir = (p3 - p2).normalized();
             let orth = Vec2::new(-dir.y, dir.x);
             let s = 5.0 * zoom.clamp(0.6, 1.4);
@@ -383,7 +427,10 @@ impl PipelineCanvas {
             ));
             if let Some(pp) = pointer {
                 if hovered_link.is_none()
-                    && Rect::from_two_pos(p0, p3).union(Rect::from_two_pos(p1, p2)).expand(14.0).contains(pp)
+                    && Rect::from_two_pos(p0, p3)
+                        .union(Rect::from_two_pos(p1, p2))
+                        .expand(14.0)
+                        .contains(pp)
                     && bezier_near(p0, p1, p2, p3, pp, 7.0)
                 {
                     hovered_link = Some(lid);
@@ -398,7 +445,11 @@ impl PipelineCanvas {
         for &(id, sr) in &visible {
             let Some(node) = pipeline.nodes.get(&id) else { continue };
             let port_hit = (PORT_HIT * zoom).clamp(7.0, 14.0);
-            let resp = ui.interact(sr.expand(port_hit), ui.id().with(("pnode", id)), Sense::click_and_drag());
+            let resp = ui.interact(
+                sr.expand(port_hit),
+                ui.id().with(("pnode", id)),
+                Sense::click_and_drag(),
+            );
             let hovered = resp.hovered();
             let has_in = !node.kind.is_source();
             let has_out = !node.kind.is_sink();
@@ -415,13 +466,20 @@ impl PipelineCanvas {
                 sel.set(Selection::PNode(pid, id));
             }
             if resp.drag_started_by(egui::PointerButton::Primary) {
-                let origin = press_origin.or_else(|| resp.interact_pointer_pos()).unwrap_or_else(|| sr.center());
+                let origin = press_origin
+                    .or_else(|| resp.interact_pointer_pos())
+                    .unwrap_or_else(|| sr.center());
                 match zone_at(origin) {
                     Some(Zone::Output) if has_out => self.link_drag = Some(LinkDrag { from: id, detach: None }),
                     Some(Zone::Input) if has_in => {
                         // 입력 포트에서 끌면 그 노드로 들어오는 링크 하나를 떼어 재연결한다.
                         match pipeline.links.values().find(|l| l.to == id) {
-                            Some(l) => self.link_drag = Some(LinkDrag { from: l.from, detach: Some(l.id) }),
+                            Some(l) => {
+                                self.link_drag = Some(LinkDrag {
+                                    from: l.from,
+                                    detach: Some(l.id),
+                                })
+                            }
                             None => self.node_drag = Some(NodeDrag { id, delta: Vec2::ZERO }),
                         }
                     }
@@ -480,8 +538,11 @@ impl PipelineCanvas {
                 Some(e) if hovered => resp.on_hover_text(format!("{}\n{e}", node_title(node))),
                 _ => resp,
             };
-            let group: Vec<PNodeId> =
-                if sel.count() > 1 && sel.is_pnode_selected(id) { sel.pnode_list() } else { vec![id] };
+            let group: Vec<PNodeId> = if sel.count() > 1 && sel.is_pnode_selected(id) {
+                sel.pnode_list()
+            } else {
+                vec![id]
+            };
             resp.context_menu(|ui| node_menu(ui, id, &group, &mut actions));
         }
 
@@ -496,8 +557,11 @@ impl PipelineCanvas {
             self.box_select = Some(b);
             if released {
                 self.box_select = None;
-                let picked: Vec<PNodeId> =
-                    visible.iter().filter(|(_, sr)| sr.intersects(r)).map(|(id, _)| *id).collect();
+                let picked: Vec<PNodeId> = visible
+                    .iter()
+                    .filter(|(_, sr)| sr.intersects(r))
+                    .map(|(id, _)| *id)
+                    .collect();
                 if !picked.is_empty() || !b.additive {
                     sel.select_pnodes(pid, picked, b.additive);
                 }
@@ -511,7 +575,10 @@ impl PipelineCanvas {
                 let (target_pos, why) = match drop_target {
                     Some(to) => {
                         let tw = world_rect(to).unwrap_or(fw);
-                        (self.camera.to_screen(viewport, input_port_pos(tw, 0, 1)), link_check(pipeline, l.from, to, l.detach))
+                        (
+                            self.camera.to_screen(viewport, input_port_pos(tw, 0, 1)),
+                            link_check(pipeline, l.from, to, l.detach),
+                        )
                     }
                     None => (pp, None),
                 };
@@ -529,7 +596,12 @@ impl PipelineCanvas {
                 ));
                 painter.circle_filled(target_pos, 4.5, color);
                 if let Some(msg) = &why {
-                    pill_right(&painter, Pos2::new(target_pos.x - 12.0, target_pos.y - 6.0), msg, COL_ERROR);
+                    pill_right(
+                        &painter,
+                        Pos2::new(target_pos.x - 12.0, target_pos.y - 6.0),
+                        msg,
+                        COL_ERROR,
+                    );
                 }
             }
             if released {
@@ -556,7 +628,11 @@ impl PipelineCanvas {
             if released {
                 self.node_drag = None;
                 if d.delta.length() > 0.5 {
-                    let group: Vec<PNodeId> = if sel.is_pnode_selected(d.id) { sel.pnode_list() } else { vec![d.id] };
+                    let group: Vec<PNodeId> = if sel.is_pnode_selected(d.id) {
+                        sel.pnode_list()
+                    } else {
+                        vec![d.id]
+                    };
                     let items: Vec<(PNodeId, [f32; 2])> = group
                         .iter()
                         .filter_map(|&gid| {
@@ -581,7 +657,9 @@ impl PipelineCanvas {
             self.ctx_target = Some(match hovered_link {
                 Some(l) => CtxTarget::Link(l),
                 None => CtxTarget::Canvas {
-                    world: pointer.map(|pp| self.camera.to_world(viewport, pp)).unwrap_or(Pos2::ZERO),
+                    world: pointer
+                        .map(|pp| self.camera.to_world(viewport, pp))
+                        .unwrap_or(Pos2::ZERO),
                 },
             });
         }
@@ -660,7 +738,11 @@ pub fn link_check(pipeline: &Pipeline, from: PNodeId, to: PNodeId, replace: Opti
     if t.kind.is_source() {
         return Some("소스로는 들어올 수 없음".into());
     }
-    if pipeline.links.values().any(|l| l.from == from && l.to == to && Some(l.id) != replace) {
+    if pipeline
+        .links
+        .values()
+        .any(|l| l.from == from && l.to == to && Some(l.id) != replace)
+    {
         return Some("이미 연결됨".into());
     }
     None
@@ -694,12 +776,26 @@ pub fn source_palette() -> Vec<Source> {
     vec![
         Source::Manual,
         Source::Timer { interval_ms: 1000 },
-        Source::ScreenCapture { region: nl_core::pipeline::Region::default(), fps: 5.0 },
-        Source::HttpPoll { url: "https://example.com/api".into(), interval_ms: 1000, headers: BTreeMap::new() },
-        Source::WebSocket { url: "wss://example.com/ws".into() },
+        Source::ScreenCapture {
+            region: nl_core::pipeline::Region::default(),
+            fps: 5.0,
+        },
+        Source::HttpPoll {
+            url: "https://example.com/api".into(),
+            interval_ms: 1000,
+            headers: BTreeMap::new(),
+        },
+        Source::WebSocket {
+            url: "wss://example.com/ws".into(),
+        },
         Source::StdinJson,
-        Source::File { path: "input.json".into(), interval_ms: 1000 },
-        Source::GuiEvent { widget: WidgetId::from_u128(0) },
+        Source::File {
+            path: "input.json".into(),
+            interval_ms: 1000,
+        },
+        Source::GuiEvent {
+            widget: WidgetId::from_u128(0),
+        },
         // 토큰을 미리 채워 둔다 — 나중에 바깥 주소로 바꿔도 인증 없이 열리는 일이 없다.
         Source::HttpServer {
             bind: DEFAULT_HTTP_BIND.into(),
@@ -723,17 +819,29 @@ pub fn sink_palette() -> Vec<Sink> {
     vec![
         Sink::Log,
         Sink::StdoutJson,
-        Sink::GuiWidget { widget: WidgetId::from_u128(0) },
-        Sink::File { path: "output.jsonl".into(), append: true },
+        Sink::GuiWidget {
+            widget: WidgetId::from_u128(0),
+        },
+        Sink::File {
+            path: "output.jsonl".into(),
+            append: true,
+        },
         Sink::HttpCall {
             method: "POST".into(),
             url: "https://example.com/api".into(),
             headers: BTreeMap::new(),
             body_template: "{\"value\": {{value}}}".into(),
         },
-        Sink::WebSocketSend { url: "wss://example.com/ws".into() },
-        Sink::MouseKeyboard { actions: vec![nl_core::InputAction::None], cooldown_ms: 200 },
-        Sink::HttpReply { server: PNodeId::from_u128(0) },
+        Sink::WebSocketSend {
+            url: "wss://example.com/ws".into(),
+        },
+        Sink::MouseKeyboard {
+            actions: vec![nl_core::InputAction::None],
+            cooldown_ms: 200,
+        },
+        Sink::HttpReply {
+            server: PNodeId::from_u128(0),
+        },
     ]
 }
 
@@ -757,7 +865,10 @@ fn zoom_at(camera: &mut Camera, viewport: Rect, pivot: Pos2, factor: f32) {
 }
 
 fn screen_rect(camera: &Camera, viewport: Rect, world: Rect) -> Rect {
-    Rect::from_min_max(camera.to_screen(viewport, world.min), camera.to_screen(viewport, world.max))
+    Rect::from_min_max(
+        camera.to_screen(viewport, world.min),
+        camera.to_screen(viewport, world.max),
+    )
 }
 
 fn draw_grid(painter: &egui::Painter, camera: &Camera, viewport: Rect) {
@@ -770,7 +881,10 @@ fn draw_grid(painter: &egui::Painter, camera: &Camera, viewport: Rect) {
     let mut i = (start.x / 40.0).floor() as i64;
     while x < viewport.max.x {
         let c = if i % 5 == 0 { COL_GRID_STRONG } else { COL_GRID };
-        painter.line_segment([Pos2::new(x, viewport.min.y), Pos2::new(x, viewport.max.y)], Stroke::new(1.0, c));
+        painter.line_segment(
+            [Pos2::new(x, viewport.min.y), Pos2::new(x, viewport.max.y)],
+            Stroke::new(1.0, c),
+        );
         x += step;
         i += 1;
     }
@@ -778,7 +892,10 @@ fn draw_grid(painter: &egui::Painter, camera: &Camera, viewport: Rect) {
     let mut j = (start.y / 40.0).floor() as i64;
     while y < viewport.max.y {
         let c = if j % 5 == 0 { COL_GRID_STRONG } else { COL_GRID };
-        painter.line_segment([Pos2::new(viewport.min.x, y), Pos2::new(viewport.max.x, y)], Stroke::new(1.0, c));
+        painter.line_segment(
+            [Pos2::new(viewport.min.x, y), Pos2::new(viewport.max.x, y)],
+            Stroke::new(1.0, c),
+        );
         y += step;
         j += 1;
     }
@@ -807,7 +924,12 @@ fn draw_node(
         base.gamma_multiply(0.9)
     };
     let bw = if style.selected || style.error { 2.4 } else { 1.4 };
-    painter.rect_stroke(sr, cr, Stroke::new(bw * zoom.clamp(0.6, 1.4), border), StrokeKind::Outside);
+    painter.rect_stroke(
+        sr,
+        cr,
+        Stroke::new(bw * zoom.clamp(0.6, 1.4), border),
+        StrokeKind::Outside,
+    );
     let stripe = Rect::from_min_max(sr.min, Pos2::new(sr.min.x + 4.0 * zoom.clamp(0.6, 1.4), sr.max.y));
     painter.rect_filled(stripe, cr, base);
 
@@ -843,7 +965,12 @@ fn draw_node(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, COL_TEXT_DIM), StrokeKind::Outside);
+            painter.rect_stroke(
+                rect,
+                CornerRadius::ZERO,
+                Stroke::new(1.0, COL_TEXT_DIM),
+                StrokeKind::Outside,
+            );
         }
     }
 
@@ -867,10 +994,19 @@ fn draw_node(
     // 실행 중 마지막 값 / 오류 점.
     if zoom >= 0.4 {
         if style.error {
-            painter.circle_filled(Pos2::new(sr.max.x - 9.0 * zoom, sr.min.y + 9.0 * zoom), 4.0 * zoom.min(1.3), COL_ERROR);
+            painter.circle_filled(
+                Pos2::new(sr.max.x - 9.0 * zoom, sr.min.y + 9.0 * zoom),
+                4.0 * zoom.min(1.3),
+                COL_ERROR,
+            );
         }
         if let Some(v) = value {
-            pill_right(painter, Pos2::new(sr.max.x - 8.0 * zoom, sr.max.y - 7.0 * zoom), v, COL_OK);
+            pill_right(
+                painter,
+                Pos2::new(sr.max.x - 8.0 * zoom, sr.max.y - 7.0 * zoom),
+                v,
+                COL_OK,
+            );
         }
     }
 }
@@ -902,7 +1038,10 @@ fn node_menu(ui: &mut egui::Ui, id: PNodeId, group: &[PNodeId], actions: &mut Ve
         ui.close();
     }
     ui.separator();
-    if ui.add(egui::Button::new(egui::RichText::new("🗑 삭제").color(COL_ERROR)).shortcut_text("Del")).clicked() {
+    if ui
+        .add(egui::Button::new(egui::RichText::new("🗑 삭제").color(COL_ERROR)).shortcut_text("Del"))
+        .clicked()
+    {
         actions.push(PipelineAction::DeleteNodes(group.to_vec()));
         ui.close();
     }
@@ -929,7 +1068,10 @@ fn palette_menu(ui: &mut egui::Ui, world: Pos2, project: &nl_core::Project, acti
         for (id, m) in &project.models {
             if ui.button(&m.name).clicked() {
                 actions.push(PipelineAction::AddNode {
-                    kind: PNodeKind::Model { model: *id, payload: m.payload },
+                    kind: PNodeKind::Model {
+                        model: *id,
+                        payload: m.payload,
+                    },
                     pos,
                 });
                 ui.close();
@@ -964,7 +1106,11 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 fn lighten(c: Color32, amount: u8) -> Color32 {
-    Color32::from_rgb(c.r().saturating_add(amount), c.g().saturating_add(amount), c.b().saturating_add(amount))
+    Color32::from_rgb(
+        c.r().saturating_add(amount),
+        c.g().saturating_add(amount),
+        c.b().saturating_add(amount),
+    )
 }
 
 #[cfg(test)]
@@ -978,7 +1124,10 @@ mod tests {
         let ctx = egui::Context::default();
         let image = egui::ColorImage::from_rgba_unmultiplied([160, 120], &[0u8; 160 * 120 * 4]);
         let texture = ctx.load_texture("t", image, egui::TextureOptions::LINEAR);
-        let p = NodePreview { texture, size: (160, 120) };
+        let p = NodePreview {
+            texture,
+            size: (160, 120),
+        };
 
         let a = p.fit(80.0);
         assert_eq!((a.x, a.y), (80.0, 60.0));
@@ -990,7 +1139,12 @@ mod tests {
     fn pipe() -> (Pipeline, PNodeId, PNodeId, PNodeId) {
         let mut p = Pipeline::new("t");
         let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
-        let logic = p.add_node(PNode::new(PNodeKind::Logic { logic: Logic::Threshold { value: 0.5 } }, [250.0, 0.0]));
+        let logic = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Threshold { value: 0.5 },
+            },
+            [250.0, 0.0],
+        ));
         let sink = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [500.0, 0.0]));
         (p, src, logic, sink)
     }
@@ -1003,10 +1157,16 @@ mod tests {
         // 중복
         assert_eq!(link_check(&p, src, logic, None).as_deref(), Some("이미 연결됨"));
         // 소스로 들어오기
-        assert_eq!(link_check(&p, logic, src, None).as_deref(), Some("소스로는 들어올 수 없음"));
+        assert_eq!(
+            link_check(&p, logic, src, None).as_deref(),
+            Some("소스로는 들어올 수 없음")
+        );
         // 싱크에서 나가기
         p.add_link(logic, sink).unwrap();
-        assert_eq!(link_check(&p, sink, logic, None).as_deref(), Some("싱크에서는 나갈 수 없음"));
+        assert_eq!(
+            link_check(&p, sink, logic, None).as_deref(),
+            Some("싱크에서는 나갈 수 없음")
+        );
         // 자기 자신
         assert_eq!(link_check(&p, logic, logic, None).as_deref(), Some("자기 자신"));
     }
@@ -1015,7 +1175,14 @@ mod tests {
     #[test]
     fn canvas_never_proposes_a_link_core_rejects() {
         let (p, src, logic, sink) = pipe();
-        for (a, b) in [(src, logic), (src, sink), (logic, sink), (logic, src), (sink, src), (src, src)] {
+        for (a, b) in [
+            (src, logic),
+            (src, sink),
+            (logic, sink),
+            (logic, src),
+            (sink, src),
+            (src, src),
+        ] {
             let mut copy = p.clone();
             let allowed = link_check(&copy, a, b, None).is_none();
             let accepted = copy.add_link(a, b).is_some();
@@ -1051,7 +1218,11 @@ mod tests {
         let mut labels: Vec<&str> = source_palette()
             .into_iter()
             .map(|s| PNodeKind::Source { source: s }.label())
-            .chain(logic_palette().into_iter().map(|l| PNodeKind::Logic { logic: l }.label()))
+            .chain(
+                logic_palette()
+                    .into_iter()
+                    .map(|l| PNodeKind::Logic { logic: l }.label()),
+            )
             .chain(sink_palette().into_iter().map(|s| PNodeKind::Sink { sink: s }.label()))
             .collect();
         let n = labels.len();
@@ -1064,8 +1235,13 @@ mod tests {
     fn kind_colors_differ_per_family() {
         let colors = [
             kind_color(&PNodeKind::Source { source: Source::Manual }),
-            kind_color(&PNodeKind::Model { model: ModelId::from_u128(1), payload: None }),
-            kind_color(&PNodeKind::Logic { logic: Logic::Debounce { ms: 1 } }),
+            kind_color(&PNodeKind::Model {
+                model: ModelId::from_u128(1),
+                payload: None,
+            }),
+            kind_color(&PNodeKind::Logic {
+                logic: Logic::Debounce { ms: 1 },
+            }),
             kind_color(&PNodeKind::Sink { sink: Sink::Log }),
         ];
         for i in 0..colors.len() {

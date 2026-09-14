@@ -13,22 +13,20 @@ use nl_core::{LayerKind, Node, Op, Project};
 
 /// 실제 앱을 eframe 하네스로 띄운다 (스토리지 없음 = 첫 실행과 같은 상태).
 fn harness<'a>(project: Project) -> Harness<'a, NlApp> {
-    let mut h = Harness::builder()
-        .with_size([1480.0, 900.0])
-        .build_eframe(|cc| {
-            let mut app = NlApp::new(cc);
-            // 네트워크·드라이버를 두드리는 백그라운드 확인은 계속 다시 그리기를 요청해 하네스가 멎지 않는다.
-            app.disable_update_check();
-            app.disable_device_probe();
-            app.doc = DocState::new(project);
-            // 문서를 갈아끼웠으니 선택도 새 문서 기준으로.
-            let first = app.doc.project.models.keys().next().copied();
-            app.sel.set(match first {
-                Some(id) => Selection::Model(id),
-                None => Selection::Project,
-            });
-            app
+    let mut h = Harness::builder().with_size([1480.0, 900.0]).build_eframe(|cc| {
+        let mut app = NlApp::new(cc);
+        // 네트워크·드라이버를 두드리는 백그라운드 확인은 계속 다시 그리기를 요청해 하네스가 멎지 않는다.
+        app.disable_update_check();
+        app.disable_device_probe();
+        app.doc = DocState::new(project);
+        // 문서를 갈아끼웠으니 선택도 새 문서 기준으로.
+        let first = app.doc.project.models.keys().next().copied();
+        app.sel.set(match first {
+            Some(id) => Selection::Model(id),
+            None => Selection::Project,
         });
+        app
+    });
     h.run();
     h
 }
@@ -121,7 +119,13 @@ fn every_view_renders_with_a_broken_graph() {
     let g = &mut p.models.get_mut(&mid).unwrap().graph;
     // 4차원 입력을 요구하는 Conv2d 를 벡터 뒤에 붙인다 → ShapeMismatch.
     let conv = g.add_node(Node::new(
-        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [0, 0], bias: true },
+        LayerKind::Conv2d {
+            out_channels: 4,
+            kernel: [3, 3],
+            stride: [1, 1],
+            padding: [0, 0],
+            bias: true,
+        },
         [200.0, 400.0],
     ));
     let input = g.input_nodes()[0];
@@ -142,10 +146,16 @@ fn every_pipeline_node_kind_renders_in_the_inspector() {
     let mid = *p.models.keys().next().unwrap();
     let pid = *p.pipelines.keys().next().unwrap();
     let pl = p.pipelines.get_mut(&pid).unwrap();
-    let mut kinds: Vec<PNodeKind> = source_palette().into_iter().map(|s| PNodeKind::Source { source: s }).collect();
+    let mut kinds: Vec<PNodeKind> = source_palette()
+        .into_iter()
+        .map(|s| PNodeKind::Source { source: s })
+        .collect();
     kinds.extend(logic_palette().into_iter().map(|l| PNodeKind::Logic { logic: l }));
     kinds.extend(sink_palette().into_iter().map(|s| PNodeKind::Sink { sink: s }));
-    kinds.push(PNodeKind::Model { model: mid, payload: None });
+    kinds.push(PNodeKind::Model {
+        model: mid,
+        payload: None,
+    });
     let mut ids = Vec::new();
     for (i, kind) in kinds.into_iter().enumerate() {
         let n = PNode::new(kind, [i as f32 * 120.0, 500.0]);
@@ -172,7 +182,9 @@ fn every_widget_kind_renders_in_the_designer() {
     let first_node = *p.pipelines[&pid].nodes.keys().next().unwrap();
     let bindings = [
         None,
-        Some(Binding::Action { action: BuiltinAction::Quit }),
+        Some(Binding::Action {
+            action: BuiltinAction::Quit,
+        }),
         Some(Binding::PipelineInput { node: first_node }),
         Some(Binding::PipelineOutput { node: first_node }),
     ];
@@ -208,12 +220,21 @@ fn http_server_and_reply_render_and_validate() {
         let pl = p.pipelines.get_mut(&pid).unwrap();
         let server = PNode::new(
             PNodeKind::Source {
-                source: Source::HttpServer { bind: "127.0.0.1:8787".into(), path: "/infer".into(), token: None },
+                source: Source::HttpServer {
+                    bind: "127.0.0.1:8787".into(),
+                    path: "/infer".into(),
+                    token: None,
+                },
             },
             [80.0, 460.0],
         );
         let sid = server.id;
-        let reply = PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server: sid } }, [600.0, 460.0]);
+        let reply = PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server: sid },
+            },
+            [600.0, 460.0],
+        );
         let rid = reply.id;
         pl.nodes.insert(sid, server);
         pl.nodes.insert(rid, reply);
@@ -256,7 +277,10 @@ fn build_view_renders_with_icon_and_update_settings() {
     h.run();
 
     // 배포 앱이 마우스·키보드를 움직이게 할지는 빌드 설정에서만 정한다 — 라벨이 바뀌면 찾을 수 없다.
-    assert!(h.query_by_label("입력 무장").is_some(), "빌드 뷰에 '입력 무장' 체크박스가 있어야 한다");
+    assert!(
+        h.query_by_label("입력 무장").is_some(),
+        "빌드 뷰에 '입력 무장' 체크박스가 있어야 한다"
+    );
 }
 
 /// 번들 만들기가 거부할 값은 빌드를 누르기 전에 화면에서 걸러진다.
@@ -278,8 +302,14 @@ fn build_view_flags_a_bad_version_and_a_plain_http_url() {
     h.run();
     h.run();
 
-    assert!(h.query_by_label_contains("semver 가 아닙니다").is_some(), "버전 경고가 없다");
-    assert!(h.query_by_label_contains("평문 http 는 받지 않습니다").is_some(), "http 주소 경고가 없다");
+    assert!(
+        h.query_by_label_contains("semver 가 아닙니다").is_some(),
+        "버전 경고가 없다"
+    );
+    assert!(
+        h.query_by_label_contains("평문 http 는 받지 않습니다").is_some(),
+        "http 주소 경고가 없다"
+    );
 }
 
 /// 녹화 폼이 열린 상태로 데이터 뷰가 그려지는지 (녹화 자체는 화면이 있어야 하므로 폼까지).
@@ -322,8 +352,42 @@ fn the_consent_modal_stays_inside_a_small_window() {
     for label in ["승인하고 설치", "거부"] {
         let node = h.get_by_label(label);
         let r = node.rect();
-        assert!(r.max.x <= size[0] && r.max.y <= size[1], "{label} 버튼이 창 밖이다: {r:?}");
+        assert!(
+            r.max.x <= size[0] && r.max.y <= size[1],
+            "{label} 버튼이 창 밖이다: {r:?}"
+        );
     }
+}
+
+/// 비정상 종료 뒤 복구 모달이 뜨고, 긴 경로가 버튼을 덮지 않는다.
+#[test]
+fn the_recovery_modal_lists_snapshots_and_keeps_its_buttons_reachable() {
+    let size = [900.0, 640.0];
+    let mut h = Harness::builder().with_size(size).build_eframe(|cc| {
+        let mut app = NlApp::new(cc);
+        app.disable_update_check();
+        app.disable_device_probe();
+        app
+    });
+    h.state_mut().recover_candidates = vec![nl_app::recovery::Entry {
+        path: std::path::PathBuf::from("/tmp/nl-recovery-test/file-1.recovery.json"),
+        project_name: "복구할 프로젝트".into(),
+        original_path: Some("/아주/긴/경로/가/버튼을/덮지/않는지/본다/프로젝트.nlproj".into()),
+        saved_at: chrono::Utc::now(),
+    }];
+    h.run();
+    h.run();
+
+    assert!(h.query_by_label("복구").is_some(), "복구 버튼이 있어야 한다");
+    assert!(h.query_by_label_contains("복구할 프로젝트").is_some());
+    let rect = h
+        .ctx
+        .memory(|m| m.area_rect(egui::Id::new("recovery")))
+        .expect("복구 모달이 떠 있어야 한다");
+    assert!(
+        rect.width() <= size[0] && rect.height() <= size[1],
+        "모달이 창을 넘는다: {rect:?}"
+    );
 }
 
 /// 시작 화면은 장치 확인을 기다리지 않는다.
@@ -367,10 +431,19 @@ fn ctrl_digit_switches_views_in_bar_order() {
             egui::Key::Num7,
         ][i];
         // 다른 뷰에서 출발해야 "안 바뀐 것"과 "원래 그 뷰"를 구별할 수 있다.
-        h.state_mut().view = if *expected == View::Model { View::Resources } else { View::Model };
+        h.state_mut().view = if *expected == View::Model {
+            View::Resources
+        } else {
+            View::Model
+        };
         h.key_press_modifiers(egui::Modifiers::COMMAND, key);
         h.run();
-        assert_eq!(h.state().view, *expected, "Ctrl+{} 가 {expected:?} 로 가지 않는다", i + 1);
+        assert_eq!(
+            h.state().view,
+            *expected,
+            "Ctrl+{} 가 {expected:?} 로 가지 않는다",
+            i + 1
+        );
     }
 }
 

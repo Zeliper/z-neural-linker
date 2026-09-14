@@ -79,7 +79,10 @@ impl RunnerSession {
         Ok(Self {
             handle,
             pipeline: pipeline.id,
-            live: LiveView { running: true, ..LiveView::default() },
+            live: LiveView {
+                running: true,
+                ..LiveView::default()
+            },
             started_at: now,
             finished: false,
             temp_dir,
@@ -143,7 +146,12 @@ impl RunnerSession {
                     gui.push_value(widget, value, points);
                 }
                 // 이미지 원본은 `Value` 로 오지 않는다 (드롭 정책) — 이 축소판이 유일한 통로다.
-                RunnerEvent::ValuePreview { node, width, height, rgba } => {
+                RunnerEvent::ValuePreview {
+                    node,
+                    width,
+                    height,
+                    rgba,
+                } => {
                     set_preview(ctx, &mut self.live, node, width, height, &rgba);
                     self.live.errors.remove(&node);
                 }
@@ -222,7 +230,13 @@ fn set_preview(ctx: &egui::Context, live: &mut LiveView, node: PNodeId, width: u
         None => {
             let name = format!("pnode-preview-{}", node.short());
             let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
-            live.previews.insert(node, NodePreview { texture, size: (width, height) });
+            live.previews.insert(
+                node,
+                NodePreview {
+                    texture,
+                    size: (width, height),
+                },
+            );
         }
     }
 }
@@ -250,7 +264,11 @@ mod tests {
 
         // 같은 노드의 다음 장은 새 텍스처를 만들지 않는다.
         set_preview(&ctx, &mut live, node, 8, 2, &[1u8; 8 * 2 * 4]);
-        assert_eq!(live.previews[&node].texture.id(), first, "노드당 텍스처는 하나여야 한다");
+        assert_eq!(
+            live.previews[&node].texture.id(),
+            first,
+            "노드당 텍스처는 하나여야 한다"
+        );
         assert_eq!(live.previews[&node].size, (8, 2));
 
         // 길이가 어긋나면 그대로 둔다.
@@ -300,7 +318,10 @@ mod tests {
     #[test]
     fn a_plot_binding_accumulates_history() {
         let node = PNodeId::from_u128(3);
-        let (l, id) = layout_with(Some(Binding::PipelineOutput { node }), WidgetKind::Plot { max_points: 2 });
+        let (l, id) = layout_with(
+            Some(Binding::PipelineOutput { node }),
+            WidgetKind::Plot { max_points: 2 },
+        );
         let mut gui = GuiState::default();
         for v in [1.0, 2.0, 3.0] {
             push_to_bound_widgets(&mut gui, &l, node, &Value::Number(v));
@@ -312,11 +333,18 @@ mod tests {
     fn builtin_action_bindings_are_returned_not_sent() {
         // route_widget_event 는 실행기를 필요로 하므로 바인딩 판정만 따로 확인한다.
         let (l, id) = layout_with(
-            Some(Binding::Action { action: BuiltinAction::StopPipeline }),
+            Some(Binding::Action {
+                action: BuiltinAction::StopPipeline,
+            }),
             WidgetKind::Button { text: "정지".into() },
         );
         let binding = l.widgets.get(&id).and_then(|w| w.binding.clone());
-        assert!(matches!(binding, Some(Binding::Action { action: BuiltinAction::StopPipeline })));
+        assert!(matches!(
+            binding,
+            Some(Binding::Action {
+                action: BuiltinAction::StopPipeline
+            })
+        ));
     }
 
     #[test]

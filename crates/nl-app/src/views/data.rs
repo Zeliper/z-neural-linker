@@ -14,8 +14,8 @@ use nl_core::dataset::{DataSource, DatasetSpec, Split, SyntheticKind};
 use nl_core::payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
 use nl_core::pipeline::Region;
 use nl_core::{DatasetId, Op, PayloadId};
-use std::path::PathBuf;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 // ── 뷰 상태 ─────────────────────────────────────────────────────────
 
@@ -109,12 +109,16 @@ pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState) -> Vec<View
         return actions;
     }
     ui.columns(2, |cols| {
-        egui::ScrollArea::vertical().id_salt("datasets-scroll").show(&mut cols[0], |ui| {
-            datasets(ui, ctx, state, &mut actions);
-        });
-        egui::ScrollArea::vertical().id_salt("payloads-scroll").show(&mut cols[1], |ui| {
-            payloads(ui, ctx, state, &mut actions);
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("datasets-scroll")
+            .show(&mut cols[0], |ui| {
+                datasets(ui, ctx, state, &mut actions);
+            });
+        egui::ScrollArea::vertical()
+            .id_salt("payloads-scroll")
+            .show(&mut cols[1], |ui| {
+                payloads(ui, ctx, state, &mut actions);
+            });
     });
     actions
 }
@@ -142,7 +146,11 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
                 actions.push(ViewAction::PickImageFolder);
                 ui.close();
             }
-            if ui.button("녹화 폴더…").on_hover_text("이미 녹화해 둔 폴더를 가져옵니다").clicked() {
+            if ui
+                .button("녹화 폴더…")
+                .on_hover_text("이미 녹화해 둔 폴더를 가져옵니다")
+                .clicked()
+            {
                 actions.push(ViewAction::PickRecordedFolder);
                 ui.close();
             }
@@ -167,18 +175,30 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
     for (id, d) in &ctx.project.datasets {
         let is_sel = selected == Some(*id);
         // 한 줄 전체가 선택 위젯이어야 클릭이 확실히 먹는다 (Frame + Label 조합은 히트 판정이 새어 나간다).
-        let count = d.cached_info.as_ref().map(|i| format!("  ·  {}개", i.samples)).unwrap_or_default();
+        let count = d
+            .cached_info
+            .as_ref()
+            .map(|i| format!("  ·  {}개", i.samples))
+            .unwrap_or_default();
         let title = format!("{}  ({}){count}", d.name, source_kind_label(&d.source));
         if ui.selectable_label(is_sel, RichText::new(title).strong()).clicked() {
             actions.push(ViewAction::Select(Selection::Dataset(*id)));
         }
-        ui.label(RichText::new(format!("    {}", source_label(&d.source))).color(COL_WEAK).size(11.0));
+        ui.label(
+            RichText::new(format!("    {}", source_label(&d.source)))
+                .color(COL_WEAK)
+                .size(11.0),
+        );
         if !is_sel {
             continue;
         }
         // 선택된 데이터셋의 도구
         ui.horizontal(|ui| {
-            if ui.button("🔍 스캔").on_hover_text("샘플 수·형상·클래스를 알아내 캐시에 저장").clicked() {
+            if ui
+                .button("🔍 스캔")
+                .on_hover_text("샘플 수·형상·클래스를 알아내 캐시에 저장")
+                .clicked()
+            {
                 actions.push(ViewAction::ScanDataset(*id));
             }
             if ui.button("👁 미리보기").on_hover_text("앞에서 8개 샘플").clicked() {
@@ -204,7 +224,11 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
                     "캐시: 입력 {} · 타깃 {} · 클래스 {}",
                     shape_text(&info.input_shape),
                     shape_text(&info.target_shape),
-                    if info.classes.is_empty() { "-".into() } else { info.classes.join(", ") }
+                    if info.classes.is_empty() {
+                        "-".into()
+                    } else {
+                        info.classes.join(", ")
+                    }
                 ))
                 .color(COL_WEAK)
                 .size(11.0),
@@ -260,7 +284,9 @@ fn preview_block(ui: &mut egui::Ui, p: &Preview) {
                 });
             }
             ui.label(
-                RichText::new(format!("샘플 형상 {}", shape_text(&items[0].shape))).color(COL_WEAK).size(11.0),
+                RichText::new(format!("샘플 형상 {}", shape_text(&items[0].shape)))
+                    .color(COL_WEAK)
+                    .size(11.0),
             );
         }
     }
@@ -282,32 +308,35 @@ fn csv_form(ui: &mut egui::Ui, state: &mut DataState, actions: &mut Vec<ViewActi
     ui.add_space(6.0);
     ui.label(RichText::new("입력 · 타깃 열 고르기").strong());
     let columns = form.columns();
-    egui::ScrollArea::vertical().max_height(320.0).id_salt("csv-cols-scroll").show(ui, |ui| {
-        egui::Grid::new("csv-cols").striped(true).show(ui, |ui| {
-            ui.label(RichText::new("열").color(COL_WEAK));
-            ui.label(RichText::new("입력").color(COL_WEAK));
-            ui.label(RichText::new("타깃").color(COL_WEAK));
-            ui.end_row();
-            for (i, name) in columns.iter().enumerate() {
-                ui.label(name);
-                let mut inp = form.inputs.get(i).copied().unwrap_or(false);
-                if ui.checkbox(&mut inp, "").changed() {
-                    form.inputs[i] = inp;
-                    if inp {
-                        form.targets[i] = false;
-                    }
-                }
-                let mut tgt = form.targets.get(i).copied().unwrap_or(false);
-                if ui.checkbox(&mut tgt, "").changed() {
-                    form.targets[i] = tgt;
-                    if tgt {
-                        form.inputs[i] = false;
-                    }
-                }
+    egui::ScrollArea::vertical()
+        .max_height(320.0)
+        .id_salt("csv-cols-scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("csv-cols").striped(true).show(ui, |ui| {
+                ui.label(RichText::new("열").color(COL_WEAK));
+                ui.label(RichText::new("입력").color(COL_WEAK));
+                ui.label(RichText::new("타깃").color(COL_WEAK));
                 ui.end_row();
-            }
+                for (i, name) in columns.iter().enumerate() {
+                    ui.label(name);
+                    let mut inp = form.inputs.get(i).copied().unwrap_or(false);
+                    if ui.checkbox(&mut inp, "").changed() {
+                        form.inputs[i] = inp;
+                        if inp {
+                            form.targets[i] = false;
+                        }
+                    }
+                    let mut tgt = form.targets.get(i).copied().unwrap_or(false);
+                    if ui.checkbox(&mut tgt, "").changed() {
+                        form.targets[i] = tgt;
+                        if tgt {
+                            form.inputs[i] = false;
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
         });
-    });
     ui.add_space(8.0);
     let ok = form.inputs.iter().any(|v| *v) && form.targets.iter().any(|v| *v);
     let mut create = false;
@@ -317,14 +346,22 @@ fn csv_form(ui: &mut egui::Ui, state: &mut DataState, actions: &mut Vec<ViewActi
             create = ui.button("만들기").clicked();
         });
         if !ok {
-            ui.label(RichText::new("입력과 타깃을 각각 하나 이상 고르세요").color(COL_WARN).size(11.5));
+            ui.label(
+                RichText::new("입력과 타깃을 각각 하나 이상 고르세요")
+                    .color(COL_WARN)
+                    .size(11.5),
+            );
         }
         cancel = ui.button("취소").clicked();
     });
     if create {
         let cols = form.columns();
         let pick = |flags: &[bool]| -> Vec<String> {
-            cols.iter().zip(flags).filter(|(_, f)| **f).map(|(c, _)| c.clone()).collect()
+            cols.iter()
+                .zip(flags)
+                .filter(|(_, f)| **f)
+                .map(|(c, _)| c.clone())
+                .collect()
         };
         let spec = DatasetSpec::new(
             form.name.clone(),
@@ -352,7 +389,9 @@ fn csv_form(ui: &mut egui::Ui, state: &mut DataState, actions: &mut Vec<ViewActi
 
 /// 녹화 시작 폼. 폴더·영역·fps·라벨 키를 정한다.
 fn record_form(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &mut Vec<ViewAction>) {
-    let Some(mut form) = state.record_form.take() else { return };
+    let Some(mut form) = state.record_form.take() else {
+        return;
+    };
     let mut close = false;
 
     ui.heading("녹화 데이터셋 만들기");
@@ -364,32 +403,35 @@ fn record_form(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions:
     );
     ui.add_space(8.0);
 
-    egui::Grid::new("record-form").num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-        ui.label(RichText::new("이름").color(COL_WEAK));
-        ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(240.0));
-        ui.end_row();
+    egui::Grid::new("record-form")
+        .num_columns(2)
+        .spacing([12.0, 5.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("이름").color(COL_WEAK));
+            ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(240.0));
+            ui.end_row();
 
-        ui.label(RichText::new("폴더").color(COL_WEAK));
-        ui.horizontal(|ui| {
-            let shown = match (&form.dir, ctx.base_dir) {
-                (Some(d), _) => d.display().to_string(),
-                (None, Some(base)) => record::default_dir(base, &form.name).display().to_string(),
-                (None, None) => "(프로젝트를 먼저 저장하거나 폴더를 고르세요)".into(),
-            };
-            ui.label(RichText::new(shown).size(11.0));
-            if ui.small_button("고르기…").clicked() {
-                actions.push(ViewAction::PickRecordDir);
-            }
-            if form.dir.is_some() && ui.small_button("기본값").clicked() {
-                form.dir = None;
-            }
+            ui.label(RichText::new("폴더").color(COL_WEAK));
+            ui.horizontal(|ui| {
+                let shown = match (&form.dir, ctx.base_dir) {
+                    (Some(d), _) => d.display().to_string(),
+                    (None, Some(base)) => record::default_dir(base, &form.name).display().to_string(),
+                    (None, None) => "(프로젝트를 먼저 저장하거나 폴더를 고르세요)".into(),
+                };
+                ui.label(RichText::new(shown).size(11.0));
+                if ui.small_button("고르기…").clicked() {
+                    actions.push(ViewAction::PickRecordDir);
+                }
+                if form.dir.is_some() && ui.small_button("기본값").clicked() {
+                    form.dir = None;
+                }
+            });
+            ui.end_row();
+
+            ui.label(RichText::new("초당 프레임").color(COL_WEAK));
+            ui.add(DragValue::new(&mut form.fps).range(0.2..=60.0).speed(0.2));
+            ui.end_row();
         });
-        ui.end_row();
-
-        ui.label(RichText::new("초당 프레임").color(COL_WEAK));
-        ui.add(DragValue::new(&mut form.fps).range(0.2..=60.0).speed(0.2));
-        ui.end_row();
-    });
 
     ui.add_space(6.0);
     ui.label(RichText::new("캡처 영역").strong());
@@ -406,13 +448,20 @@ fn record_form(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions:
             .color(COL_WEAK)
             .size(11.0),
     );
-    egui::Grid::new("record-labels").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
-        for (i, label) in form.labels.iter_mut().enumerate() {
-            ui.label(RichText::new(format!("{i}")).color(COL_WEAK).size(11.5));
-            ui.add(egui::TextEdit::singleline(label).desired_width(200.0).hint_text("라벨 이름"));
-            ui.end_row();
-        }
-    });
+    egui::Grid::new("record-labels")
+        .num_columns(2)
+        .spacing([10.0, 3.0])
+        .show(ui, |ui| {
+            for (i, label) in form.labels.iter_mut().enumerate() {
+                ui.label(RichText::new(format!("{i}")).color(COL_WEAK).size(11.5));
+                ui.add(
+                    egui::TextEdit::singleline(label)
+                        .desired_width(200.0)
+                        .hint_text("라벨 이름"),
+                );
+                ui.end_row();
+            }
+        });
 
     ui.add_space(10.0);
     let dir = match (&form.dir, ctx.base_dir) {
@@ -427,7 +476,11 @@ fn record_form(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions:
             start = ui.button(RichText::new("⏺ 녹화 시작").color(COL_ERROR)).clicked();
         });
         if dir.is_none() {
-            ui.label(RichText::new("프로젝트를 저장하거나 폴더를 고르세요").color(COL_WARN).size(11.5));
+            ui.label(
+                RichText::new("프로젝트를 저장하거나 폴더를 고르세요")
+                    .color(COL_WARN)
+                    .size(11.5),
+            );
         }
         cancel = ui.button("취소").clicked();
     });
@@ -461,10 +514,15 @@ pub(crate) fn shot_block(ui: &mut egui::Ui, ctx: &ViewCtx, region: Region, actio
             }
         });
         if ctx.shot.busy {
-            ui.label(RichText::new("찍는 중… (포털이면 권한 창이 뜰 수 있습니다)").color(COL_WEAK).size(11.0));
+            ui.label(
+                RichText::new("찍는 중… (포털이면 권한 창이 뜰 수 있습니다)")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
         }
         if let Some(b) = ctx.shot.backend {
-            ui.label(RichText::new(b.label()).color(COL_OK).size(11.0)).on_hover_text(b.hint());
+            ui.label(RichText::new(b.label()).color(COL_OK).size(11.0))
+                .on_hover_text(b.hint());
         }
     });
     if let Some(e) = &ctx.shot.error {
@@ -472,7 +530,9 @@ pub(crate) fn shot_block(ui: &mut egui::Ui, ctx: &ViewCtx, region: Region, actio
     }
     if ctx.shot.backend == Some(nl_io::Backend::Portal) {
         ui.label(
-            RichText::new("포털 경로라 초당 1~3장이 한계입니다 — fps 를 낮게 잡으세요").color(COL_WARN).size(11.0),
+            RichText::new("포털 경로라 초당 1~3장이 한계입니다 — fps 를 낮게 잡으세요")
+                .color(COL_WARN)
+                .size(11.0),
         );
     }
     if let Some(t) = &ctx.shot.texture {
@@ -489,7 +549,10 @@ fn recording_panel(ui: &mut egui::Ui, ctx: &ViewCtx, rec: &RecordSession, action
     ui.horizontal(|ui| {
         ui.label(RichText::new("⏺ 녹화 중").color(COL_ERROR).size(16.0).strong());
         ui.label(RichText::new(&rec.name).strong());
-        if ui.button(RichText::new("⏹ 정지하고 데이터셋 만들기").color(COL_OK)).clicked() {
+        if ui
+            .button(RichText::new("⏹ 정지하고 데이터셋 만들기").color(COL_OK))
+            .clicked()
+        {
             actions.push(ViewAction::StopRecording);
         }
     });
@@ -502,13 +565,26 @@ fn recording_panel(ui: &mut egui::Ui, ctx: &ViewCtx, rec: &RecordSession, action
         super::kv(ui, "프레임", rec.frames().to_string());
         super::kv(ui, "버린 프레임", rec.dropped().to_string());
         super::kv(ui, "목표 fps", format!("{:.1}", rec.fps));
-        let actual = if elapsed > 0.5 { rec.frames() as f64 / elapsed } else { 0.0 };
+        let actual = if elapsed > 0.5 {
+            rec.frames() as f64 / elapsed
+        } else {
+            0.0
+        };
         super::kv(ui, "실제 fps", format!("{actual:.1}"));
     });
     if let Some(b) = rec.backend {
-        ui.label(RichText::new(format!("백엔드 {}", b.label())).color(COL_WEAK).size(11.0)).on_hover_text(b.hint());
+        ui.label(
+            RichText::new(format!("백엔드 {}", b.label()))
+                .color(COL_WEAK)
+                .size(11.0),
+        )
+        .on_hover_text(b.hint());
         if b == nl_io::Backend::Portal {
-            ui.label(RichText::new("포털 경로라 초당 1~3장이 한계입니다").color(COL_WARN).size(11.0));
+            ui.label(
+                RichText::new("포털 경로라 초당 1~3장이 한계입니다")
+                    .color(COL_WARN)
+                    .size(11.0),
+            );
         }
     }
     if let Some(e) = rec.error() {
@@ -517,7 +593,11 @@ fn recording_panel(ui: &mut egui::Ui, ctx: &ViewCtx, rec: &RecordSession, action
 
     ui.add_space(6.0);
     let current = rec.label();
-    ui.label(RichText::new(format!("현재 라벨: {} ({current})", rec.label_name(current))).size(14.0).strong());
+    ui.label(
+        RichText::new(format!("현재 라벨: {} ({current})", rec.label_name(current)))
+            .size(14.0)
+            .strong(),
+    );
     ui.label(
         RichText::new("빌더 창에 포커스가 있을 때 숫자키 0~9 로 라벨을 바꿉니다 (텍스트 칸에 커서가 있으면 무시).")
             .color(COL_WEAK)
@@ -526,7 +606,11 @@ fn recording_panel(ui: &mut egui::Ui, ctx: &ViewCtx, rec: &RecordSession, action
     ui.horizontal_wrapped(|ui| {
         for (i, name) in rec.labels.iter().enumerate() {
             let on = current == i as i64;
-            let text = if name.trim().is_empty() { format!("{i}") } else { format!("{i} {name}") };
+            let text = if name.trim().is_empty() {
+                format!("{i}")
+            } else {
+                format!("{i} {name}")
+            };
             ui.label(RichText::new(text).color(if on { COL_OK } else { COL_WEAK }).size(11.5));
         }
     });
@@ -553,12 +637,7 @@ fn payloads(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
         ui.menu_button("＋ 프리셋", |ui| {
             ui.set_min_width(200.0);
             if ui.button("이미지 분류 (28×28 → 클래스)").clicked() {
-                let p = PayloadSpec::image_classifier(
-                    "이미지 분류",
-                    28,
-                    28,
-                    (0..10).map(|i| i.to_string()).collect(),
-                );
+                let p = PayloadSpec::image_classifier("이미지 분류", 28, 28, (0..10).map(|i| i.to_string()).collect());
                 let id = p.id;
                 actions.push(ViewAction::Ops(vec![Op::UpsertPayload { payload: p }]));
                 actions.push(ViewAction::Select(Selection::Payload(id)));
@@ -592,7 +671,13 @@ fn payloads(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
     };
     for (id, p) in &ctx.project.payloads {
         let is_sel = selected == Some(*id);
-        if ui.selectable_label(is_sel, format!("{} (입력 {} · 출력 {})", p.name, p.inputs.len(), p.outputs.len())).clicked() {
+        if ui
+            .selectable_label(
+                is_sel,
+                format!("{} (입력 {} · 출력 {})", p.name, p.inputs.len(), p.outputs.len()),
+            )
+            .clicked()
+        {
             actions.push(ViewAction::Select(Selection::Payload(*id)));
         }
         if is_sel {
@@ -602,30 +687,41 @@ fn payloads(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
 }
 
 fn payload_editor(ui: &mut egui::Ui, p: &PayloadSpec, state: &mut DataState, actions: &mut Vec<ViewAction>) {
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(8).corner_radius(4).show(ui, |ui| {
-        for outputs in [false, true] {
-            ui.label(RichText::new(if outputs { "출력 필드" } else { "입력 필드" }).strong());
-            let list = if outputs { &p.outputs } else { &p.inputs };
-            for i in 0..list.len() {
-                field_row(ui, p, outputs, i, state, actions);
-            }
-            if ui.small_button(if outputs { "＋ 출력 필드" } else { "＋ 입력 필드" }).clicked() {
-                let mut next = p.clone();
-                let f = Field::new(format!("f{}", list.len() + 1), FieldKind::Scalar);
-                if outputs {
-                    next.outputs.push(f);
-                } else {
-                    next.inputs.push(f);
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(8)
+        .corner_radius(4)
+        .show(ui, |ui| {
+            for outputs in [false, true] {
+                ui.label(RichText::new(if outputs { "출력 필드" } else { "입력 필드" }).strong());
+                let list = if outputs { &p.outputs } else { &p.inputs };
+                for i in 0..list.len() {
+                    field_row(ui, p, outputs, i, state, actions);
                 }
-                actions.push(ViewAction::Ops(vec![Op::UpsertPayload { payload: next }]));
+                if ui
+                    .small_button(if outputs {
+                        "＋ 출력 필드"
+                    } else {
+                        "＋ 입력 필드"
+                    })
+                    .clicked()
+                {
+                    let mut next = p.clone();
+                    let f = Field::new(format!("f{}", list.len() + 1), FieldKind::Scalar);
+                    if outputs {
+                        next.outputs.push(f);
+                    } else {
+                        next.inputs.push(f);
+                    }
+                    actions.push(ViewAction::Ops(vec![Op::UpsertPayload { payload: next }]));
+                }
+                ui.add_space(6.0);
             }
-            ui.add_space(6.0);
-        }
-        if ui.button("🗑 페이로드 삭제").clicked() {
-            actions.push(ViewAction::Ops(vec![Op::DeletePayload { id: p.id }]));
-            actions.push(ViewAction::Select(Selection::None));
-        }
-    });
+            if ui.button("🗑 페이로드 삭제").clicked() {
+                actions.push(ViewAction::Ops(vec![Op::DeletePayload { id: p.id }]));
+                actions.push(ViewAction::Select(Selection::None));
+            }
+        });
 }
 
 fn field_row(
@@ -641,7 +737,10 @@ fn field_row(
     let key = (p.id, outputs, index);
     let open = state.open_field == Some(key);
     ui.horizontal(|ui| {
-        if ui.selectable_label(open, format!("{} · {}", field.name, field_kind_label(&field.kind))).clicked() {
+        if ui
+            .selectable_label(open, format!("{} · {}", field.name, field_kind_label(&field.kind)))
+            .clicked()
+        {
             state.open_field = if open { None } else { Some(key) };
         }
         if let Some(s) = field.tensor_shape() {
@@ -649,12 +748,16 @@ fn field_row(
         }
         ui.add_enabled_ui(index > 0, |ui| {
             if ui.small_button("▲").on_hover_text("위로").clicked() {
-                actions.push(ViewAction::Ops(vec![Op::UpsertPayload { payload: swapped(p, outputs, index, index - 1) }]));
+                actions.push(ViewAction::Ops(vec![Op::UpsertPayload {
+                    payload: swapped(p, outputs, index, index - 1),
+                }]));
             }
         });
         ui.add_enabled_ui(index + 1 < list.len(), |ui| {
             if ui.small_button("▼").on_hover_text("아래로").clicked() {
-                actions.push(ViewAction::Ops(vec![Op::UpsertPayload { payload: swapped(p, outputs, index, index + 1) }]));
+                actions.push(ViewAction::Ops(vec![Op::UpsertPayload {
+                    payload: swapped(p, outputs, index, index + 1),
+                }]));
             }
         });
         if ui.small_button("✖").on_hover_text("필드 삭제").clicked() {
@@ -672,12 +775,20 @@ fn field_row(
         return;
     }
     let mut next = p.clone();
-    let Some(f) = (if outputs { next.outputs.get_mut(index) } else { next.inputs.get_mut(index) }) else { return };
+    let Some(f) = (if outputs {
+        next.outputs.get_mut(index)
+    } else {
+        next.inputs.get_mut(index)
+    }) else {
+        return;
+    };
     let mut changed = false;
     ui.indent(("field", index), |ui| {
         ui.horizontal(|ui| {
             ui.label("이름");
-            changed |= ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(120.0)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(&mut f.name).desired_width(120.0))
+                .changed();
         });
         changed |= field_kind_editor(ui, &mut f.kind);
         changed |= transform_chain(ui, "인코드 (바깥 → 텐서)", &mut f.encode, index * 2);
@@ -714,9 +825,18 @@ fn field_kind_palette() -> Vec<FieldKind> {
     vec![
         FieldKind::Scalar,
         FieldKind::Vector { len: 4 },
-        FieldKind::Tensor { shape: vec![1], dtype: Dtype::F32 },
-        FieldKind::Image { width: 28, height: 28, channels: 3 },
-        FieldKind::ClassLabel { labels: vec!["a".into(), "b".into()] },
+        FieldKind::Tensor {
+            shape: vec![1],
+            dtype: Dtype::F32,
+        },
+        FieldKind::Image {
+            width: 28,
+            height: 28,
+            channels: 3,
+        },
+        FieldKind::ClassLabel {
+            labels: vec!["a".into(), "b".into()],
+        },
         FieldKind::Text,
         FieldKind::Json,
     ]
@@ -726,39 +846,55 @@ fn field_kind_editor(ui: &mut egui::Ui, kind: &mut FieldKind) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label("종류");
-        egui::ComboBox::from_id_salt(("field-kind", ui.id())).selected_text(field_kind_label(kind)).show_ui(ui, |ui| {
-            for k in field_kind_palette() {
-                if ui.selectable_label(std::mem::discriminant(kind) == std::mem::discriminant(&k), field_kind_label(&k)).clicked()
-                    && std::mem::discriminant(kind) != std::mem::discriminant(&k)
-                {
-                    *kind = k;
-                    changed = true;
+        egui::ComboBox::from_id_salt(("field-kind", ui.id()))
+            .selected_text(field_kind_label(kind))
+            .show_ui(ui, |ui| {
+                for k in field_kind_palette() {
+                    if ui
+                        .selectable_label(
+                            std::mem::discriminant(kind) == std::mem::discriminant(&k),
+                            field_kind_label(&k),
+                        )
+                        .clicked()
+                        && std::mem::discriminant(kind) != std::mem::discriminant(&k)
+                    {
+                        *kind = k;
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
     });
     match kind {
         FieldKind::Tensor { shape, dtype } => {
             let mut text = shape_text(shape);
             ui.horizontal(|ui| {
                 ui.label("형상");
-                if ui.add(egui::TextEdit::singleline(&mut text).desired_width(110.0)).changed() {
+                if ui
+                    .add(egui::TextEdit::singleline(&mut text).desired_width(110.0))
+                    .changed()
+                {
                     if let Some(s) = parse_shape_text(&text) {
                         *shape = s;
                         changed = true;
                     }
                 }
-                egui::ComboBox::from_id_salt(("dtype", ui.id())).selected_text(format!("{dtype:?}")).show_ui(ui, |ui| {
-                    for d in [Dtype::F32, Dtype::I64, Dtype::U8, Dtype::Bool] {
-                        if ui.selectable_label(*dtype == d, format!("{d:?}")).clicked() {
-                            *dtype = d;
-                            changed = true;
+                egui::ComboBox::from_id_salt(("dtype", ui.id()))
+                    .selected_text(format!("{dtype:?}"))
+                    .show_ui(ui, |ui| {
+                        for d in [Dtype::F32, Dtype::I64, Dtype::U8, Dtype::Bool] {
+                            if ui.selectable_label(*dtype == d, format!("{d:?}")).clicked() {
+                                *dtype = d;
+                                changed = true;
+                            }
                         }
-                    }
-                });
+                    });
             });
         }
-        FieldKind::Image { width, height, channels } => {
+        FieldKind::Image {
+            width,
+            height,
+            channels,
+        } => {
             ui.horizontal(|ui| {
                 ui.label("폭");
                 changed |= ui.add(egui::DragValue::new(width).range(1..=8192)).changed();
@@ -778,8 +914,15 @@ fn field_kind_editor(ui: &mut egui::Ui, kind: &mut FieldKind) -> bool {
             let mut text = labels.join(", ");
             ui.horizontal(|ui| {
                 ui.label("클래스");
-                if ui.add(egui::TextEdit::singleline(&mut text).desired_width(200.0)).changed() {
-                    *labels = text.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut text).desired_width(200.0))
+                    .changed()
+                {
+                    *labels = text
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     changed = true;
                 }
             });
@@ -794,16 +937,29 @@ pub fn transform_palette() -> Vec<Transform> {
     vec![
         Transform::Resize { width: 28, height: 28 },
         Transform::Grayscale,
-        Transform::Crop { x: 0, y: 0, width: 28, height: 28 },
-        Transform::Normalize { mean: vec![0.5], std: vec![0.5] },
+        Transform::Crop {
+            x: 0,
+            y: 0,
+            width: 28,
+            height: 28,
+        },
+        Transform::Normalize {
+            mean: vec![0.5],
+            std: vec![0.5],
+        },
         Transform::Scale { min: 0.0, max: 255.0 },
         Transform::OneHot { classes: 10 },
         Transform::Argmax,
         Transform::Softmax,
         Transform::Threshold { value: 0.5 },
         Transform::MapLabel,
-        Transform::JsonPointer { pointer: "/value".into() },
-        Transform::Tokenize { vocab: "abcdefghijklmnopqrstuvwxyz ".into(), max_len: 32 },
+        Transform::JsonPointer {
+            pointer: "/value".into(),
+        },
+        Transform::Tokenize {
+            vocab: "abcdefghijklmnopqrstuvwxyz ".into(),
+            max_len: 32,
+        },
     ]
 }
 
@@ -875,17 +1031,27 @@ fn transform_params(ui: &mut egui::Ui, t: &mut Transform, salt: usize) -> bool {
     let mut changed = false;
     match t {
         Transform::Resize { width, height } | Transform::Crop { width, height, .. } => {
-            changed |= ui.add(egui::DragValue::new(width).prefix("w ").range(1..=8192)).changed();
-            changed |= ui.add(egui::DragValue::new(height).prefix("h ").range(1..=8192)).changed();
+            changed |= ui
+                .add(egui::DragValue::new(width).prefix("w ").range(1..=8192))
+                .changed();
+            changed |= ui
+                .add(egui::DragValue::new(height).prefix("h ").range(1..=8192))
+                .changed();
         }
         Transform::Normalize { mean, std } => {
             let mut m = mean.first().copied().unwrap_or(0.0);
             let mut s = std.first().copied().unwrap_or(1.0);
-            if ui.add(egui::DragValue::new(&mut m).prefix("mean ").speed(0.01)).changed() {
+            if ui
+                .add(egui::DragValue::new(&mut m).prefix("mean ").speed(0.01))
+                .changed()
+            {
                 *mean = vec![m];
                 changed = true;
             }
-            if ui.add(egui::DragValue::new(&mut s).prefix("std ").speed(0.01)).changed() {
+            if ui
+                .add(egui::DragValue::new(&mut s).prefix("std ").speed(0.01))
+                .changed()
+            {
                 *std = vec![s.max(1e-6)];
                 changed = true;
             }
@@ -895,21 +1061,33 @@ fn transform_params(ui: &mut egui::Ui, t: &mut Transform, salt: usize) -> bool {
             changed |= ui.add(egui::DragValue::new(max).prefix("max ").speed(0.5)).changed();
         }
         Transform::OneHot { classes } => {
-            changed |= ui.add(egui::DragValue::new(classes).prefix("n ").range(1..=100_000)).changed();
+            changed |= ui
+                .add(egui::DragValue::new(classes).prefix("n ").range(1..=100_000))
+                .changed();
         }
         Transform::Threshold { value } => {
             changed |= ui.add(egui::DragValue::new(value).speed(0.01)).changed();
         }
         Transform::JsonPointer { pointer } => {
             changed |= ui
-                .add(egui::TextEdit::singleline(pointer).desired_width(110.0).id_salt(("ptr", salt)))
+                .add(
+                    egui::TextEdit::singleline(pointer)
+                        .desired_width(110.0)
+                        .id_salt(("ptr", salt)),
+                )
                 .changed();
         }
         Transform::Tokenize { vocab, max_len } => {
             changed |= ui
-                .add(egui::TextEdit::singleline(vocab).desired_width(110.0).id_salt(("vocab", salt)))
+                .add(
+                    egui::TextEdit::singleline(vocab)
+                        .desired_width(110.0)
+                        .id_salt(("vocab", salt)),
+                )
                 .changed();
-            changed |= ui.add(egui::DragValue::new(max_len).prefix("len ").range(1..=4096)).changed();
+            changed |= ui
+                .add(egui::DragValue::new(max_len).prefix("len ").range(1..=4096))
+                .changed();
         }
         Transform::Grayscale | Transform::Argmax | Transform::Softmax | Transform::MapLabel => {}
     }
@@ -918,7 +1096,10 @@ fn transform_params(ui: &mut egui::Ui, t: &mut Transform, salt: usize) -> bool {
 
 /// 합성 데이터셋 하나를 만든다 (앱의 `AddSynthetic` 처리와 테스트가 공유).
 pub fn synthetic_dataset(kind: SyntheticKind, samples: usize) -> DatasetSpec {
-    let mut d = DatasetSpec::new(format!("{} 합성", kind.label()), DataSource::Synthetic { kind, samples });
+    let mut d = DatasetSpec::new(
+        format!("{} 합성", kind.label()),
+        DataSource::Synthetic { kind, samples },
+    );
     d.split = Split::Ratio;
     d
 }
@@ -930,7 +1111,13 @@ mod tests {
     #[test]
     fn synthetic_dataset_carries_its_kind_and_size() {
         let d = synthetic_dataset(SyntheticKind::Xor, 500);
-        assert!(matches!(d.source, DataSource::Synthetic { kind: SyntheticKind::Xor, samples: 500 }));
+        assert!(matches!(
+            d.source,
+            DataSource::Synthetic {
+                kind: SyntheticKind::Xor,
+                samples: 500
+            }
+        ));
         assert!(d.name.contains("XOR"));
     }
 

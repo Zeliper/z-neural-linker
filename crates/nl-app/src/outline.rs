@@ -360,7 +360,11 @@ fn rename_field(ui: &mut egui::Ui, rename: &Option<(Selection, String)>, target:
         return;
     }
     let mut buf = name.clone();
-    let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(f32::INFINITY).id_salt("outline-rename"));
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut buf)
+            .desired_width(f32::INFINITY)
+            .id_salt("outline-rename"),
+    );
     if buf != *name {
         out.start_rename = Some((target, buf));
     }
@@ -419,13 +423,24 @@ mod tests {
     #[test]
     fn dataset_icons_differ_per_source() {
         let icons = [
-            dataset_icon(&DataSource::Csv { path: String::new(), input_cols: vec![], target_cols: vec![], header: true }),
+            dataset_icon(&DataSource::Csv {
+                path: String::new(),
+                input_cols: vec![],
+                target_cols: vec![],
+                header: true,
+            }),
             dataset_icon(&DataSource::ImageFolder { path: String::new() }),
             dataset_icon(&DataSource::Recorded { path: String::new() }),
-            dataset_icon(&DataSource::Synthetic { kind: SyntheticKind::Xor, samples: 1 }),
+            dataset_icon(&DataSource::Synthetic {
+                kind: SyntheticKind::Xor,
+                samples: 1,
+            }),
         ];
         let mut sorted = icons;
         sorted.sort_unstable();
-        sorted.iter().zip(sorted.iter().skip(1)).for_each(|(a, b)| assert_ne!(a, b));
+        sorted
+            .iter()
+            .zip(sorted.iter().skip(1))
+            .for_each(|(a, b)| assert_ne!(a, b));
     }
 }

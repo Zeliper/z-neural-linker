@@ -26,7 +26,9 @@ pub fn with_project_ext(path: PathBuf) -> PathBuf {
 
 /// 프로젝트 파일이 있는 폴더. 데이터셋 상대 경로·실행 폴더의 기준이다.
 pub fn base_dir(path: &Path) -> PathBuf {
-    path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// 실행 기록 폴더: 설정에 적힌 곳, 없으면 `<프로젝트 파일 이름>.runs/`.
@@ -42,7 +44,10 @@ pub fn runs_dir(path: &Path, project: &Project) -> PathBuf {
             }
         }
         _ => {
-            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| project.name.clone());
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| project.name.clone());
             base.join(format!("{stem}.runs"))
         }
     }
@@ -51,7 +56,10 @@ pub fn runs_dir(path: &Path, project: &Project) -> PathBuf {
 pub fn load(path: &Path) -> Result<Loaded, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let file = ProjectFile::from_json(&text).map_err(|e| e.to_string())?;
-    Ok(Loaded { newer: file.newer_than_app(), project: file.project })
+    Ok(Loaded {
+        newer: file.newer_than_app(),
+        project: file.project,
+    })
 }
 
 pub fn save(path: &Path, project: &Project) -> Result<(), String> {
@@ -62,9 +70,16 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
 /// 임시 파일 + rename. 같은 폴더에 써야 rename 이 같은 파일 시스템 안에서 일어난다.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".into());
     let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
@@ -163,9 +178,18 @@ mod tests {
     #[test]
     fn extension_is_added_but_not_doubled() {
         assert_eq!(with_project_ext(PathBuf::from("/a/b")), PathBuf::from("/a/b.nlproj"));
-        assert_eq!(with_project_ext(PathBuf::from("/a/b.nlproj")), PathBuf::from("/a/b.nlproj"));
-        assert_eq!(with_project_ext(PathBuf::from("/a/b.NLPROJ")), PathBuf::from("/a/b.NLPROJ"));
-        assert_eq!(with_project_ext(PathBuf::from("/a/b.json")), PathBuf::from("/a/b.nlproj"));
+        assert_eq!(
+            with_project_ext(PathBuf::from("/a/b.nlproj")),
+            PathBuf::from("/a/b.nlproj")
+        );
+        assert_eq!(
+            with_project_ext(PathBuf::from("/a/b.NLPROJ")),
+            PathBuf::from("/a/b.NLPROJ")
+        );
+        assert_eq!(
+            with_project_ext(PathBuf::from("/a/b.json")),
+            PathBuf::from("/a/b.nlproj")
+        );
     }
 
     #[test]

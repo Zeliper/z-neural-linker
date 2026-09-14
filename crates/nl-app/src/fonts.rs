@@ -33,7 +33,8 @@ pub fn font_definitions() -> FontDefinitions {
     match std::fs::read(&path) {
         Ok(bytes) => {
             log::info!("CJK 폰트(폴백): {}", path.display());
-            defs.font_data.insert(FALLBACK_KEY.into(), Arc::new(FontData::from_owned(bytes)));
+            defs.font_data
+                .insert(FALLBACK_KEY.into(), Arc::new(FontData::from_owned(bytes)));
             for fam in [FontFamily::Proportional, FontFamily::Monospace] {
                 defs.families.entry(fam).or_default().push(FALLBACK_KEY.into());
             }
@@ -84,7 +85,8 @@ pub fn font_score(file_name: &str) -> u32 {
         return 0;
     };
     // 모노 전용은 본문 폰트로 쓰기 나쁘고, 가변 폰트는 ttf-parser 지원이 갈린다.
-    let penalty: u32 = u32::from(lower.contains("mono")) * 20 + u32::from(lower.contains("-vf") || lower.contains("_vf")) * 15;
+    let penalty: u32 =
+        u32::from(lower.contains("mono")) * 20 + u32::from(lower.contains("-vf") || lower.contains("_vf")) * 15;
     let weight: u32 = if lower.contains("regular") {
         9
     } else if lower.contains("medium") {
@@ -134,14 +136,10 @@ fn walk(dir: &Path, depth: usize, visit: &mut impl FnMut(&Path, &str)) {
 /// 반드시 이 목록에 넣고 `ui_icons_are_renderable` 로 확인한다.
 pub const UI_ICONS: &[&str] = &[
     // 툴바
-    "🗋", "📂", "💾", "⟲", "⟳", "🖳", "▶", "⏸", "⏹", "📋", "▤", "☰",
-    // 아웃라인
-    "📁", "⚛", "🗄", "🖼", "⏺", "✨", "🔌", "⇄", "＋",
-    // 하단 도크
-    "⚠", "🕘", "✖", "✔",
-    // 캔버스 메뉴
-    "⎘", "⊘", "🗑",
-    // 데이터·학습 뷰
+    "🗋", "📂", "💾", "⟲", "⟳", "🖳", "▶", "⏸", "⏹", "📋", "▤", "☰", // 아웃라인
+    "📁", "⚛", "🗄", "🖼", "⏺", "✨", "🔌", "⇄", "＋", // 하단 도크
+    "⚠", "🕘", "✖", "✔", // 캔버스 메뉴
+    "⎘", "⊘", "🗑", // 데이터·학습 뷰
     "🔍", "👁", "▲", "▼", "●", "■", "⛶",
 ];
 
@@ -189,7 +187,11 @@ mod tests {
         let chars = fonts.fonts.font(&FontFamily::Proportional).characters().clone();
         for icon in UI_ICONS {
             for c in icon.chars() {
-                assert!(chars.contains_key(&c), "아이콘 {icon:?}(U+{:04X}) 글리프가 없어 두부로 보인다", c as u32);
+                assert!(
+                    chars.contains_key(&c),
+                    "아이콘 {icon:?}(U+{:04X}) 글리프가 없어 두부로 보인다",
+                    c as u32
+                );
             }
         }
     }
@@ -199,7 +201,10 @@ mod tests {
     fn the_fallback_stays_out_of_the_way_when_nl_gui_found_a_font() {
         let defs = font_definitions();
         if defs.font_data.contains_key(NL_GUI_KEY) {
-            assert!(!defs.font_data.contains_key(FALLBACK_KEY), "nl-gui 가 찾았는데 폴백까지 실렸다");
+            assert!(
+                !defs.font_data.contains_key(FALLBACK_KEY),
+                "nl-gui 가 찾았는데 폴백까지 실렸다"
+            );
         }
     }
 
@@ -212,7 +217,9 @@ mod tests {
         if has_font {
             let names: Vec<&String> = defs.font_data.keys().collect();
             assert!(
-                names.iter().any(|n| n.as_str() == NL_GUI_KEY || n.as_str() == FALLBACK_KEY),
+                names
+                    .iter()
+                    .any(|n| n.as_str() == NL_GUI_KEY || n.as_str() == FALLBACK_KEY),
                 "한글 폰트가 실리지 않았다: {names:?}"
             );
             let prop = defs.families.get(&FontFamily::Proportional).expect("비례 폰트 가족");

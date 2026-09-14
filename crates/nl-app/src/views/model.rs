@@ -24,33 +24,37 @@ pub fn show(
     let active = ctx.active_model();
 
     // ── 모델 선택 줄 ────────────────────────────────────────────
-    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("모델").color(COL_WEAK));
-            let current = active.and_then(|m| ctx.project.models.get(&m));
-            let label = current.map(|m| m.name.clone()).unwrap_or_else(|| "(없음)".into());
-            egui::ComboBox::from_id_salt("model-picker").selected_text(label).show_ui(ui, |ui| {
-                for (id, m) in &ctx.project.models {
-                    if ui.selectable_label(active == Some(*id), &m.name).clicked() {
-                        out.actions.push(ViewAction::Select(Selection::Model(*id)));
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("모델").color(COL_WEAK));
+                let current = active.and_then(|m| ctx.project.models.get(&m));
+                let label = current.map(|m| m.name.clone()).unwrap_or_else(|| "(없음)".into());
+                egui::ComboBox::from_id_salt("model-picker")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (id, m) in &ctx.project.models {
+                            if ui.selectable_label(active == Some(*id), &m.name).clicked() {
+                                out.actions.push(ViewAction::Select(Selection::Model(*id)));
+                            }
+                        }
+                    });
+                if ui.button("＋ 새 모델").clicked() {
+                    let m = ModelDef::new(format!("모델 {}", ctx.project.models.len() + 1));
+                    let id = m.id;
+                    out.actions.push(ViewAction::Ops(nl_core::ops::restore_model(&m)));
+                    out.actions.push(ViewAction::Select(Selection::Model(id)));
+                }
+                if let Some(id) = active {
+                    if ui.button("⛶ 전체 보기").on_hover_text("F").clicked() {
+                        canvas.request_fit();
                     }
+                    ui.separator();
+                    summary(ui, ctx, id, report);
                 }
             });
-            if ui.button("＋ 새 모델").clicked() {
-                let m = ModelDef::new(format!("모델 {}", ctx.project.models.len() + 1));
-                let id = m.id;
-                out.actions.push(ViewAction::Ops(nl_core::ops::restore_model(&m)));
-                out.actions.push(ViewAction::Select(Selection::Model(id)));
-            }
-            if let Some(id) = active {
-                if ui.button("⛶ 전체 보기").on_hover_text("F").clicked() {
-                    canvas.request_fit();
-                }
-                ui.separator();
-                summary(ui, ctx, id, report);
-            }
         });
-    });
     ui.separator();
 
     // ── 캔버스 ──────────────────────────────────────────────────

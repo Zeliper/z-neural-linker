@@ -43,7 +43,12 @@ impl Reason {
 impl Outside {
     /// 문제 탭 한 줄.
     pub fn message(&self) -> String {
-        format!("{}: 프로젝트 폴더 밖을 가리킵니다 ({}) — {}", self.what, self.why.label(), self.path)
+        format!(
+            "{}: 프로젝트 폴더 밖을 가리킵니다 ({}) — {}",
+            self.what,
+            self.why.label(),
+            self.path
+        )
     }
 }
 
@@ -54,7 +59,11 @@ pub fn outside_project(rel: &str) -> Option<Reason> {
         return None;
     }
     // 절대 경로와 윈도우 드라이브·UNC 접두사.
-    if p.is_absolute() || p.components().next().is_some_and(|c| matches!(c, Component::Prefix(_) | Component::RootDir)) {
+    if p.is_absolute()
+        || p.components()
+            .next()
+            .is_some_and(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+    {
         return Some(Reason::Absolute);
     }
     // `a/../b` 는 안에 머물지만 `../b` 는 벗어난다. 깊이를 세어 본다.
@@ -80,7 +89,11 @@ pub fn scan(project: &Project) -> Vec<Outside> {
     let mut out = Vec::new();
     let mut push = |what: String, path: &str| {
         if let Some(why) = outside_project(path) {
-            out.push(Outside { what, path: path.to_string(), why });
+            out.push(Outside {
+                what,
+                path: path.to_string(),
+                why,
+            });
         }
     };
 

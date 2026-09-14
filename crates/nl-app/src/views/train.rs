@@ -3,7 +3,9 @@
 //! 학습은 `nl_engine::start` 가 만든 별도 스레드에서 돌고 UI 스레드는 이벤트만 받는다
 //! (GPU 계산 컨텍스트와 GUI 렌더 컨텍스트가 다르므로 — `docs/ARCHITECTURE.md` 플랫폼 주의사항).
 
-use super::{fmt_duration, fmt_metric, ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_SELECT, COL_SURFACE, COL_WARN, COL_WEAK};
+use super::{
+    fmt_duration, fmt_metric, ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_SELECT, COL_SURFACE, COL_WARN, COL_WEAK,
+};
 use crate::canvas::Selection;
 use eframe::egui::{self, RichText};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
@@ -88,6 +90,7 @@ impl TrainSession {
             device_name: String::new(),
             epochs: Vec::new(),
             checkpoint: None,
+            best_checkpoint: None,
             error: None,
             note: String::new(),
         };
@@ -121,7 +124,11 @@ impl TrainSession {
         while let Ok(ev) = self.handle.events.try_recv() {
             out.changed = true;
             match ev {
-                TrainEvent::Started { device, batches_per_epoch, params } => {
+                TrainEvent::Started {
+                    device,
+                    batches_per_epoch,
+                    params,
+                } => {
                     self.device = device.clone();
                     self.run.device_name = device;
                     self.batches_per_epoch = batches_per_epoch;
@@ -171,7 +178,11 @@ impl TrainSession {
             }
         }
         if self.state.is_live() {
-            self.state = if self.handle.is_paused() { SessionState::Paused } else { SessionState::Running };
+            self.state = if self.handle.is_paused() {
+                SessionState::Paused
+            } else {
+                SessionState::Running
+            };
         }
         out
     }
@@ -204,6 +215,7 @@ fn blank_run() -> RunRecord {
         device_name: String::new(),
         epochs: Vec::new(),
         checkpoint: None,
+        best_checkpoint: None,
         error: None,
         note: String::new(),
     }
@@ -221,6 +233,9 @@ pub fn merge_final(ui: RunRecord, engine: RunRecord) -> RunRecord {
     }
     if r.checkpoint.is_none() {
         r.checkpoint = ui.checkpoint;
+    }
+    if r.best_checkpoint.is_none() {
+        r.best_checkpoint = ui.best_checkpoint;
     }
     if r.finished.is_none() {
         r.finished = Some(chrono::Utc::now());
@@ -283,110 +298,133 @@ fn controls(
         ui.label(RichText::new("모델이 없습니다. 모델 뷰에서 먼저 만드세요.").color(COL_WARN));
         return;
     };
-    let Some(model) = ctx.project.models.get(&model_id) else { return };
-    let dataset_id = state.dataset_override.filter(|d| ctx.project.datasets.contains_key(d)).or(model.train.dataset);
+    let Some(model) = ctx.project.models.get(&model_id) else {
+        return;
+    };
+    let dataset_id = state
+        .dataset_override
+        .filter(|d| ctx.project.datasets.contains_key(d))
+        .or(model.train.dataset);
 
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("모델").color(COL_WEAK));
-            egui::ComboBox::from_id_salt("train-model").selected_text(&model.name).show_ui(ui, |ui| {
-                for (id, m) in &ctx.project.models {
-                    if ui.selectable_label(*id == model_id, &m.name).clicked() {
-                        actions.push(ViewAction::Select(Selection::Model(*id)));
-                    }
-                }
-            });
-            ui.separator();
-            ui.label(RichText::new("데이터셋").color(COL_WEAK));
-            let label = dataset_id
-                .and_then(|d| ctx.project.datasets.get(&d))
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| "(없음)".into());
-            egui::ComboBox::from_id_salt("train-dataset").selected_text(label).show_ui(ui, |ui| {
-                for (id, d) in &ctx.project.datasets {
-                    if ui.selectable_label(dataset_id == Some(*id), &d.name).clicked() {
-                        state.dataset_override = Some(*id);
-                    }
-                }
-            });
-        });
-
-        ui.add_space(6.0);
-        let c = &model.train;
-        ui.horizontal_wrapped(|ui| {
-            chip(ui, "옵티마이저", format!("{} lr {}", c.optimizer.label(), c.optimizer.lr()));
-            chip(ui, "손실", c.loss.label().to_string());
-            chip(ui, "지표", c.metric.label().to_string());
-            chip(ui, "에포크", c.epochs.to_string());
-            chip(ui, "배치", c.batch_size.to_string());
-            chip(ui, "장치", c.device.label());
-            chip(ui, "검증", format!("{:.0}%", c.val_split * 100.0));
-            if c.grad_clip > 0.0 {
-                chip(ui, "클리핑", format!("{:.2}", c.grad_clip));
-            }
-            if c.checkpoint_every > 0 {
-                chip(ui, "체크포인트", format!("{}에포크마다", c.checkpoint_every));
-            }
-        });
-
-        ui.add_space(8.0);
-        let live = ctx.training.map(|t| t.state).filter(|s| s.is_live());
-        ui.horizontal(|ui| {
-            match live {
-                None => {
-                    let ready = dataset_id.is_some();
-                    ui.add_enabled_ui(ready, |ui| {
-                        if ui.button(RichText::new("▶ 학습 시작").color(COL_OK)).clicked() {
-                            actions.push(ViewAction::StartTrain { model: model_id, dataset: dataset_id.unwrap() });
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(10)
+        .corner_radius(5)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("모델").color(COL_WEAK));
+                egui::ComboBox::from_id_salt("train-model")
+                    .selected_text(&model.name)
+                    .show_ui(ui, |ui| {
+                        for (id, m) in &ctx.project.models {
+                            if ui.selectable_label(*id == model_id, &m.name).clicked() {
+                                actions.push(ViewAction::Select(Selection::Model(*id)));
+                            }
                         }
                     });
-                    if !ready {
-                        ui.label(RichText::new("데이터셋을 고르세요").color(COL_WARN).size(11.5));
-                    } else if !ctx.saved() {
-                        ui.label(
-                            RichText::new("저장되지 않은 프로젝트입니다 — 시작하면 저장을 먼저 요청합니다")
-                                .color(COL_WARN)
-                                .size(11.5),
-                        );
-                    }
+                ui.separator();
+                ui.label(RichText::new("데이터셋").color(COL_WEAK));
+                let label = dataset_id
+                    .and_then(|d| ctx.project.datasets.get(&d))
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| "(없음)".into());
+                egui::ComboBox::from_id_salt("train-dataset")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (id, d) in &ctx.project.datasets {
+                            if ui.selectable_label(dataset_id == Some(*id), &d.name).clicked() {
+                                state.dataset_override = Some(*id);
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(6.0);
+            let c = &model.train;
+            ui.horizontal_wrapped(|ui| {
+                chip(
+                    ui,
+                    "옵티마이저",
+                    format!("{} lr {}", c.optimizer.label(), c.optimizer.lr()),
+                );
+                chip(ui, "손실", c.loss.label().to_string());
+                chip(ui, "지표", c.metric.label().to_string());
+                chip(ui, "에포크", c.epochs.to_string());
+                chip(ui, "배치", c.batch_size.to_string());
+                chip(ui, "장치", c.device.label());
+                chip(ui, "검증", format!("{:.0}%", c.val_split * 100.0));
+                if c.grad_clip > 0.0 {
+                    chip(ui, "클리핑", format!("{:.2}", c.grad_clip));
                 }
-                Some(SessionState::Running) => {
-                    if ui.button("⏸ 일시정지").clicked() {
-                        actions.push(ViewAction::PauseTrain);
-                    }
-                    if ui.button(RichText::new("⏹ 정지").color(COL_ERROR)).clicked() {
-                        actions.push(ViewAction::StopTrain);
-                    }
+                if c.checkpoint_every > 0 {
+                    chip(ui, "체크포인트", format!("{}에포크마다", c.checkpoint_every));
                 }
-                Some(SessionState::Paused) => {
-                    if ui.button("▶ 재개").clicked() {
-                        actions.push(ViewAction::ResumeTrain);
+            });
+
+            ui.add_space(8.0);
+            let live = ctx.training.map(|t| t.state).filter(|s| s.is_live());
+            ui.horizontal(|ui| {
+                match live {
+                    None => {
+                        let ready = dataset_id.is_some();
+                        ui.add_enabled_ui(ready, |ui| {
+                            if ui.button(RichText::new("▶ 학습 시작").color(COL_OK)).clicked() {
+                                actions.push(ViewAction::StartTrain {
+                                    model: model_id,
+                                    dataset: dataset_id.unwrap(),
+                                });
+                            }
+                        });
+                        if !ready {
+                            ui.label(RichText::new("데이터셋을 고르세요").color(COL_WARN).size(11.5));
+                        } else if !ctx.saved() {
+                            ui.label(
+                                RichText::new("저장되지 않은 프로젝트입니다 — 시작하면 저장을 먼저 요청합니다")
+                                    .color(COL_WARN)
+                                    .size(11.5),
+                            );
+                        }
                     }
-                    if ui.button(RichText::new("⏹ 정지").color(COL_ERROR)).clicked() {
-                        actions.push(ViewAction::StopTrain);
+                    Some(SessionState::Running) => {
+                        if ui.button("⏸ 일시정지").clicked() {
+                            actions.push(ViewAction::PauseTrain);
+                        }
+                        if ui.button(RichText::new("⏹ 정지").color(COL_ERROR)).clicked() {
+                            actions.push(ViewAction::StopTrain);
+                        }
                     }
+                    Some(SessionState::Paused) => {
+                        if ui.button("▶ 재개").clicked() {
+                            actions.push(ViewAction::ResumeTrain);
+                        }
+                        if ui.button(RichText::new("⏹ 정지").color(COL_ERROR)).clicked() {
+                            actions.push(ViewAction::StopTrain);
+                        }
+                    }
+                    Some(_) => {}
                 }
-                Some(_) => {}
-            }
-            ui.checkbox(&mut state.show_steps, "스텝 손실 표시");
+                ui.checkbox(&mut state.show_steps, "스텝 손실 표시");
+            });
         });
-    });
 }
 
 fn chip(ui: &mut egui::Ui, key: &str, value: String) {
-    egui::Frame::NONE.fill(egui::Color32::from_rgb(0x25, 0x29, 0x30)).inner_margin(egui::Margin::symmetric(7, 3)).corner_radius(3).show(
-        ui,
-        |ui| {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(0x25, 0x29, 0x30))
+        .inner_margin(egui::Margin::symmetric(7, 3))
+        .corner_radius(3)
+        .show(ui, |ui| {
             ui.label(RichText::new(format!("{key} {value}")).size(11.5));
-        },
-    );
+        });
 }
 
 /// 진행 바 · 현재 지표 · 경과 시간.
 fn live(ui: &mut egui::Ui, ctx: &ViewCtx) {
     let Some(t) = ctx.training else { return };
     ui.horizontal(|ui| {
-        let bar = egui::ProgressBar::new(t.progress().unwrap_or(0.0)).desired_width(260.0).show_percentage();
+        let bar = egui::ProgressBar::new(t.progress().unwrap_or(0.0))
+            .desired_width(260.0)
+            .show_percentage();
         ui.add(bar);
         ui.label(format!("경과 {}", fmt_duration(t.elapsed)));
         if !t.device.is_empty() {
@@ -434,14 +472,26 @@ fn plot(ui: &mut egui::Ui, ctx: &ViewCtx, state: &TrainViewState) {
         (None, None) => (&[], &[], 0, "손실".into()),
     };
     if epochs.is_empty() && steps.is_empty() {
-        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(14).corner_radius(5).show(ui, |ui| {
-            ui.label(RichText::new("아직 그릴 곡선이 없습니다. 학습을 시작하거나 아래 표에서 실행을 고르세요.").color(COL_WEAK));
-        });
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(14)
+            .corner_radius(5)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("아직 그릴 곡선이 없습니다. 학습을 시작하거나 아래 표에서 실행을 고르세요.")
+                        .color(COL_WEAK),
+                );
+            });
         return;
     }
-    let train: Vec<[f64; 2]> = epochs.iter().map(|e| [epoch_x(e.epoch, batches), e.train_loss]).collect();
-    let val: Vec<[f64; 2]> =
-        epochs.iter().filter_map(|e| e.val_loss.map(|v| [epoch_x(e.epoch, batches), v])).collect();
+    let train: Vec<[f64; 2]> = epochs
+        .iter()
+        .map(|e| [epoch_x(e.epoch, batches), e.train_loss])
+        .collect();
+    let val: Vec<[f64; 2]> = epochs
+        .iter()
+        .filter_map(|e| e.val_loss.map(|v| [epoch_x(e.epoch, batches), v]))
+        .collect();
     let show_steps = state.show_steps && !steps.is_empty();
     let step_points: Vec<[f64; 2]> = if show_steps { steps.to_vec() } else { Vec::new() };
 
@@ -452,10 +502,18 @@ fn plot(ui: &mut egui::Ui, ctx: &ViewCtx, state: &TrainViewState) {
         .y_axis_label("손실")
         .show(ui, |p| {
             if show_steps {
-                p.line(Line::new("스텝 손실", PlotPoints::from(step_points)).width(0.8).color(COL_WEAK));
+                p.line(
+                    Line::new("스텝 손실", PlotPoints::from(step_points))
+                        .width(0.8)
+                        .color(COL_WEAK),
+                );
             }
             if !train.is_empty() {
-                p.line(Line::new("학습 손실", PlotPoints::from(train)).width(2.4).color(COL_SELECT));
+                p.line(
+                    Line::new("학습 손실", PlotPoints::from(train))
+                        .width(2.4)
+                        .color(COL_SELECT),
+                );
             }
             if !val.is_empty() {
                 p.line(Line::new("검증 손실", PlotPoints::from(val)).width(2.4).color(COL_OK));
@@ -464,7 +522,10 @@ fn plot(ui: &mut egui::Ui, ctx: &ViewCtx, state: &TrainViewState) {
     ui.label(RichText::new(title).color(COL_WEAK).size(11.0));
 
     // 학습률은 손실과 자릿수가 딴판이라(1e-3 대 1) 같은 축에 겹치면 한쪽이 납작해진다. 따로 그린다.
-    let lr: Vec<[f64; 2]> = epochs.iter().filter_map(|e| e.lr.map(|v| [epoch_x(e.epoch, batches), v])).collect();
+    let lr: Vec<[f64; 2]> = epochs
+        .iter()
+        .filter_map(|e| e.lr.map(|v| [epoch_x(e.epoch, batches), v]))
+        .collect();
     if lr.len() >= 2 {
         ui.add_space(6.0);
         Plot::new("lr-plot")
@@ -489,49 +550,82 @@ fn runs_table(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut TrainViewState, acti
     let mut rows: Vec<(&RunId, &RunRecord)> = ctx.project.runs.iter().collect();
     rows.sort_by_key(|a| std::cmp::Reverse(a.1.started));
 
-    egui::Grid::new("runs-table").striped(true).num_columns(9).spacing([10.0, 4.0]).show(ui, |ui| {
-        for h in ["시작", "상태", "에포크", "최종 손실", "최고 val", "마지막 lr", "장치", "체크포인트", ""] {
-            ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
-        }
-        ui.end_row();
-        for (id, r) in rows {
-            let selected = state.selected_run == Some(*id);
-            let started = r.started.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string();
-            if ui.selectable_label(selected, started).clicked() {
-                state.selected_run = if selected { None } else { Some(*id) };
-                actions.push(ViewAction::Select(Selection::Run(*id)));
+    egui::Grid::new("runs-table")
+        .striped(true)
+        .num_columns(9)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            for h in [
+                "시작",
+                "상태",
+                "에포크",
+                "최종 손실",
+                "최고 val",
+                "마지막 lr",
+                "장치",
+                "체크포인트",
+                "",
+            ] {
+                ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
             }
-            ui.label(RichText::new(status_label(r.status)).color(status_color(r.status)));
-            ui.label(format!("{}/{}", r.epochs.len(), r.config.epochs));
-            ui.label(r.last().map(|e| fmt_metric(e.train_loss)).unwrap_or_else(|| "-".into()));
-            ui.label(r.best_val_loss().map(fmt_metric).unwrap_or_else(|| "-".into()));
-            // 스케줄이 없으면 엔진이 lr 을 채우지 않는다 — 그때는 빈 칸이 맞다.
-            ui.label(r.last().and_then(|e| e.lr).map(fmt_lr).unwrap_or_else(|| "-".into()));
-            ui.label(if r.device_name.is_empty() { "-" } else { r.device_name.as_str() });
-            match &r.checkpoint {
-                Some(p) => {
-                    ui.label(RichText::new(super::short_path(p)).size(11.0)).on_hover_text(p);
+            ui.end_row();
+            for (id, r) in rows {
+                let selected = state.selected_run == Some(*id);
+                let started = r
+                    .started
+                    .with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M:%S")
+                    .to_string();
+                if ui.selectable_label(selected, started).clicked() {
+                    state.selected_run = if selected { None } else { Some(*id) };
+                    actions.push(ViewAction::Select(Selection::Run(*id)));
                 }
-                None => {
-                    ui.label("-");
+                ui.label(RichText::new(status_label(r.status)).color(status_color(r.status)));
+                ui.label(format!("{}/{}", r.epochs.len(), r.config.epochs));
+                ui.label(r.last().map(|e| fmt_metric(e.train_loss)).unwrap_or_else(|| "-".into()));
+                ui.label(r.best_val_loss().map(fmt_metric).unwrap_or_else(|| "-".into()));
+                // 스케줄이 없으면 엔진이 lr 을 채우지 않는다 — 그때는 빈 칸이 맞다.
+                ui.label(r.last().and_then(|e| e.lr).map(fmt_lr).unwrap_or_else(|| "-".into()));
+                ui.label(if r.device_name.is_empty() {
+                    "-"
+                } else {
+                    r.device_name.as_str()
+                });
+                match &r.checkpoint {
+                    Some(p) => {
+                        // 조기 종료를 켜면 마지막이 아니라 검증 손실이 가장 낮았던 가중치가 남는다.
+                        let best = r.best_checkpoint.as_deref() == Some(p.as_str());
+                        let label = if best {
+                            format!("{} (최고)", super::short_path(p))
+                        } else {
+                            super::short_path(p)
+                        };
+                        ui.label(RichText::new(label).size(11.0)).on_hover_text(p);
+                    }
+                    None => {
+                        ui.label("-");
+                    }
                 }
-            }
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(r.checkpoint.is_some(), |ui| {
-                    if ui.small_button("가중치 적용").on_hover_text("이 실행의 체크포인트를 모델 가중치로").clicked() {
-                        actions.push(ViewAction::ApplyRunWeights(*id));
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(r.checkpoint.is_some(), |ui| {
+                        if ui
+                            .small_button("가중치 적용")
+                            .on_hover_text("이 실행의 체크포인트를 모델 가중치로")
+                            .clicked()
+                        {
+                            actions.push(ViewAction::ApplyRunWeights(*id));
+                        }
+                    });
+                    if ui.small_button("🗑").on_hover_text("실행 기록 삭제").clicked() {
+                        actions.push(ViewAction::Ops(vec![nl_core::Op::DeleteRun { id: *id }]));
+                        if state.selected_run == Some(*id) {
+                            state.selected_run = None;
+                        }
                     }
                 });
-                if ui.small_button("🗑").on_hover_text("실행 기록 삭제").clicked() {
-                    actions.push(ViewAction::Ops(vec![nl_core::Op::DeleteRun { id: *id }]));
-                    if state.selected_run == Some(*id) {
-                        state.selected_run = None;
-                    }
-                }
-            });
-            ui.end_row();
-        }
-    });
+                ui.end_row();
+            }
+        });
     if let Some(r) = state.selected_run.and_then(|id| ctx.project.runs.get(&id)) {
         if let Some(e) = &r.error {
             ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.5));
@@ -580,14 +674,22 @@ mod tests {
     #[test]
     fn merge_final_fills_gaps_from_the_ui_record() {
         let mut ui = blank_run();
-        ui.epochs = vec![EpochMetrics { epoch: 0, train_loss: 1.0, ..Default::default() }];
+        ui.epochs = vec![EpochMetrics {
+            epoch: 0,
+            train_loss: 1.0,
+            ..Default::default()
+        }];
         ui.device_name = "CPU".into();
         ui.checkpoint = Some("a.safetensors".into());
+        ui.best_checkpoint = Some("best.safetensors".into());
+        let ui_best = ui.best_checkpoint.clone();
         let engine = blank_run();
         let merged = merge_final(ui, engine);
         assert_eq!(merged.epochs.len(), 1);
         assert_eq!(merged.device_name, "CPU");
         assert_eq!(merged.checkpoint.as_deref(), Some("a.safetensors"));
+        // 조기 종료가 남긴 "가장 좋았던" 가중치도 UI 기록에서 이어받는다.
+        assert_eq!(merged.best_checkpoint, ui_best);
         assert!(merged.finished.is_some());
     }
 
@@ -597,7 +699,11 @@ mod tests {
         ui.device_name = "CPU".into();
         let mut engine = blank_run();
         engine.device_name = "GPU 0".into();
-        engine.epochs = vec![EpochMetrics { epoch: 9, train_loss: 0.1, ..Default::default() }];
+        engine.epochs = vec![EpochMetrics {
+            epoch: 9,
+            train_loss: 0.1,
+            ..Default::default()
+        }];
         let merged = merge_final(ui, engine);
         assert_eq!(merged.device_name, "GPU 0");
         assert_eq!(merged.epochs.len(), 1);

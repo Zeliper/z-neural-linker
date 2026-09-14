@@ -24,7 +24,9 @@ impl NlApp {
                         ui.label(RichText::new("선택된 항목이 없습니다").color(COL_WEAK));
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new("좌측 아웃라인이나 캔버스에서 대상을 고르세요.").color(COL_WEAK).size(11.5),
+                            RichText::new("좌측 아웃라인이나 캔버스에서 대상을 고르세요.")
+                                .color(COL_WEAK)
+                                .size(11.5),
                         );
                         Vec::new()
                     }
@@ -109,10 +111,16 @@ impl NlApp {
         let doc = &mut self.doc;
         let mut changed = false;
         ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-        changed |= ui.add(egui::TextEdit::singleline(&mut doc.project.name).desired_width(f32::INFINITY)).changed();
+        changed |= ui
+            .add(egui::TextEdit::singleline(&mut doc.project.name).desired_width(f32::INFINITY))
+            .changed();
         ui.label(RichText::new("설명").color(COL_WEAK).size(11.5));
         changed |= ui
-            .add(egui::TextEdit::multiline(&mut doc.project.description).desired_rows(3).desired_width(f32::INFINITY))
+            .add(
+                egui::TextEdit::multiline(&mut doc.project.description)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            )
             .changed();
         ui.add_space(6.0);
         ui.label(RichText::new("기본 장치").color(COL_WEAK).size(11.5));
@@ -122,18 +130,20 @@ impl NlApp {
             .find(|(pref, _)| *pref == current)
             .map(|(_, name)| name.clone())
             .unwrap_or_else(|| current.label());
-        egui::ComboBox::from_id_salt("insp-device").selected_text(label).show_ui(ui, |ui| {
-            if ui.selectable_label(current == DevicePref::Auto, "자동").clicked() && current != DevicePref::Auto {
-                doc.project.settings.default_device = DevicePref::Auto;
-                changed = true;
-            }
-            for (pref, name) in &devices {
-                if ui.selectable_label(current == *pref, name).clicked() && current != *pref {
-                    doc.project.settings.default_device = *pref;
+        egui::ComboBox::from_id_salt("insp-device")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current == DevicePref::Auto, "자동").clicked() && current != DevicePref::Auto {
+                    doc.project.settings.default_device = DevicePref::Auto;
                     changed = true;
                 }
-            }
-        });
+                for (pref, name) in &devices {
+                    if ui.selectable_label(current == *pref, name).clicked() && current != *pref {
+                        doc.project.settings.default_device = *pref;
+                        changed = true;
+                    }
+                }
+            });
         ui.add_space(6.0);
         views::kv(ui, "모델", doc.project.models.len().to_string());
         views::kv(ui, "데이터셋", doc.project.datasets.len().to_string());
@@ -152,10 +162,20 @@ impl NlApp {
     // ── 모델 ────────────────────────────────────────────────────
 
     fn inspect_model(&mut self, ui: &mut egui::Ui, id: nl_core::ModelId, now: f64) {
-        let payloads: Vec<(PayloadId, String)> =
-            self.doc.project.payloads.iter().map(|(k, v)| (*k, v.name.clone())).collect();
-        let datasets: Vec<(nl_core::DatasetId, String)> =
-            self.doc.project.datasets.iter().map(|(k, v)| (*k, v.name.clone())).collect();
+        let payloads: Vec<(PayloadId, String)> = self
+            .doc
+            .project
+            .payloads
+            .iter()
+            .map(|(k, v)| (*k, v.name.clone()))
+            .collect();
+        let datasets: Vec<(nl_core::DatasetId, String)> = self
+            .doc
+            .project
+            .datasets
+            .iter()
+            .map(|(k, v)| (*k, v.name.clone()))
+            .collect();
         let devices = self.devices_snapshot();
         let doc = &mut self.doc;
         let Some(model) = doc.project.models.get_mut(&id) else {
@@ -166,30 +186,46 @@ impl NlApp {
         ui.label(RichText::new("모델").size(15.0).strong());
         ui.separator();
         ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-        changed |= ui.add(egui::TextEdit::singleline(&mut model.name).desired_width(f32::INFINITY)).changed();
+        changed |= ui
+            .add(egui::TextEdit::singleline(&mut model.name).desired_width(f32::INFINITY))
+            .changed();
         ui.label(RichText::new("설명").color(COL_WEAK).size(11.5));
         changed |= ui
-            .add(egui::TextEdit::multiline(&mut model.description).desired_rows(2).desired_width(f32::INFINITY))
+            .add(
+                egui::TextEdit::multiline(&mut model.description)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            )
             .changed();
 
         ui.add_space(4.0);
         ui.label(RichText::new("페이로드").color(COL_WEAK).size(11.5));
         let cur = model.payload;
-        let label = cur.and_then(|p| payloads.iter().find(|(k, _)| *k == p)).map(|(_, n)| n.clone()).unwrap_or_else(|| "(없음)".into());
-        egui::ComboBox::from_id_salt("insp-model-payload").selected_text(label).show_ui(ui, |ui| {
-            if ui.selectable_label(cur.is_none(), "(없음)").clicked() && cur.is_some() {
-                model.payload = None;
-                changed = true;
-            }
-            for (pid, name) in &payloads {
-                if ui.selectable_label(cur == Some(*pid), name).clicked() && cur != Some(*pid) {
-                    model.payload = Some(*pid);
+        let label = cur
+            .and_then(|p| payloads.iter().find(|(k, _)| *k == p))
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| "(없음)".into());
+        egui::ComboBox::from_id_salt("insp-model-payload")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(cur.is_none(), "(없음)").clicked() && cur.is_some() {
+                    model.payload = None;
                     changed = true;
                 }
-            }
-        });
+                for (pid, name) in &payloads {
+                    if ui.selectable_label(cur == Some(*pid), name).clicked() && cur != Some(*pid) {
+                        model.payload = Some(*pid);
+                        changed = true;
+                    }
+                }
+            });
         if let Some(w) = &model.weights {
-            ui.label(RichText::new(format!("가중치: {}", views::short_path(w))).color(COL_OK).size(11.0)).on_hover_text(w);
+            ui.label(
+                RichText::new(format!("가중치: {}", views::short_path(w)))
+                    .color(COL_OK)
+                    .size(11.0),
+            )
+            .on_hover_text(w);
         } else {
             ui.label(RichText::new("학습된 가중치 없음").color(COL_WARN).size(11.0));
         }
@@ -201,97 +237,126 @@ impl NlApp {
 
         ui.label(RichText::new("데이터셋").color(COL_WEAK).size(11.5));
         let cur_ds = c.dataset;
-        let ds_label =
-            cur_ds.and_then(|d| datasets.iter().find(|(k, _)| *k == d)).map(|(_, n)| n.clone()).unwrap_or_else(|| "(없음)".into());
-        egui::ComboBox::from_id_salt("insp-train-dataset").selected_text(ds_label).show_ui(ui, |ui| {
-            if ui.selectable_label(cur_ds.is_none(), "(없음)").clicked() && cur_ds.is_some() {
-                c.dataset = None;
-                changed = true;
-            }
-            for (did, name) in &datasets {
-                if ui.selectable_label(cur_ds == Some(*did), name).clicked() && cur_ds != Some(*did) {
-                    c.dataset = Some(*did);
+        let ds_label = cur_ds
+            .and_then(|d| datasets.iter().find(|(k, _)| *k == d))
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| "(없음)".into());
+        egui::ComboBox::from_id_salt("insp-train-dataset")
+            .selected_text(ds_label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(cur_ds.is_none(), "(없음)").clicked() && cur_ds.is_some() {
+                    c.dataset = None;
                     changed = true;
                 }
-            }
-        });
+                for (did, name) in &datasets {
+                    if ui.selectable_label(cur_ds == Some(*did), name).clicked() && cur_ds != Some(*did) {
+                        c.dataset = Some(*did);
+                        changed = true;
+                    }
+                }
+            });
 
         ui.label(RichText::new("옵티마이저").color(COL_WEAK).size(11.5));
-        egui::ComboBox::from_id_salt("insp-optim").selected_text(c.optimizer.label()).show_ui(ui, |ui| {
-            for preset in [Optimizer::default_sgd(), Optimizer::default_adam(), Optimizer::default_adamw()] {
-                let same = c.optimizer.label() == preset.label();
-                if ui.selectable_label(same, preset.label()).clicked() && !same {
-                    // 종류를 바꿔도 학습률은 이어 간다.
-                    let lr = c.optimizer.lr();
-                    c.optimizer = preset;
-                    c.optimizer.set_lr(lr);
-                    changed = true;
+        egui::ComboBox::from_id_salt("insp-optim")
+            .selected_text(c.optimizer.label())
+            .show_ui(ui, |ui| {
+                for preset in [
+                    Optimizer::default_sgd(),
+                    Optimizer::default_adam(),
+                    Optimizer::default_adamw(),
+                ] {
+                    let same = c.optimizer.label() == preset.label();
+                    if ui.selectable_label(same, preset.label()).clicked() && !same {
+                        // 종류를 바꿔도 학습률은 이어 간다.
+                        let lr = c.optimizer.lr();
+                        c.optimizer = preset;
+                        c.optimizer.set_lr(lr);
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
         changed |= optimizer_params(ui, &mut c.optimizer);
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("손실").color(COL_WEAK).size(11.5));
-            egui::ComboBox::from_id_salt("insp-loss").selected_text(c.loss.label()).show_ui(ui, |ui| {
-                for l in Loss::ALL {
-                    if ui.selectable_label(c.loss == l, l.label()).clicked() && c.loss != l {
-                        c.loss = l;
-                        changed = true;
+            egui::ComboBox::from_id_salt("insp-loss")
+                .selected_text(c.loss.label())
+                .show_ui(ui, |ui| {
+                    for l in Loss::ALL {
+                        if ui.selectable_label(c.loss == l, l.label()).clicked() && c.loss != l {
+                            c.loss = l;
+                            changed = true;
+                        }
                     }
-                }
-            });
+                });
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("지표").color(COL_WEAK).size(11.5));
-            egui::ComboBox::from_id_salt("insp-metric").selected_text(c.metric.label()).show_ui(ui, |ui| {
-                for m in Metric::ALL {
-                    if ui.selectable_label(c.metric == m, m.label()).clicked() && c.metric != m {
-                        c.metric = m;
-                        changed = true;
+            egui::ComboBox::from_id_salt("insp-metric")
+                .selected_text(c.metric.label())
+                .show_ui(ui, |ui| {
+                    for m in Metric::ALL {
+                        if ui.selectable_label(c.metric == m, m.label()).clicked() && c.metric != m {
+                            c.metric = m;
+                            changed = true;
+                        }
                     }
-                }
-            });
+                });
         });
 
-        egui::Grid::new("insp-train-grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            ui.label(RichText::new("에포크").color(COL_WEAK).size(11.5));
-            changed |= ui.add(DragValue::new(&mut c.epochs).range(1..=100_000)).changed();
-            ui.end_row();
-            ui.label(RichText::new("배치 크기").color(COL_WEAK).size(11.5));
-            changed |= ui.add(DragValue::new(&mut c.batch_size).range(1..=65_536)).changed();
-            ui.end_row();
-            ui.label(RichText::new("검증 비율").color(COL_WEAK).size(11.5));
-            changed |= ui.add(DragValue::new(&mut c.val_split).range(0.0..=0.9).speed(0.01)).changed();
-            ui.end_row();
-            ui.label(RichText::new("시드").color(COL_WEAK).size(11.5));
-            changed |= ui.add(DragValue::new(&mut c.seed)).changed();
-            ui.end_row();
-            ui.label(RichText::new("체크포인트 주기").color(COL_WEAK).size(11.5));
-            changed |= ui
-                .add(DragValue::new(&mut c.checkpoint_every).range(0..=10_000).suffix(" 에포크"))
-                .on_hover_text("0 이면 마지막만")
-                .changed();
-            ui.end_row();
-            ui.label(RichText::new("그래디언트 클리핑").color(COL_WEAK).size(11.5));
-            changed |= ui
-                .add(DragValue::new(&mut c.grad_clip).range(0.0..=1000.0).speed(0.05))
-                .on_hover_text("0 이면 없음")
-                .changed();
-            ui.end_row();
-            ui.label(RichText::new("조기 종료").color(COL_WEAK).size(11.5));
-            changed |= ui
-                .add(DragValue::new(&mut c.early_stop_patience).range(0..=10_000).suffix(" 에포크"))
-                .on_hover_text("검증 손실이 이만큼 나아지지 않으면 멈춥니다. 0 이면 끄기 — 검증 집합이 없으면 무시됩니다")
-                .changed();
-            ui.end_row();
-            ui.label(RichText::new("워밍업").color(COL_WEAK).size(11.5));
-            changed |= ui
-                .add(DragValue::new(&mut c.warmup_steps).range(0..=1_000_000).suffix(" 스텝"))
-                .on_hover_text("처음 이만큼은 학습률을 0 에서 기본값까지 선형으로 올립니다. 0 이면 끄기")
-                .changed();
-            ui.end_row();
-        });
+        egui::Grid::new("insp-train-grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("에포크").color(COL_WEAK).size(11.5));
+                changed |= ui.add(DragValue::new(&mut c.epochs).range(1..=100_000)).changed();
+                ui.end_row();
+                ui.label(RichText::new("배치 크기").color(COL_WEAK).size(11.5));
+                changed |= ui.add(DragValue::new(&mut c.batch_size).range(1..=65_536)).changed();
+                ui.end_row();
+                ui.label(RichText::new("검증 비율").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(DragValue::new(&mut c.val_split).range(0.0..=0.9).speed(0.01))
+                    .changed();
+                ui.end_row();
+                ui.label(RichText::new("시드").color(COL_WEAK).size(11.5));
+                changed |= ui.add(DragValue::new(&mut c.seed)).changed();
+                ui.end_row();
+                ui.label(RichText::new("체크포인트 주기").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut c.checkpoint_every)
+                            .range(0..=10_000)
+                            .suffix(" 에포크"),
+                    )
+                    .on_hover_text("0 이면 마지막만")
+                    .changed();
+                ui.end_row();
+                ui.label(RichText::new("그래디언트 클리핑").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(DragValue::new(&mut c.grad_clip).range(0.0..=1000.0).speed(0.05))
+                    .on_hover_text("0 이면 없음")
+                    .changed();
+                ui.end_row();
+                ui.label(RichText::new("조기 종료").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut c.early_stop_patience)
+                            .range(0..=10_000)
+                            .suffix(" 에포크"),
+                    )
+                    .on_hover_text(
+                        "검증 손실이 이만큼 나아지지 않으면 멈춥니다. 0 이면 끄기 — 검증 집합이 없으면 무시됩니다",
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label(RichText::new("워밍업").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(DragValue::new(&mut c.warmup_steps).range(0..=1_000_000).suffix(" 스텝"))
+                    .on_hover_text("처음 이만큼은 학습률을 0 에서 기본값까지 선형으로 올립니다. 0 이면 끄기")
+                    .changed();
+                ui.end_row();
+            });
 
         changed |= lr_schedule(ui, &mut c.schedule);
 
@@ -302,18 +367,20 @@ impl NlApp {
             .find(|(p, _)| *p == cur_dev)
             .map(|(_, n)| n.clone())
             .unwrap_or_else(|| cur_dev.label());
-        egui::ComboBox::from_id_salt("insp-train-device").selected_text(dev_label).show_ui(ui, |ui| {
-            if ui.selectable_label(cur_dev == DevicePref::Auto, "자동").clicked() && cur_dev != DevicePref::Auto {
-                c.device = DevicePref::Auto;
-                changed = true;
-            }
-            for (pref, name) in &devices {
-                if ui.selectable_label(cur_dev == *pref, name).clicked() && cur_dev != *pref {
-                    c.device = *pref;
+        egui::ComboBox::from_id_salt("insp-train-device")
+            .selected_text(dev_label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(cur_dev == DevicePref::Auto, "자동").clicked() && cur_dev != DevicePref::Auto {
+                    c.device = DevicePref::Auto;
                     changed = true;
                 }
-            }
-        });
+                for (pref, name) in &devices {
+                    if ui.selectable_label(cur_dev == *pref, name).clicked() && cur_dev != *pref {
+                        c.device = *pref;
+                        changed = true;
+                    }
+                }
+            });
 
         if changed {
             doc.note_edited(now);
@@ -328,7 +395,12 @@ impl NlApp {
         // 서로 다른 필드라 동시에 빌릴 수 있다.
         let shape_buf = &mut self.shape_buf;
         let doc = &mut self.doc;
-        let Some(node) = doc.project.models.get_mut(&model).and_then(|m| m.graph.nodes.get_mut(&node_id)) else {
+        let Some(node) = doc
+            .project
+            .models
+            .get_mut(&model)
+            .and_then(|m| m.graph.nodes.get_mut(&node_id))
+        else {
             ui.label(RichText::new("노드가 없습니다").color(COL_ERROR));
             return;
         };
@@ -340,7 +412,9 @@ impl NlApp {
         ui.separator();
 
         ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-        changed |= ui.add(egui::TextEdit::singleline(&mut node.name).desired_width(f32::INFINITY)).changed();
+        changed |= ui
+            .add(egui::TextEdit::singleline(&mut node.name).desired_width(f32::INFINITY))
+            .changed();
 
         // 형상 텍스트 필드는 파싱이 실패해도 타이핑을 끊지 않도록 버퍼를 따로 둔다.
         if stale {
@@ -354,7 +428,11 @@ impl NlApp {
         match &mut node.kind {
             LayerKind::Input { shape } | LayerKind::Reshape { shape } => {
                 ui.label(RichText::new("형상 (배치 제외)").color(COL_WEAK).size(11.5));
-                let resp = ui.add(egui::TextEdit::singleline(shape_buf).desired_width(f32::INFINITY).hint_text("3×28×28"));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(shape_buf)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("3×28×28"),
+                );
                 if resp.changed() {
                     if let Some(v) = parse_shape_text(shape_buf) {
                         if *shape != v {
@@ -364,11 +442,19 @@ impl NlApp {
                     }
                 }
                 if parse_shape_text(shape_buf).is_none() {
-                    ui.label(RichText::new("숫자를 × 로 잇습니다 (예: 3×28×28)").color(COL_WARN).size(11.0));
+                    ui.label(
+                        RichText::new("숫자를 × 로 잇습니다 (예: 3×28×28)")
+                            .color(COL_WARN)
+                            .size(11.0),
+                    );
                 }
             }
             LayerKind::Output => {
-                ui.label(RichText::new("모델의 출력입니다. 설정이 없습니다.").color(COL_WEAK).size(11.5));
+                ui.label(
+                    RichText::new("모델의 출력입니다. 설정이 없습니다.")
+                        .color(COL_WEAK)
+                        .size(11.5),
+                );
             }
             LayerKind::Linear { out_features, bias } => {
                 ui.horizontal(|ui| {
@@ -377,7 +463,13 @@ impl NlApp {
                 });
                 changed |= ui.checkbox(bias, "바이어스").changed();
             }
-            LayerKind::Conv2d { out_channels, kernel, stride, padding, bias } => {
+            LayerKind::Conv2d {
+                out_channels,
+                kernel,
+                stride,
+                padding,
+                bias,
+            } => {
                 ui.horizontal(|ui| {
                     ui.label("출력 채널");
                     changed |= ui.add(DragValue::new(out_channels).range(1..=100_000)).changed();
@@ -394,15 +486,17 @@ impl NlApp {
             LayerKind::Activation { act } => {
                 ui.horizontal(|ui| {
                     ui.label("함수");
-                    egui::ComboBox::from_id_salt("insp-act").selected_text(act.label()).show_ui(ui, |ui| {
-                        for a in Act::ALL {
-                            let same = a.label() == act.label();
-                            if ui.selectable_label(same, a.label()).clicked() && !same {
-                                *act = a;
-                                changed = true;
+                    egui::ComboBox::from_id_salt("insp-act")
+                        .selected_text(act.label())
+                        .show_ui(ui, |ui| {
+                            for a in Act::ALL {
+                                let same = a.label() == act.label();
+                                if ui.selectable_label(same, a.label()).clicked() && !same {
+                                    *act = a;
+                                    changed = true;
+                                }
                             }
-                        }
-                    });
+                        });
                 });
                 if let Act::LeakyRelu { slope } = act {
                     ui.horizontal(|ui| {
@@ -453,8 +547,12 @@ impl NlApp {
         ui.add_space(8.0);
         ui.label(RichText::new("위치").color(COL_WEAK).size(11.5));
         ui.horizontal(|ui| {
-            changed |= ui.add(DragValue::new(&mut node.pos[0]).prefix("x ").speed(1.0)).changed();
-            changed |= ui.add(DragValue::new(&mut node.pos[1]).prefix("y ").speed(1.0)).changed();
+            changed |= ui
+                .add(DragValue::new(&mut node.pos[0]).prefix("x ").speed(1.0))
+                .changed();
+            changed |= ui
+                .add(DragValue::new(&mut node.pos[1]).prefix("y ").speed(1.0))
+                .changed();
         });
 
         ui.add_space(8.0);
@@ -464,7 +562,10 @@ impl NlApp {
                 ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(12.0));
             }
             None => {
-                let out = report.shape(node_id).map(|s| s.to_string()).unwrap_or_else(|| "?".into());
+                let out = report
+                    .shape(node_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".into());
                 ui.label(RichText::new(format!("출력 형상 {out}")).color(COL_OK).size(12.0));
             }
         }
@@ -477,12 +578,20 @@ impl NlApp {
     }
 
     fn inspect_edge(&mut self, ui: &mut egui::Ui, model: nl_core::ModelId, edge: nl_core::EdgeId) {
-        let Some(m) = self.doc.project.models.get(&model) else { return };
+        let Some(m) = self.doc.project.models.get(&model) else {
+            return;
+        };
         let Some(e) = m.graph.edges.get(&edge) else {
             ui.label(RichText::new("연결이 없습니다").color(COL_ERROR));
             return;
         };
-        let name = |id: nl_core::NodeId| m.graph.nodes.get(&id).map(|n| n.display_name()).unwrap_or_else(|| "?".into());
+        let name = |id: nl_core::NodeId| {
+            m.graph
+                .nodes
+                .get(&id)
+                .map(|n| n.display_name())
+                .unwrap_or_else(|| "?".into())
+        };
         ui.label(RichText::new("연결").size(15.0).strong());
         ui.separator();
         views::kv(ui, "출발", name(e.from));
@@ -494,8 +603,13 @@ impl NlApp {
     // ── 데이터셋 · 페이로드 ─────────────────────────────────────
 
     fn inspect_dataset(&mut self, ui: &mut egui::Ui, id: nl_core::DatasetId, now: f64) {
-        let payloads: Vec<(PayloadId, String)> =
-            self.doc.project.payloads.iter().map(|(k, v)| (*k, v.name.clone())).collect();
+        let payloads: Vec<(PayloadId, String)> = self
+            .doc
+            .project
+            .payloads
+            .iter()
+            .map(|(k, v)| (*k, v.name.clone()))
+            .collect();
         let doc = &mut self.doc;
         let Some(d) = doc.project.datasets.get_mut(&id) else {
             ui.label(RichText::new("데이터셋이 없습니다").color(COL_ERROR));
@@ -505,20 +619,24 @@ impl NlApp {
         ui.label(RichText::new("데이터셋").size(15.0).strong());
         ui.separator();
         ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-        changed |= ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY)).changed();
+        changed |= ui
+            .add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY))
+            .changed();
 
         ui.add_space(4.0);
         ui.label(RichText::new("소스").color(COL_WEAK).size(11.5));
         match &mut d.source {
             DataSource::Synthetic { kind, samples } => {
-                egui::ComboBox::from_id_salt("insp-syn").selected_text(kind.label()).show_ui(ui, |ui| {
-                    for k in SyntheticKind::ALL {
-                        if ui.selectable_label(*kind == k, k.label()).clicked() && *kind != k {
-                            *kind = k;
-                            changed = true;
+                egui::ComboBox::from_id_salt("insp-syn")
+                    .selected_text(kind.label())
+                    .show_ui(ui, |ui| {
+                        for k in SyntheticKind::ALL {
+                            if ui.selectable_label(*kind == k, k.label()).clicked() && *kind != k {
+                                *kind = k;
+                                changed = true;
+                            }
                         }
-                    }
-                });
+                    });
                 ui.horizontal(|ui| {
                     ui.label("샘플 수");
                     changed |= ui.add(DragValue::new(samples).range(2..=1_000_000)).changed();
@@ -530,25 +648,44 @@ impl NlApp {
                     views::kv(ui, "클래스", c.to_string());
                 }
             }
-            DataSource::Csv { path, input_cols, target_cols, header } => {
-                changed |= ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY)).changed();
+            DataSource::Csv {
+                path,
+                input_cols,
+                target_cols,
+                header,
+            } => {
+                changed |= ui
+                    .add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY))
+                    .changed();
                 changed |= ui.checkbox(header, "첫 줄이 헤더").changed();
                 let mut inp = input_cols.join(", ");
                 let mut tgt = target_cols.join(", ");
                 ui.label(RichText::new("입력 열").color(COL_WEAK).size(11.0));
-                if ui.add(egui::TextEdit::singleline(&mut inp).desired_width(f32::INFINITY)).changed() {
+                if ui
+                    .add(egui::TextEdit::singleline(&mut inp).desired_width(f32::INFINITY))
+                    .changed()
+                {
                     *input_cols = split_list(&inp);
                     changed = true;
                 }
                 ui.label(RichText::new("타깃 열").color(COL_WEAK).size(11.0));
-                if ui.add(egui::TextEdit::singleline(&mut tgt).desired_width(f32::INFINITY)).changed() {
+                if ui
+                    .add(egui::TextEdit::singleline(&mut tgt).desired_width(f32::INFINITY))
+                    .changed()
+                {
                     *target_cols = split_list(&tgt);
                     changed = true;
                 }
             }
             DataSource::ImageFolder { path } | DataSource::Recorded { path } => {
-                changed |= ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY)).changed();
-                ui.label(RichText::new("하위 폴더 이름이 클래스가 됩니다").color(COL_WEAK).size(11.0));
+                changed |= ui
+                    .add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY))
+                    .changed();
+                ui.label(
+                    RichText::new("하위 폴더 이름이 클래스가 됩니다")
+                        .color(COL_WEAK)
+                        .size(11.0),
+                );
             }
         }
 
@@ -557,14 +694,20 @@ impl NlApp {
         let ratio = matches!(d.split, Split::Ratio);
         ui.label(RichText::new("검증 분할").color(COL_WEAK).size(11.5));
         egui::ComboBox::from_id_salt("insp-split")
-            .selected_text(if ratio { "학습 설정의 비율" } else { "별도 소스" })
+            .selected_text(if ratio {
+                "학습 설정의 비율"
+            } else {
+                "별도 소스"
+            })
             .show_ui(ui, |ui| {
                 if ui.selectable_label(ratio, "학습 설정의 비율").clicked() && !ratio {
                     d.split = Split::Ratio;
                     changed = true;
                 }
                 if ui.selectable_label(!ratio, "별도 소스").clicked() && ratio {
-                    d.split = Split::Separate { validation: Box::new(d.source.clone()) };
+                    d.split = Split::Separate {
+                        validation: Box::new(d.source.clone()),
+                    };
                     changed = true;
                 }
             });
@@ -572,20 +715,24 @@ impl NlApp {
         ui.add_space(6.0);
         ui.label(RichText::new("페이로드").color(COL_WEAK).size(11.5));
         let cur = d.payload;
-        let label =
-            cur.and_then(|p| payloads.iter().find(|(k, _)| *k == p)).map(|(_, n)| n.clone()).unwrap_or_else(|| "(없음)".into());
-        egui::ComboBox::from_id_salt("insp-ds-payload").selected_text(label).show_ui(ui, |ui| {
-            if ui.selectable_label(cur.is_none(), "(없음)").clicked() && cur.is_some() {
-                d.payload = None;
-                changed = true;
-            }
-            for (pid, name) in &payloads {
-                if ui.selectable_label(cur == Some(*pid), name).clicked() && cur != Some(*pid) {
-                    d.payload = Some(*pid);
+        let label = cur
+            .and_then(|p| payloads.iter().find(|(k, _)| *k == p))
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| "(없음)".into());
+        egui::ComboBox::from_id_salt("insp-ds-payload")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(cur.is_none(), "(없음)").clicked() && cur.is_some() {
+                    d.payload = None;
                     changed = true;
                 }
-            }
-        });
+                for (pid, name) in &payloads {
+                    if ui.selectable_label(cur == Some(*pid), name).clicked() && cur != Some(*pid) {
+                        d.payload = Some(*pid);
+                        changed = true;
+                    }
+                }
+            });
 
         if let Some(info) = &d.cached_info {
             ui.add_space(6.0);
@@ -612,7 +759,9 @@ impl NlApp {
         ui.label(RichText::new("페이로드").size(15.0).strong());
         ui.separator();
         ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-        changed |= ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(f32::INFINITY)).changed();
+        changed |= ui
+            .add(egui::TextEdit::singleline(&mut p.name).desired_width(f32::INFINITY))
+            .changed();
         ui.add_space(6.0);
         for (title, fields) in [("입력", &p.inputs), ("출력", &p.outputs)] {
             ui.label(RichText::new(title).strong());
@@ -621,11 +770,19 @@ impl NlApp {
             }
             for f in fields {
                 let shape = f.tensor_shape().map(|s| shape_text(&s)).unwrap_or_else(|| "-".into());
-                views::kv(ui, &f.name, format!("{} · {}", crate::views::data::field_kind_label(&f.kind), shape));
+                views::kv(
+                    ui,
+                    &f.name,
+                    format!("{} · {}", crate::views::data::field_kind_label(&f.kind), shape),
+                );
             }
             ui.add_space(4.0);
         }
-        ui.label(RichText::new("필드와 Transform 체인은 데이터 뷰에서 편집합니다.").color(COL_WEAK).size(11.0));
+        ui.label(
+            RichText::new("필드와 Transform 체인은 데이터 뷰에서 편집합니다.")
+                .color(COL_WEAK)
+                .size(11.0),
+        );
         if changed {
             doc.note_edited(now);
         }
@@ -641,10 +798,14 @@ impl NlApp {
         ui.label(RichText::new("파이프라인").size(15.0).strong());
         ui.separator();
         ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-        changed |= ui.add(egui::TextEdit::singleline(&mut pl.name).desired_width(f32::INFINITY)).changed();
+        changed |= ui
+            .add(egui::TextEdit::singleline(&mut pl.name).desired_width(f32::INFINITY))
+            .changed();
         ui.horizontal(|ui| {
             ui.label("틱 속도");
-            changed |= ui.add(DragValue::new(&mut pl.tick_hz).range(0.1..=240.0).suffix(" Hz")).changed();
+            changed |= ui
+                .add(DragValue::new(&mut pl.tick_hz).range(0.1..=240.0).suffix(" Hz"))
+                .changed();
         });
         views::kv(ui, "노드", pl.nodes.len().to_string());
         views::kv(ui, "연결", pl.links.len().to_string());
@@ -662,7 +823,9 @@ impl NlApp {
     fn inspect_run(&mut self, ui: &mut egui::Ui, id: nl_core::RunId, now: f64) {
         let model_name = {
             let run = self.doc.project.runs.get(&id);
-            run.and_then(|r| self.doc.project.models.get(&r.model)).map(|m| m.name.clone()).unwrap_or_else(|| "(삭제됨)".into())
+            run.and_then(|r| self.doc.project.models.get(&r.model))
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "(삭제됨)".into())
         };
         let doc = &mut self.doc;
         let Some(r) = doc.project.runs.get_mut(&id) else {
@@ -673,11 +836,30 @@ impl NlApp {
         ui.separator();
         views::kv(ui, "모델", model_name);
         views::kv(ui, "상태", crate::views::train::status_label(r.status));
-        views::kv(ui, "시작", r.started.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string());
+        views::kv(
+            ui,
+            "시작",
+            r.started
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+        );
         if let Some(f) = r.finished {
-            views::kv(ui, "종료", f.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string());
+            views::kv(
+                ui,
+                "종료",
+                f.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+            );
         }
-        views::kv(ui, "장치", if r.device_name.is_empty() { "-".to_string() } else { r.device_name.clone() });
+        views::kv(
+            ui,
+            "장치",
+            if r.device_name.is_empty() {
+                "-".to_string()
+            } else {
+                r.device_name.clone()
+            },
+        );
         views::kv(ui, "에포크", format!("{}/{}", r.epochs.len(), r.config.epochs));
         if let Some(e) = r.last() {
             views::kv(ui, "최종 학습 손실", views::fmt_metric(e.train_loss));
@@ -693,8 +875,13 @@ impl NlApp {
         }
         ui.add_space(6.0);
         ui.label(RichText::new("메모").color(COL_WEAK).size(11.5));
-        let changed =
-            ui.add(egui::TextEdit::multiline(&mut r.note).desired_rows(3).desired_width(f32::INFINITY)).changed();
+        let changed = ui
+            .add(
+                egui::TextEdit::multiline(&mut r.note)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            )
+            .changed();
         if changed {
             doc.note_edited(now);
         }
@@ -721,53 +908,71 @@ fn lr_schedule(ui: &mut egui::Ui, schedule: &mut LrSchedule) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new("학습률 스케줄").color(COL_WEAK).size(11.5));
-        egui::ComboBox::from_id_salt("insp-lr-schedule").selected_text(schedule.label()).show_ui(ui, |ui| {
-            for preset in LrSchedule::ALL {
-                let same = preset.label() == schedule.label();
-                if ui.selectable_label(same, preset.label()).clicked() && !same {
-                    *schedule = preset;
-                    changed = true;
+        egui::ComboBox::from_id_salt("insp-lr-schedule")
+            .selected_text(schedule.label())
+            .show_ui(ui, |ui| {
+                for preset in LrSchedule::ALL {
+                    let same = preset.label() == schedule.label();
+                    if ui.selectable_label(same, preset.label()).clicked() && !same {
+                        *schedule = preset;
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
     });
     match schedule {
         LrSchedule::None => {}
         LrSchedule::Step { every, gamma } => {
-            egui::Grid::new("insp-lr-step").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                ui.label(RichText::new("주기").color(COL_WEAK).size(11.5));
-                changed |= ui.add(DragValue::new(every).range(1..=10_000).suffix(" 에포크")).changed();
-                ui.end_row();
-                ui.label(RichText::new("감쇠율").color(COL_WEAK).size(11.5));
-                changed |= ui
-                    .add(DragValue::new(gamma).range(0.0..=1.0).speed(0.01))
-                    .on_hover_text("주기마다 학습률에 곱하는 값")
-                    .changed();
-                ui.end_row();
-            });
+            egui::Grid::new("insp-lr-step")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("주기").color(COL_WEAK).size(11.5));
+                    changed |= ui
+                        .add(DragValue::new(every).range(1..=10_000).suffix(" 에포크"))
+                        .changed();
+                    ui.end_row();
+                    ui.label(RichText::new("감쇠율").color(COL_WEAK).size(11.5));
+                    changed |= ui
+                        .add(DragValue::new(gamma).range(0.0..=1.0).speed(0.01))
+                        .on_hover_text("주기마다 학습률에 곱하는 값")
+                        .changed();
+                    ui.end_row();
+                });
         }
         LrSchedule::Cosine { min_lr } => {
-            egui::Grid::new("insp-lr-cos").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                ui.label(RichText::new("최저 학습률").color(COL_WEAK).size(11.5));
-                changed |= ui
-                    .add(DragValue::new(min_lr).range(0.0..=1.0).speed(1e-5).custom_formatter(|v, _| format!("{v:.6}")))
-                    .on_hover_text("마지막 에포크에서 도달하는 값")
-                    .changed();
-                ui.end_row();
-            });
+            egui::Grid::new("insp-lr-cos")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("최저 학습률").color(COL_WEAK).size(11.5));
+                    changed |= ui
+                        .add(
+                            DragValue::new(min_lr)
+                                .range(0.0..=1.0)
+                                .speed(1e-5)
+                                .custom_formatter(|v, _| format!("{v:.6}")),
+                        )
+                        .on_hover_text("마지막 에포크에서 도달하는 값")
+                        .changed();
+                    ui.end_row();
+                });
         }
         LrSchedule::Plateau { patience, factor } => {
-            egui::Grid::new("insp-lr-plateau").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                ui.label(RichText::new("기다릴 에포크").color(COL_WEAK).size(11.5));
-                changed |= ui
-                    .add(DragValue::new(patience).range(1..=10_000))
-                    .on_hover_text("검증 손실이 이만큼 나아지지 않으면 낮춥니다")
-                    .changed();
-                ui.end_row();
-                ui.label(RichText::new("감쇠율").color(COL_WEAK).size(11.5));
-                changed |= ui.add(DragValue::new(factor).range(0.0..=1.0).speed(0.01)).changed();
-                ui.end_row();
-            });
+            egui::Grid::new("insp-lr-plateau")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("기다릴 에포크").color(COL_WEAK).size(11.5));
+                    changed |= ui
+                        .add(DragValue::new(patience).range(1..=10_000))
+                        .on_hover_text("검증 손실이 이만큼 나아지지 않으면 낮춥니다")
+                        .changed();
+                    ui.end_row();
+                    ui.label(RichText::new("감쇠율").color(COL_WEAK).size(11.5));
+                    changed |= ui.add(DragValue::new(factor).range(0.0..=1.0).speed(0.01)).changed();
+                    ui.end_row();
+                });
         }
     }
     let summary = schedule.summary();
@@ -775,7 +980,11 @@ fn lr_schedule(ui: &mut egui::Ui, schedule: &mut LrSchedule) -> bool {
         ui.label(RichText::new(summary).color(COL_WEAK).size(11.0));
     }
     if matches!(schedule, LrSchedule::Plateau { .. }) {
-        ui.label(RichText::new("검증 집합이 있어야 동작합니다").color(COL_WEAK).size(11.0));
+        ui.label(
+            RichText::new("검증 집합이 있어야 동작합니다")
+                .color(COL_WEAK)
+                .size(11.0),
+        );
     }
     changed
 }
@@ -805,7 +1014,13 @@ fn optimizer_params(ui: &mut egui::Ui, opt: &mut Optimizer) -> bool {
                 changed |= ui.add(DragValue::new(beta2).speed(0.001).range(0.0..=0.9999)).changed();
             });
         }
-        Optimizer::AdamW { lr, beta1, beta2, eps, weight_decay } => {
+        Optimizer::AdamW {
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } => {
             ui.horizontal(|ui| {
                 ui.label("lr");
                 changed |= ui.add(DragValue::new(lr).speed(1e-5).range(1e-8..=10.0)).changed();
@@ -820,7 +1035,9 @@ fn optimizer_params(ui: &mut egui::Ui, opt: &mut Optimizer) -> bool {
             });
             ui.horizontal(|ui| {
                 ui.label("가중치 감쇠");
-                changed |= ui.add(DragValue::new(weight_decay).speed(1e-4).range(0.0..=1.0)).changed();
+                changed |= ui
+                    .add(DragValue::new(weight_decay).speed(1e-4).range(0.0..=1.0))
+                    .changed();
             });
         }
     }
@@ -829,7 +1046,10 @@ fn optimizer_params(ui: &mut egui::Ui, opt: &mut Optimizer) -> bool {
 
 /// "a, b , c" → ["a", "b", "c"] (빈 항목 제거).
 pub fn split_list(text: &str) -> Vec<String> {
-    text.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    text.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// 인스펙터가 op 로 보내야 하는 편집 (아웃라인의 이름 변경과 공유).
@@ -862,9 +1082,16 @@ pub fn rename_op(project: &nl_core::Project, sel: Selection, name: String) -> Op
         }
         Selection::Pipeline(id) => {
             let pl = project.pipelines.get(&id)?;
-            Some(Op::UpsertPipelineMeta { id, name, tick_hz: pl.tick_hz })
+            Some(Op::UpsertPipelineMeta {
+                id,
+                name,
+                tick_hz: pl.tick_hz,
+            })
         }
-        Selection::Project => Some(Op::SetProjectMeta { name, description: project.description.clone() }),
+        Selection::Project => Some(Op::SetProjectMeta {
+            name,
+            description: project.description.clone(),
+        }),
         _ => None,
     }
 }

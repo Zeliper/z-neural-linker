@@ -21,7 +21,12 @@ pub struct ResourceState {
 
 impl Default for ResourceState {
     fn default() -> Self {
-        Self { snapshot: ResourceSnapshot::default(), last_poll: f64::NEG_INFINITY, cpu: Vec::new(), mem: Vec::new() }
+        Self {
+            snapshot: ResourceSnapshot::default(),
+            last_poll: f64::NEG_INFINITY,
+            cpu: Vec::new(),
+            mem: Vec::new(),
+        }
     }
 }
 
@@ -59,98 +64,180 @@ fn push_capped(v: &mut Vec<[f64; 2]>, point: [f64; 2], cap: usize) {
 pub fn show(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut ResourceState) -> Vec<ViewAction> {
     if state.tick(ctx.now) {
         // 다음 갱신 때 스스로 깨어난다 — 사용자가 마우스를 안 움직여도 표가 갱신된다.
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(POLL_SECS));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(POLL_SECS));
     }
     let s = &state.snapshot;
     let mut actions = Vec::new();
 
     egui::ScrollArea::vertical().id_salt("resources-scroll").show(ui, |ui| {
-        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-            ui.label(RichText::new("시스템").size(15.0).strong());
-            ui.separator();
-            egui::Grid::new("res-sys").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
-                ui.label(RichText::new("CPU").color(COL_WEAK));
-                ui.label(if s.cpu_name.is_empty() {
-                    format!("{}코어", s.cpu_cores)
-                } else {
-                    format!("{} · {}코어", s.cpu_name, s.cpu_cores)
-                });
-                ui.end_row();
-                ui.label(RichText::new("CPU 사용률").color(COL_WEAK));
-                ui.add(
-                    egui::ProgressBar::new((s.cpu_usage_percent / 100.0).clamp(0.0, 1.0))
-                        .desired_width(220.0)
-                        .text(format!("{:.0}%", s.cpu_usage_percent)),
-                );
-                ui.end_row();
-                ui.label(RichText::new("메모리").color(COL_WEAK));
-                ui.add(
-                    egui::ProgressBar::new((mem_percent(s) / 100.0).clamp(0.0, 1.0) as f32)
-                        .desired_width(220.0)
-                        .text(format!("{} / {}", fmt_bytes(s.mem_used_bytes), fmt_bytes(s.mem_total_bytes))),
-                );
-                ui.end_row();
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(10)
+            .corner_radius(5)
+            .show(ui, |ui| {
+                ui.label(RichText::new("시스템").size(15.0).strong());
+                ui.separator();
+                egui::Grid::new("res-sys")
+                    .num_columns(2)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("CPU").color(COL_WEAK));
+                        ui.label(if s.cpu_name.is_empty() {
+                            format!("{}코어", s.cpu_cores)
+                        } else {
+                            format!("{} · {}코어", s.cpu_name, s.cpu_cores)
+                        });
+                        ui.end_row();
+                        ui.label(RichText::new("CPU 사용률").color(COL_WEAK));
+                        ui.add(
+                            egui::ProgressBar::new((s.cpu_usage_percent / 100.0).clamp(0.0, 1.0))
+                                .desired_width(220.0)
+                                .text(format!("{:.0}%", s.cpu_usage_percent)),
+                        );
+                        ui.end_row();
+                        ui.label(RichText::new("메모리").color(COL_WEAK));
+                        ui.add(
+                            egui::ProgressBar::new((mem_percent(s) / 100.0).clamp(0.0, 1.0) as f32)
+                                .desired_width(220.0)
+                                .text(format!(
+                                    "{} / {}",
+                                    fmt_bytes(s.mem_used_bytes),
+                                    fmt_bytes(s.mem_total_bytes)
+                                )),
+                        );
+                        ui.end_row();
+                    });
             });
-        });
 
         ui.add_space(8.0);
-        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-            ui.label(RichText::new("사용률 (최근 2분)").size(13.0).strong());
-            // x 축은 "몇 초 전" — 가장 최근 점이 0 이다.
-            let ago = |v: &[[f64; 2]]| -> Vec<[f64; 2]> { v.iter().map(|p| [p[0] - ctx.now, p[1]]).collect() };
-            let cpu = ago(&state.cpu);
-            let mem = ago(&state.mem);
-            Plot::new("res-plot")
-                .height(170.0)
-                .legend(Legend::default())
-                .include_y(0.0)
-                .include_y(100.0)
-                .include_x(-(HISTORY as f64) * POLL_SECS)
-                .include_x(0.0)
-                .y_axis_label("%")
-                .x_axis_label("초 전")
-                .show(ui, |p| {
-                    if !cpu.is_empty() {
-                        p.line(Line::new("CPU", PlotPoints::from(cpu)).width(2.0).color(COL_SELECT));
-                    }
-                    if !mem.is_empty() {
-                        p.line(Line::new("메모리", PlotPoints::from(mem)).width(2.0).color(COL_OK));
-                    }
-                });
-        });
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(10)
+            .corner_radius(5)
+            .show(ui, |ui| {
+                ui.label(RichText::new("사용률 (최근 2분)").size(13.0).strong());
+                // x 축은 "몇 초 전" — 가장 최근 점이 0 이다.
+                let ago = |v: &[[f64; 2]]| -> Vec<[f64; 2]> { v.iter().map(|p| [p[0] - ctx.now, p[1]]).collect() };
+                let cpu = ago(&state.cpu);
+                let mem = ago(&state.mem);
+                Plot::new("res-plot")
+                    .height(170.0)
+                    .legend(Legend::default())
+                    .include_y(0.0)
+                    .include_y(100.0)
+                    .include_x(-(HISTORY as f64) * POLL_SECS)
+                    .include_x(0.0)
+                    .y_axis_label("%")
+                    .x_axis_label("초 전")
+                    .show(ui, |p| {
+                        if !cpu.is_empty() {
+                            p.line(Line::new("CPU", PlotPoints::from(cpu)).width(2.0).color(COL_SELECT));
+                        }
+                        if !mem.is_empty() {
+                            p.line(Line::new("메모리", PlotPoints::from(mem)).width(2.0).color(COL_OK));
+                        }
+                    });
+            });
 
         ui.add_space(8.0);
-        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-            ui.label(RichText::new("학습 장치").size(15.0).strong());
-            ui.separator();
-            if ctx.devices.is_empty() {
-                ui.label(RichText::new("장치를 찾지 못했습니다").color(COL_WARN));
-                return;
-            }
-            egui::Grid::new("res-dev").striped(true).num_columns(4).spacing([14.0, 4.0]).show(ui, |ui| {
-                for h in ["장치", "백엔드", "종류", "메모리"] {
-                    ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(10)
+            .corner_radius(5)
+            .show(ui, |ui| {
+                ui.label(RichText::new("학습 장치").size(15.0).strong());
+                ui.separator();
+                if ctx.devices.is_empty() {
+                    ui.label(RichText::new("장치를 찾지 못했습니다").color(COL_WARN));
+                    return;
                 }
-                ui.end_row();
-                for d in ctx.devices {
-                    ui.label(&d.name).on_hover_text(device_label(d));
-                    ui.label(&d.backend);
-                    ui.label(kind_label(d.kind));
-                    ui.label(d.vram_bytes.map(fmt_bytes).unwrap_or_else(|| "-".into()));
-                    ui.end_row();
+                egui::Grid::new("res-dev")
+                    .striped(true)
+                    .num_columns(4)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in ["장치", "백엔드", "종류", "메모리"] {
+                            ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
+                        }
+                        ui.end_row();
+                        for d in ctx.devices {
+                            ui.label(&d.name).on_hover_text(device_label(d));
+                            ui.label(&d.backend);
+                            ui.label(kind_label(d.kind));
+                            ui.label(d.vram_bytes.map(fmt_bytes).unwrap_or_else(|| "-".into()));
+                            ui.end_row();
+                        }
+                    });
+                // nl-io 가 보고한 GPU 와 엔진 열거가 어긋나면 알린다 (드라이버 문제 진단용).
+                if s.gpus.len()
+                    > ctx
+                        .devices
+                        .iter()
+                        .filter(|d| d.kind != nl_engine::DeviceKind::Cpu)
+                        .count()
+                {
+                    ui.label(
+                        RichText::new("일부 GPU 가 학습 장치로 열거되지 않았습니다")
+                            .color(COL_WARN)
+                            .size(11.5),
+                    );
                 }
             });
-            // nl-io 가 보고한 GPU 와 엔진 열거가 어긋나면 알린다 (드라이버 문제 진단용).
-            if s.gpus.len() > ctx.devices.iter().filter(|d| d.kind != nl_engine::DeviceKind::Cpu).count() {
-                ui.label(RichText::new("일부 GPU 가 학습 장치로 열거되지 않았습니다").color(COL_WARN).size(11.5));
-            }
-        });
         ui.add_space(10.0);
-        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(10).corner_radius(5).show(ui, |ui| {
-            update_block(ui, ctx, &mut actions);
-        });
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(10)
+            .corner_radius(5)
+            .show(ui, |ui| {
+                autosave_block(ui, ctx, &mut actions);
+            });
+        ui.add_space(10.0);
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(10)
+            .corner_radius(5)
+            .show(ui, |ui| {
+                update_block(ui, ctx, &mut actions);
+            });
     });
     actions
+}
+
+/// 자동 저장·복구 설정.
+///
+/// 복구 스냅샷은 끌 수 없다. 저장하지 않은 변경을 잃지 않게 하는 안전망이고, 사용자의 원본 파일을
+/// 건드리지 않기 때문이다. 원본에 직접 저장하는 쪽만 선택이다.
+fn autosave_block(ui: &mut egui::Ui, ctx: &ViewCtx, actions: &mut Vec<ViewAction>) {
+    ui.label(RichText::new("자동 저장 · 복구").size(15.0).strong());
+    ui.separator();
+
+    let mut on = ctx.autosave_file;
+    if ui
+        .checkbox(&mut on, "파일로 연 문서를 2분마다 원본에 저장")
+        .on_hover_text("꺼 두어도 저장하지 않은 변경은 복구 스냅샷에 계속 적힙니다")
+        .changed()
+    {
+        actions.push(ViewAction::SetAutosaveFile(on));
+    }
+    ui.label(
+        RichText::new(
+            "편집이 3초 잠잠해지면(늦어도 60초마다) 복구 스냅샷을 적습니다. 저장하거나 정상 종료하면 지웁니다.",
+        )
+        .color(COL_WEAK)
+        .size(11.0),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("복구 폴더: {}", ctx.recovery_dir.display()))
+                .color(COL_WEAK)
+                .size(11.0),
+        )
+        .wrap(),
+    );
+    if ui.button("복구 파일 찾기…").clicked() {
+        actions.push(ViewAction::FindRecoveryFiles);
+    }
 }
 
 /// 빌더 자체 업데이트 설정. 새 버전이 없으면 툴바에 배지가 뜨지 않으므로, 끄고 켜는 자리는 여기다.
@@ -167,10 +254,16 @@ fn update_block(ui: &mut egui::Ui, ctx: &ViewCtx, actions: &mut Vec<ViewAction>)
             Some(nl_update::State::Disabled(w)) => w.clone(),
             _ => "서명 공개키가 없습니다".to_string(),
         };
-        ui.label(RichText::new("서명 키 미설정 — 업데이트 비활성").color(COL_WARN).size(11.5));
+        ui.label(
+            RichText::new("서명 키 미설정 — 업데이트 비활성")
+                .color(COL_WARN)
+                .size(11.5),
+        );
         ui.label(RichText::new(why).color(COL_WEAK).size(11.0));
         ui.label(
-            RichText::new("매니페스트를 검증할 수 없으면 새 버전을 확인하지 않습니다.").color(COL_WEAK).size(11.0),
+            RichText::new("매니페스트를 검증할 수 없으면 새 버전을 확인하지 않습니다.")
+                .color(COL_WEAK)
+                .size(11.0),
         );
         return;
     }
@@ -265,8 +358,14 @@ mod tests {
             Some(S::Idle),
             Some(S::Checking),
             Some(S::UpToDate),
-            Some(S::Downloading { received: 1024, total: Some(4096) }),
-            Some(S::Downloading { received: 1024, total: None }),
+            Some(S::Downloading {
+                received: 1024,
+                total: Some(4096),
+            }),
+            Some(S::Downloading {
+                received: 1024,
+                total: None,
+            }),
             Some(S::Applying),
             Some(S::Failed("주소를 찾지 못했습니다".into())),
         ];
@@ -277,7 +376,10 @@ mod tests {
         assert_eq!(update_status(Some(&S::UpToDate)).0, "최신입니다");
         assert!(update_status(Some(&S::Failed("x".into()))).0.contains('x'));
         // 진행률은 사람이 읽는 단위로 나온다.
-        let (text, _) = update_status(Some(&S::Downloading { received: 1024, total: Some(4096) }));
+        let (text, _) = update_status(Some(&S::Downloading {
+            received: 1024,
+            total: Some(4096),
+        }));
         assert!(text.contains("1.0 KB") && text.contains("4.0 KB"), "{text}");
     }
 

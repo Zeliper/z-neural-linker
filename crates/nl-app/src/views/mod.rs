@@ -50,6 +50,10 @@ pub struct ViewCtx<'a> {
     pub shot: &'a crate::record::ShotPreview,
     /// 시작할 때 빌더 업데이트를 확인하는 설정이 켜져 있는가.
     pub update_check: bool,
+    /// 원본 파일 자동 저장 설정이 켜져 있는가.
+    pub autosave_file: bool,
+    /// 복구 스냅샷을 두는 폴더 (자원 뷰에 보여 준다).
+    pub recovery_dir: &'a Path,
     /// 빌더 업데이트의 지금 상태. 확인을 시작한 적이 없으면 `None`.
     pub update_state: Option<&'a nl_update::State>,
     /// 앱 시계(초) — 같은 프레임 안에서 모두 같은 값을 쓴다.
@@ -62,7 +66,10 @@ impl ViewCtx<'_> {
     }
     /// 지금 편집 중인 모델 (선택이 가리키는 것, 없으면 첫 모델).
     pub fn active_model(&self) -> Option<ModelId> {
-        self.selection.model().filter(|m| self.project.models.contains_key(m)).or_else(|| self.project.models.keys().next().copied())
+        self.selection
+            .model()
+            .filter(|m| self.project.models.contains_key(m))
+            .or_else(|| self.project.models.keys().next().copied())
     }
 
     /// 지금 편집 중인 파이프라인 (같은 규칙).
@@ -95,7 +102,10 @@ pub enum ViewAction {
     ScanDataset(DatasetId),
     PreviewDataset(DatasetId),
     // 학습
-    StartTrain { model: ModelId, dataset: DatasetId },
+    StartTrain {
+        model: ModelId,
+        dataset: DatasetId,
+    },
     PauseTrain,
     ResumeTrain,
     StopTrain,
@@ -107,7 +117,10 @@ pub enum ViewAction {
     /// 마우스·키보드 싱크 무장 스위치.
     SetArmInput(bool),
     /// `Source::Manual` 노드에 값 보내기.
-    SendManual { node: PNodeId, value: Value },
+    SendManual {
+        node: PNodeId,
+        value: Value,
+    },
     // GUI
     SetGuiPreview(bool),
     // 빌드
@@ -143,6 +156,11 @@ pub enum ViewAction {
     SetUpdateCheck(bool),
     /// 지금 한 번 확인한다.
     CheckUpdateNow,
+    // 자동 저장·복구
+    /// 파일로 연 문서를 주기적으로 원본에 저장할지.
+    SetAutosaveFile(bool),
+    /// 복구 폴더를 다시 훑는다.
+    FindRecoveryFiles,
 }
 
 /// 뷰가 프레임 사이에 들고 있는 UI 상태 (문서가 아닌 것). 앱이 소유한다.

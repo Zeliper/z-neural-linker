@@ -53,7 +53,9 @@ pub fn parse_manual(kind: ManualKind, text: &str) -> Result<Value, String> {
             }
         }
         ManualKind::Text => Ok(Value::Text(text.to_string())),
-        ManualKind::Json => serde_json::from_str(text).map(Value::Json).map_err(|e| format!("JSON 오류: {e}")),
+        ManualKind::Json => serde_json::from_str(text)
+            .map(Value::Json)
+            .map_err(|e| format!("JSON 오류: {e}")),
     }
 }
 
@@ -93,80 +95,87 @@ pub fn show(
     let mut out = PipelineViewOut::default();
     let active = ctx.active_pipeline();
 
-    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("파이프라인").color(COL_WEAK));
-            let label = active
-                .and_then(|p| ctx.project.pipelines.get(&p))
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "(없음)".into());
-            egui::ComboBox::from_id_salt("pipeline-picker").selected_text(label).show_ui(ui, |ui| {
-                for (id, p) in &ctx.project.pipelines {
-                    if ui.selectable_label(active == Some(*id), &p.name).clicked() {
-                        out.actions.push(ViewAction::Select(Selection::Pipeline(*id)));
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("파이프라인").color(COL_WEAK));
+                let label = active
+                    .and_then(|p| ctx.project.pipelines.get(&p))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "(없음)".into());
+                egui::ComboBox::from_id_salt("pipeline-picker")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (id, p) in &ctx.project.pipelines {
+                            if ui.selectable_label(active == Some(*id), &p.name).clicked() {
+                                out.actions.push(ViewAction::Select(Selection::Pipeline(*id)));
+                            }
+                        }
+                    });
+                if ui.button("＋ 새 파이프라인").clicked() {
+                    let pl = Pipeline::new(format!("파이프라인 {}", ctx.project.pipelines.len() + 1));
+                    let id = pl.id;
+                    out.actions.push(ViewAction::Ops(vec![Op::UpsertPipelineMeta {
+                        id,
+                        name: pl.name,
+                        tick_hz: pl.tick_hz,
+                    }]));
+                    out.actions.push(ViewAction::Select(Selection::Pipeline(id)));
+                }
+                let Some(pid) = active else { return };
+                if ui.button("⛶ 전체 보기").on_hover_text("F").clicked() {
+                    canvas.request_fit();
+                }
+                ui.separator();
+
+                // 틱 속도.
+                if let Some(pl) = ctx.project.pipelines.get(&pid) {
+                    let mut hz = pl.tick_hz;
+                    ui.label(RichText::new("틱").color(COL_WEAK));
+                    if ui
+                        .add(DragValue::new(&mut hz).range(0.05..=240.0).speed(0.5).suffix(" Hz"))
+                        .on_hover_text("소스가 시간 기반이 아닐 때의 최대 틱 속도")
+                        .changed()
+                    {
+                        out.actions.push(ViewAction::Edit(vec![Op::UpsertPipelineMeta {
+                            id: pid,
+                            name: pl.name.clone(),
+                            tick_hz: hz,
+                        }]));
                     }
+                }
+                ui.separator();
+
+                match run {
+                    RunState::Idle => {
+                        if ui.button(RichText::new("▶ 시험 실행").color(COL_OK)).clicked() {
+                            out.actions.push(ViewAction::StartPipeline(pid));
+                        }
+                    }
+                    RunState::Running => {
+                        if ui
+                            .button(RichText::new("⏹ 정지").color(COL_ERROR))
+                            .on_hover_text("Esc 를 길게 눌러도 멈춥니다")
+                            .clicked()
+                        {
+                            out.actions.push(ViewAction::StopPipeline);
+                        }
+                        ui.label(RichText::new("● 실행 중").color(COL_SELECT));
+                    }
+                }
+                let mut armed = arm_input;
+                let resp = ui.checkbox(&mut armed, "입력 무장").on_hover_text(
+                    "켜면 마우스/키보드 싱크가 실제 입력을 보냅니다. 실행 중 Esc 를 길게 누르면 즉시 정지합니다.",
+                );
+                if resp.changed() {
+                    out.actions.push(ViewAction::SetArmInput(armed));
+                }
+                if armed {
+                    ui.label(RichText::new("⚠ 실제 입력").color(COL_WARN));
                 }
             });
-            if ui.button("＋ 새 파이프라인").clicked() {
-                let pl = Pipeline::new(format!("파이프라인 {}", ctx.project.pipelines.len() + 1));
-                let id = pl.id;
-                out.actions
-                    .push(ViewAction::Ops(vec![Op::UpsertPipelineMeta { id, name: pl.name, tick_hz: pl.tick_hz }]));
-                out.actions.push(ViewAction::Select(Selection::Pipeline(id)));
-            }
-            let Some(pid) = active else { return };
-            if ui.button("⛶ 전체 보기").on_hover_text("F").clicked() {
-                canvas.request_fit();
-            }
-            ui.separator();
-
-            // 틱 속도.
-            if let Some(pl) = ctx.project.pipelines.get(&pid) {
-                let mut hz = pl.tick_hz;
-                ui.label(RichText::new("틱").color(COL_WEAK));
-                if ui
-                    .add(DragValue::new(&mut hz).range(0.05..=240.0).speed(0.5).suffix(" Hz"))
-                    .on_hover_text("소스가 시간 기반이 아닐 때의 최대 틱 속도")
-                    .changed()
-                {
-                    out.actions.push(ViewAction::Edit(vec![Op::UpsertPipelineMeta {
-                        id: pid,
-                        name: pl.name.clone(),
-                        tick_hz: hz,
-                    }]));
-                }
-            }
-            ui.separator();
-
-            match run {
-                RunState::Idle => {
-                    if ui.button(RichText::new("▶ 시험 실행").color(COL_OK)).clicked() {
-                        out.actions.push(ViewAction::StartPipeline(pid));
-                    }
-                }
-                RunState::Running => {
-                    if ui
-                        .button(RichText::new("⏹ 정지").color(COL_ERROR))
-                        .on_hover_text("Esc 를 길게 눌러도 멈춥니다")
-                        .clicked()
-                    {
-                        out.actions.push(ViewAction::StopPipeline);
-                    }
-                    ui.label(RichText::new("● 실행 중").color(COL_SELECT));
-                }
-            }
-            let mut armed = arm_input;
-            let resp = ui.checkbox(&mut armed, "입력 무장").on_hover_text(
-                "켜면 마우스/키보드 싱크가 실제 입력을 보냅니다. 실행 중 Esc 를 길게 누르면 즉시 정지합니다.",
-            );
-            if resp.changed() {
-                out.actions.push(ViewAction::SetArmInput(armed));
-            }
-            if armed {
-                ui.label(RichText::new("⚠ 실제 입력").color(COL_WARN));
-            }
         });
-    });
     ui.separator();
 
     match active {
@@ -180,7 +189,9 @@ pub fn show(
                 ui.label(RichText::new("파이프라인이 없습니다").size(18.0));
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("소스 → 모델 → 싱크 로 바깥 세계와 모델을 잇습니다.").color(COL_WEAK).size(12.0),
+                    RichText::new("소스 → 모델 → 싱크 로 바깥 세계와 모델을 잇습니다.")
+                        .color(COL_WEAK)
+                        .size(12.0),
                 );
                 ui.add_space(8.0);
                 if ui.button("＋ 첫 파이프라인 만들기").clicked() {
@@ -211,7 +222,9 @@ pub fn inspect_node(
     live: &LiveView,
 ) -> Vec<ViewAction> {
     let mut actions = Vec::new();
-    let Some(pl) = ctx.project.pipelines.get(&pid) else { return actions };
+    let Some(pl) = ctx.project.pipelines.get(&pid) else {
+        return actions;
+    };
     let Some(node) = pl.nodes.get(&nid) else {
         ui.label(RichText::new("노드가 없습니다").color(COL_ERROR));
         return actions;
@@ -220,11 +233,17 @@ pub fn inspect_node(
     let mut changed = false;
 
     ui.label(RichText::new(node.kind.label()).size(15.0).strong());
-    ui.label(RichText::new(kind_summary(&node.kind, ctx.project)).color(COL_WEAK).size(11.5));
+    ui.label(
+        RichText::new(kind_summary(&node.kind, ctx.project))
+            .color(COL_WEAK)
+            .size(11.5),
+    );
     ui.separator();
 
     ui.label(RichText::new("이름").color(COL_WEAK).size(11.5));
-    changed |= ui.add(egui::TextEdit::singleline(&mut next.name).desired_width(f32::INFINITY)).changed();
+    changed |= ui
+        .add(egui::TextEdit::singleline(&mut next.name).desired_width(f32::INFINITY))
+        .changed();
 
     ui.add_space(6.0);
     match &mut next.kind {
@@ -245,8 +264,12 @@ pub fn inspect_node(
     ui.add_space(8.0);
     ui.label(RichText::new("위치").color(COL_WEAK).size(11.5));
     ui.horizontal(|ui| {
-        changed |= ui.add(DragValue::new(&mut next.pos[0]).prefix("x ").speed(1.0)).changed();
-        changed |= ui.add(DragValue::new(&mut next.pos[1]).prefix("y ").speed(1.0)).changed();
+        changed |= ui
+            .add(DragValue::new(&mut next.pos[0]).prefix("x ").speed(1.0))
+            .changed();
+        changed |= ui
+            .add(DragValue::new(&mut next.pos[1]).prefix("y ").speed(1.0))
+            .changed();
     });
 
     // 실행 중이면 마지막 값·오류·이미지 축소판.
@@ -281,7 +304,10 @@ pub fn inspect_node(
                 .links
                 .values()
                 .filter(|l| l.from == nid || l.to == nid)
-                .map(|l| Op::DeleteLink { pipeline: pid, id: l.id })
+                .map(|l| Op::DeleteLink {
+                    pipeline: pid,
+                    id: l.id,
+                })
                 .collect();
             actions.push(ViewAction::Ops(ops));
         }
@@ -292,20 +318,28 @@ pub fn inspect_node(
     });
 
     if changed {
-        actions.push(ViewAction::Edit(vec![Op::UpsertPNode { pipeline: pid, node: next }]));
+        actions.push(ViewAction::Edit(vec![Op::UpsertPNode {
+            pipeline: pid,
+            node: next,
+        }]));
     }
     actions
 }
 
 pub fn inspect_link(ui: &mut egui::Ui, ctx: &ViewCtx, pid: PipelineId, lid: LinkId) -> Vec<ViewAction> {
     let mut actions = Vec::new();
-    let Some(pl) = ctx.project.pipelines.get(&pid) else { return actions };
+    let Some(pl) = ctx.project.pipelines.get(&pid) else {
+        return actions;
+    };
     let Some(link) = pl.links.get(&lid) else {
         ui.label(RichText::new("연결이 없습니다").color(COL_ERROR));
         return actions;
     };
     let name = |id: PNodeId| {
-        pl.nodes.get(&id).map(crate::pcanvas::node_title).unwrap_or_else(|| "?".into())
+        pl.nodes
+            .get(&id)
+            .map(crate::pcanvas::node_title)
+            .unwrap_or_else(|| "?".into())
     };
     ui.label(RichText::new("연결").size(15.0).strong());
     ui.separator();
@@ -330,19 +364,25 @@ fn source_editor(
 ) -> bool {
     let mut changed = false;
     ui.label(RichText::new("소스 종류").color(COL_WEAK).size(11.5));
-    egui::ComboBox::from_id_salt("src-kind").selected_text(source_label(source)).show_ui(ui, |ui| {
-        for s in crate::pcanvas::source_palette() {
-            let same = std::mem::discriminant(source) == std::mem::discriminant(&s);
-            if ui.selectable_label(same, source_label(&s)).clicked() && !same {
-                *source = s;
-                changed = true;
+    egui::ComboBox::from_id_salt("src-kind")
+        .selected_text(source_label(source))
+        .show_ui(ui, |ui| {
+            for s in crate::pcanvas::source_palette() {
+                let same = std::mem::discriminant(source) == std::mem::discriminant(&s);
+                if ui.selectable_label(same, source_label(&s)).clicked() && !same {
+                    *source = s;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     ui.add_space(4.0);
     match source {
         Source::Manual => {
-            ui.label(RichText::new("빌더에서 값을 직접 넣는 시험용 소스입니다.").color(COL_WEAK).size(11.0));
+            ui.label(
+                RichText::new("빌더에서 값을 직접 넣는 시험용 소스입니다.")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
         }
         Source::StdinJson => {
             ui.label(RichText::new("표준 입력 한 줄 = JSON 하나.").color(COL_WEAK).size(11.0));
@@ -350,27 +390,43 @@ fn source_editor(
         Source::Timer { interval_ms } => {
             ui.horizontal(|ui| {
                 ui.label("간격");
-                changed |= ui.add(DragValue::new(interval_ms).range(1..=3_600_000).suffix(" ms")).changed();
+                changed |= ui
+                    .add(DragValue::new(interval_ms).range(1..=3_600_000).suffix(" ms"))
+                    .changed();
             });
         }
         Source::File { path, interval_ms } => {
             ui.label(RichText::new("파일 경로").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY))
+                .changed();
             ui.horizontal(|ui| {
                 ui.label("다시 읽는 간격");
-                changed |= ui.add(DragValue::new(interval_ms).range(1..=3_600_000).suffix(" ms")).changed();
+                changed |= ui
+                    .add(DragValue::new(interval_ms).range(1..=3_600_000).suffix(" ms"))
+                    .changed();
             });
         }
         Source::WebSocket { url } => {
             ui.label(RichText::new("주소").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY))
+                .changed();
         }
-        Source::HttpPoll { url, interval_ms, headers } => {
+        Source::HttpPoll {
+            url,
+            interval_ms,
+            headers,
+        } => {
             ui.label(RichText::new("주소").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY))
+                .changed();
             ui.horizontal(|ui| {
                 ui.label("간격");
-                changed |= ui.add(DragValue::new(interval_ms).range(1..=3_600_000).suffix(" ms")).changed();
+                changed |= ui
+                    .add(DragValue::new(interval_ms).range(1..=3_600_000).suffix(" ms"))
+                    .changed();
             });
             changed |= headers_editor(ui, headers, "src");
         }
@@ -389,11 +445,17 @@ fn source_editor(
         }
         Source::HttpServer { bind, path, token } => {
             ui.label(RichText::new("주소:포트").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(bind).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(bind).desired_width(f32::INFINITY))
+                .changed();
             let loopback = nl_core::pipeline::is_loopback_bind(bind);
             match bind.parse::<std::net::SocketAddr>() {
                 Ok(_) if loopback => {
-                    ui.label(RichText::new("✔ 루프백 — 이 컴퓨터에서만 닿습니다").color(COL_OK).size(11.0));
+                    ui.label(
+                        RichText::new("✔ 루프백 — 이 컴퓨터에서만 닿습니다")
+                            .color(COL_OK)
+                            .size(11.0),
+                    );
                 }
                 Ok(_) => {
                     ui.label(
@@ -403,11 +465,17 @@ fn source_editor(
                     );
                 }
                 Err(e) => {
-                    ui.label(RichText::new(format!("✖ 주소를 읽을 수 없습니다: {e}")).color(COL_ERROR).size(11.0));
+                    ui.label(
+                        RichText::new(format!("✖ 주소를 읽을 수 없습니다: {e}"))
+                            .color(COL_ERROR)
+                            .size(11.0),
+                    );
                 }
             }
             ui.label(RichText::new("경로").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY))
+                .changed();
             if !path.starts_with('/') {
                 ui.label(RichText::new("경로는 / 로 시작해야 합니다").color(COL_WARN).size(11.0));
             }
@@ -439,9 +507,15 @@ fn token_editor(ui: &mut egui::Ui, token: &mut Option<String>, loopback: bool) -
 
     let mut text = token.clone().unwrap_or_default();
     ui.horizontal(|ui| {
-        let edit = egui::TextEdit::singleline(&mut text).password(!visible).desired_width(200.0);
+        let edit = egui::TextEdit::singleline(&mut text)
+            .password(!visible)
+            .desired_width(200.0);
         if ui.add(edit).changed() {
-            *token = if text.trim().is_empty() { None } else { Some(text.clone()) };
+            *token = if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.clone())
+            };
             changed = true;
         }
         let eye = if visible { "숨기기" } else { "보기" };
@@ -451,7 +525,11 @@ fn token_editor(ui: &mut egui::Ui, token: &mut Option<String>, loopback: bool) -
         }
     });
     ui.horizontal(|ui| {
-        if ui.small_button("새로 만들기").on_hover_text("무작위 토큰을 만들어 채웁니다").clicked() {
+        if ui
+            .small_button("새로 만들기")
+            .on_hover_text("무작위 토큰을 만들어 채웁니다")
+            .clicked()
+        {
             *token = Some(nl_core::pipeline::new_token());
             changed = true;
         }
@@ -474,19 +552,29 @@ fn token_editor(ui: &mut egui::Ui, token: &mut Option<String>, loopback: bool) -
                 .size(11.0),
         );
     } else if empty {
-        ui.label(RichText::new("토큰 없음 — 루프백이라 이 컴퓨터에서만 닿습니다").color(COL_WEAK).size(11.0));
+        ui.label(
+            RichText::new("토큰 없음 — 루프백이라 이 컴퓨터에서만 닿습니다")
+                .color(COL_WEAK)
+                .size(11.0),
+        );
     }
     ui.label(
-        RichText::new("토큰은 프로젝트 파일에 그대로 저장됩니다. 배포한 앱에서는 NL_HTTP_TOKEN 환경 변수로 덮어쓸 수 있습니다.")
-            .color(COL_WEAK)
-            .size(10.5),
+        RichText::new(
+            "토큰은 프로젝트 파일에 그대로 저장됩니다. 배포한 앱에서는 NL_HTTP_TOKEN 환경 변수로 덮어쓸 수 있습니다.",
+        )
+        .color(COL_WEAK)
+        .size(10.5),
     );
     changed
 }
 
 /// 이 서버 노드를 부르는 curl 한 줄.
 pub fn curl_example(bind: &str, path: &str, token: Option<&str>) -> String {
-    let host = if bind.starts_with("0.0.0.0") { bind.replacen("0.0.0.0", "127.0.0.1", 1) } else { bind.to_string() };
+    let host = if bind.starts_with("0.0.0.0") {
+        bind.replacen("0.0.0.0", "127.0.0.1", 1)
+    } else {
+        bind.to_string()
+    };
     // 토큰이 있으면 헤더가 필수다 — 빠뜨린 예시를 복사해 붙이면 401 만 보게 된다.
     let auth = match token.map(str::trim).filter(|t| !t.is_empty()) {
         Some(t) => format!(" -H 'X-NL-Token: {t}'"),
@@ -506,35 +594,61 @@ pub(crate) fn region_editor(ui: &mut egui::Ui, region: &mut Region, ctx: &ViewCt
     ui.label(RichText::new("모니터").color(COL_WEAK).size(11.0));
     let current = ctx.monitors.iter().find(|m| m.index == region.monitor);
     let label = match current {
-        Some(m) => format!("{} · {}×{}{}", m.name, m.width, m.height, if m.primary { " (주)" } else { "" }),
+        Some(m) => format!(
+            "{} · {}×{}{}",
+            m.name,
+            m.width,
+            m.height,
+            if m.primary { " (주)" } else { "" }
+        ),
         None => format!("모니터 {}", region.monitor),
     };
-    egui::ComboBox::from_id_salt("region-monitor").selected_text(label).show_ui(ui, |ui| {
-        if ctx.monitors.is_empty() {
-            ui.label(RichText::new("목록 없음").weak());
-        }
-        for m in ctx.monitors {
-            let text = format!("{} · {}×{}{}", m.name, m.width, m.height, if m.primary { " (주)" } else { "" });
-            if ui.selectable_label(region.monitor == m.index, text).clicked() && region.monitor != m.index {
-                region.monitor = m.index;
-                changed = true;
+    egui::ComboBox::from_id_salt("region-monitor")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            if ctx.monitors.is_empty() {
+                ui.label(RichText::new("목록 없음").weak());
             }
-        }
-    });
+            for m in ctx.monitors {
+                let text = format!(
+                    "{} · {}×{}{}",
+                    m.name,
+                    m.width,
+                    m.height,
+                    if m.primary { " (주)" } else { "" }
+                );
+                if ui.selectable_label(region.monitor == m.index, text).clicked() && region.monitor != m.index {
+                    region.monitor = m.index;
+                    changed = true;
+                }
+            }
+        });
     if let Some(e) = ctx.monitors_error {
         ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.0));
     }
-    ui.label(RichText::new("영역 (모니터 왼쪽 위 기준 물리 픽셀)").color(COL_WEAK).size(11.0));
+    ui.label(
+        RichText::new("영역 (모니터 왼쪽 위 기준 물리 픽셀)")
+            .color(COL_WEAK)
+            .size(11.0),
+    );
     ui.horizontal(|ui| {
         changed |= ui.add(DragValue::new(&mut region.x).prefix("x ").speed(2.0)).changed();
         changed |= ui.add(DragValue::new(&mut region.y).prefix("y ").speed(2.0)).changed();
     });
     ui.horizontal(|ui| {
-        changed |= ui.add(DragValue::new(&mut region.width).prefix("w ").speed(2.0)).changed();
-        changed |= ui.add(DragValue::new(&mut region.height).prefix("h ").speed(2.0)).changed();
+        changed |= ui
+            .add(DragValue::new(&mut region.width).prefix("w ").speed(2.0))
+            .changed();
+        changed |= ui
+            .add(DragValue::new(&mut region.height).prefix("h ").speed(2.0))
+            .changed();
     });
     ui.horizontal(|ui| {
-        if ui.button("모니터 전체").on_hover_text("폭을 0 으로 두면 그 모니터 전체를 찍습니다").clicked() {
+        if ui
+            .button("모니터 전체")
+            .on_hover_text("폭을 0 으로 두면 그 모니터 전체를 찍습니다")
+            .clicked()
+        {
             region.x = 0;
             region.y = 0;
             region.width = 0;
@@ -567,18 +681,20 @@ fn widget_picker(ui: &mut egui::Ui, widget: &mut WidgetId, ctx: &ViewCtx, hint: 
         .get(widget)
         .map(|w| format!("{} · {}", w.kind.label(), widget.short()))
         .unwrap_or_else(|| "(고르세요)".into());
-    egui::ComboBox::from_id_salt(salt).selected_text(label).show_ui(ui, |ui| {
-        if ctx.project.gui.widgets.is_empty() {
-            ui.label(RichText::new("GUI 뷰에서 위젯을 먼저 만드세요").weak());
-        }
-        for (id, w) in &ctx.project.gui.widgets {
-            let text = format!("{} · {}", w.kind.label(), id.short());
-            if ui.selectable_label(widget == id, text).clicked() && widget != id {
-                *widget = *id;
-                changed = true;
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            if ctx.project.gui.widgets.is_empty() {
+                ui.label(RichText::new("GUI 뷰에서 위젯을 먼저 만드세요").weak());
             }
-        }
-    });
+            for (id, w) in &ctx.project.gui.widgets {
+                let text = format!("{} · {}", w.kind.label(), id.short());
+                if ui.selectable_label(widget == id, text).clicked() && widget != id {
+                    *widget = *id;
+                    changed = true;
+                }
+            }
+        });
     ui.label(RichText::new(hint).color(COL_WEAK).size(11.0));
     changed
 }
@@ -592,60 +708,79 @@ fn manual_sender(
     running: bool,
 ) {
     ui.add_space(8.0);
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(8).corner_radius(4).show(ui, |ui| {
-        ui.label(RichText::new("값 보내기").strong());
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("manual-kind").selected_text(state.manual_kind.label()).show_ui(ui, |ui| {
-                for k in ManualKind::ALL {
-                    if ui.selectable_label(state.manual_kind == k, k.label()).clicked() {
-                        state.manual_kind = k;
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(8)
+        .corner_radius(4)
+        .show(ui, |ui| {
+            ui.label(RichText::new("값 보내기").strong());
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("manual-kind")
+                    .selected_text(state.manual_kind.label())
+                    .show_ui(ui, |ui| {
+                        for k in ManualKind::ALL {
+                            if ui.selectable_label(state.manual_kind == k, k.label()).clicked() {
+                                state.manual_kind = k;
+                            }
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.manual_text)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(match state.manual_kind {
+                            ManualKind::Number => "1  또는  0, 1",
+                            ManualKind::Text => "보낼 문자열",
+                            ManualKind::Json => "{\"a\": 1}",
+                        }),
+                );
+            });
+            let parsed = parse_manual(state.manual_kind, &state.manual_text);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(running && parsed.is_ok(), |ui| {
+                    if ui.button("▶ 보내기").clicked() {
+                        if let Ok(v) = &parsed {
+                            actions.push(ViewAction::SendManual {
+                                node: nid,
+                                value: v.clone(),
+                            });
+                        }
                     }
+                });
+                if !running {
+                    ui.label(
+                        RichText::new("실행 중일 때만 보낼 수 있습니다")
+                            .color(COL_WEAK)
+                            .size(11.0),
+                    );
+                } else if let Err(e) = &parsed {
+                    ui.label(RichText::new(e).color(COL_WARN).size(11.0));
                 }
             });
-            ui.add(egui::TextEdit::singleline(&mut state.manual_text).desired_width(f32::INFINITY).hint_text(
-                match state.manual_kind {
-                    ManualKind::Number => "1  또는  0, 1",
-                    ManualKind::Text => "보낼 문자열",
-                    ManualKind::Json => "{\"a\": 1}",
-                },
-            ));
         });
-        let parsed = parse_manual(state.manual_kind, &state.manual_text);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(running && parsed.is_ok(), |ui| {
-                if ui.button("▶ 보내기").clicked() {
-                    if let Ok(v) = &parsed {
-                        actions.push(ViewAction::SendManual { node: nid, value: v.clone() });
-                    }
-                }
-            });
-            if !running {
-                ui.label(RichText::new("실행 중일 때만 보낼 수 있습니다").color(COL_WEAK).size(11.0));
-            } else if let Err(e) = &parsed {
-                ui.label(RichText::new(e).color(COL_WARN).size(11.0));
-            }
-        });
-    });
 }
 
 /// 실행 중인 HTTP 서버 노드를 바깥에서 불러 보는 칸.
 fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, token: Option<&str>, running: bool) {
     ui.add_space(8.0);
-    egui::Frame::NONE.fill(COL_SURFACE).inner_margin(8).corner_radius(4).show(ui, |ui| {
-        ui.label(RichText::new("바깥에서 불러 보기").strong());
-        let cmd = curl_example(bind, path, token);
-        ui.label(RichText::new(&cmd).size(11.0).monospace());
-        ui.horizontal(|ui| {
-            if ui.button("복사").clicked() {
-                ui.ctx().copy_text(cmd.clone());
-            }
-            if running {
-                ui.label(RichText::new("● 서버가 열려 있습니다").color(COL_OK).size(11.0));
-            } else {
-                ui.label(RichText::new("시험 실행 중에만 열립니다").color(COL_WEAK).size(11.0));
-            }
+    egui::Frame::NONE
+        .fill(COL_SURFACE)
+        .inner_margin(8)
+        .corner_radius(4)
+        .show(ui, |ui| {
+            ui.label(RichText::new("바깥에서 불러 보기").strong());
+            let cmd = curl_example(bind, path, token);
+            ui.label(RichText::new(&cmd).size(11.0).monospace());
+            ui.horizontal(|ui| {
+                if ui.button("복사").clicked() {
+                    ui.ctx().copy_text(cmd.clone());
+                }
+                if running {
+                    ui.label(RichText::new("● 서버가 열려 있습니다").color(COL_OK).size(11.0));
+                } else {
+                    ui.label(RichText::new("시험 실행 중에만 열립니다").color(COL_WEAK).size(11.0));
+                }
+            });
         });
-    });
 }
 
 // ── 모델 ────────────────────────────────────────────────────────────
@@ -653,18 +788,29 @@ fn http_server_tester(ui: &mut egui::Ui, bind: &str, path: &str, token: Option<&
 fn model_editor(ui: &mut egui::Ui, model: &mut ModelId, payload: &mut Option<PayloadId>, ctx: &ViewCtx) -> bool {
     let mut changed = false;
     ui.label(RichText::new("모델").color(COL_WEAK).size(11.0));
-    let label = ctx.project.models.get(model).map(|m| m.name.clone()).unwrap_or_else(|| "(없는 모델)".into());
-    egui::ComboBox::from_id_salt("pnode-model").selected_text(label).show_ui(ui, |ui| {
-        for (id, m) in &ctx.project.models {
-            if ui.selectable_label(model == id, &m.name).clicked() && model != id {
-                *model = *id;
-                changed = true;
+    let label = ctx
+        .project
+        .models
+        .get(model)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "(없는 모델)".into());
+    egui::ComboBox::from_id_salt("pnode-model")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for (id, m) in &ctx.project.models {
+                if ui.selectable_label(model == id, &m.name).clicked() && model != id {
+                    *model = *id;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     match ctx.project.models.get(model) {
         None => {
-            ui.label(RichText::new("✖ 프로젝트에 없는 모델입니다").color(COL_ERROR).size(11.0));
+            ui.label(
+                RichText::new("✖ 프로젝트에 없는 모델입니다")
+                    .color(COL_ERROR)
+                    .size(11.0),
+            );
         }
         Some(m) if m.weights.is_none() => {
             ui.label(
@@ -674,9 +820,14 @@ fn model_editor(ui: &mut egui::Ui, model: &mut ModelId, payload: &mut Option<Pay
             );
         }
         Some(m) => {
-            ui.label(RichText::new(format!("✔ 가중치 {}", super::short_path(m.weights.as_deref().unwrap_or(""))))
+            ui.label(
+                RichText::new(format!(
+                    "✔ 가중치 {}",
+                    super::short_path(m.weights.as_deref().unwrap_or(""))
+                ))
                 .color(COL_OK)
-                .size(11.0));
+                .size(11.0),
+            );
         }
     }
     ui.add_space(4.0);
@@ -685,18 +836,20 @@ fn model_editor(ui: &mut egui::Ui, model: &mut ModelId, payload: &mut Option<Pay
         .and_then(|p| ctx.project.payloads.get(&p))
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "(모델 기본값)".into());
-    egui::ComboBox::from_id_salt("pnode-payload").selected_text(plabel).show_ui(ui, |ui| {
-        if ui.selectable_label(payload.is_none(), "(모델 기본값)").clicked() && payload.is_some() {
-            *payload = None;
-            changed = true;
-        }
-        for (id, p) in &ctx.project.payloads {
-            if ui.selectable_label(*payload == Some(*id), &p.name).clicked() && *payload != Some(*id) {
-                *payload = Some(*id);
+    egui::ComboBox::from_id_salt("pnode-payload")
+        .selected_text(plabel)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(payload.is_none(), "(모델 기본값)").clicked() && payload.is_some() {
+                *payload = None;
                 changed = true;
             }
-        }
-    });
+            for (id, p) in &ctx.project.payloads {
+                if ui.selectable_label(*payload == Some(*id), &p.name).clicked() && *payload != Some(*id) {
+                    *payload = Some(*id);
+                    changed = true;
+                }
+            }
+        });
     changed
 }
 
@@ -705,15 +858,17 @@ fn model_editor(ui: &mut egui::Ui, model: &mut ModelId, payload: &mut Option<Pay
 fn logic_editor(ui: &mut egui::Ui, logic: &mut Logic, state: &mut PipelineViewState) -> bool {
     let mut changed = false;
     ui.label(RichText::new("로직 종류").color(COL_WEAK).size(11.5));
-    egui::ComboBox::from_id_salt("logic-kind").selected_text(logic_label(logic)).show_ui(ui, |ui| {
-        for l in crate::pcanvas::logic_palette() {
-            let same = std::mem::discriminant(logic) == std::mem::discriminant(&l);
-            if ui.selectable_label(same, logic_label(&l)).clicked() && !same {
-                *logic = l;
-                changed = true;
+    egui::ComboBox::from_id_salt("logic-kind")
+        .selected_text(logic_label(logic))
+        .show_ui(ui, |ui| {
+            for l in crate::pcanvas::logic_palette() {
+                let same = std::mem::discriminant(logic) == std::mem::discriminant(&l);
+                if ui.selectable_label(same, logic_label(&l)).clicked() && !same {
+                    *logic = l;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     ui.add_space(4.0);
     match logic {
         Logic::Threshold { value } => {
@@ -753,25 +908,42 @@ fn map_table_editor(ui: &mut egui::Ui, table: &mut BTreeMap<i64, i64>, state: &m
     let mut changed = false;
     ui.label(RichText::new("정수 → 정수 치환").color(COL_WEAK).size(11.0));
     let mut remove: Option<i64> = None;
-    egui::Grid::new("logic-map").num_columns(3).spacing([8.0, 3.0]).show(ui, |ui| {
-        for (k, v) in table.iter_mut() {
-            ui.label(k.to_string());
-            changed |= ui.add(DragValue::new(v).speed(1.0)).changed();
-            if ui.small_button("✖").clicked() {
-                remove = Some(*k);
+    egui::Grid::new("logic-map")
+        .num_columns(3)
+        .spacing([8.0, 3.0])
+        .show(ui, |ui| {
+            for (k, v) in table.iter_mut() {
+                ui.label(k.to_string());
+                changed |= ui.add(DragValue::new(v).speed(1.0)).changed();
+                if ui.small_button("✖").clicked() {
+                    remove = Some(*k);
+                }
+                ui.end_row();
             }
-            ui.end_row();
-        }
-    });
+        });
     if let Some(k) = remove {
         table.remove(&k);
         changed = true;
     }
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut state.new_map.0).desired_width(60.0).hint_text("입력"));
+        ui.add(
+            egui::TextEdit::singleline(&mut state.new_map.0)
+                .desired_width(60.0)
+                .hint_text("입력"),
+        );
         ui.label("→");
-        ui.add(egui::TextEdit::singleline(&mut state.new_map.1).desired_width(60.0).hint_text("출력"));
-        let parsed = state.new_map.0.trim().parse::<i64>().ok().zip(state.new_map.1.trim().parse::<i64>().ok());
+        ui.add(
+            egui::TextEdit::singleline(&mut state.new_map.1)
+                .desired_width(60.0)
+                .hint_text("출력"),
+        );
+        let parsed = state
+            .new_map
+            .0
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .zip(state.new_map.1.trim().parse::<i64>().ok());
         ui.add_enabled_ui(parsed.is_some(), |ui| {
             if ui.small_button("＋").clicked() {
                 if let Some((k, v)) = parsed {
@@ -797,53 +969,84 @@ fn sink_editor(
 ) -> bool {
     let mut changed = false;
     ui.label(RichText::new("싱크 종류").color(COL_WEAK).size(11.5));
-    egui::ComboBox::from_id_salt("sink-kind").selected_text(sink_label(sink)).show_ui(ui, |ui| {
-        for s in crate::pcanvas::sink_palette() {
-            let same = std::mem::discriminant(sink) == std::mem::discriminant(&s);
-            if ui.selectable_label(same, sink_label(&s)).clicked() && !same {
-                *sink = s;
-                changed = true;
+    egui::ComboBox::from_id_salt("sink-kind")
+        .selected_text(sink_label(sink))
+        .show_ui(ui, |ui| {
+            for s in crate::pcanvas::sink_palette() {
+                let same = std::mem::discriminant(sink) == std::mem::discriminant(&s);
+                if ui.selectable_label(same, sink_label(&s)).clicked() && !same {
+                    *sink = s;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     ui.add_space(4.0);
     match sink {
         Sink::Log => {
-            ui.label(RichText::new("값을 로그로 남깁니다 (하단 도크의 로그 탭).").color(COL_WEAK).size(11.0));
+            ui.label(
+                RichText::new("값을 로그로 남깁니다 (하단 도크의 로그 탭).")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
         }
         Sink::StdoutJson => {
-            ui.label(RichText::new("표준 출력에 JSON 한 줄씩 씁니다.").color(COL_WEAK).size(11.0));
+            ui.label(
+                RichText::new("표준 출력에 JSON 한 줄씩 씁니다.")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
         }
         Sink::GuiWidget { widget } => {
             changed |= widget_picker(ui, widget, ctx, "이 위젯에 값을 표시합니다", "sink-widget");
         }
         Sink::File { path, append } => {
             ui.label(RichText::new("파일 경로").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY))
+                .changed();
             changed |= ui.checkbox(append, "덧붙이기").changed();
         }
         Sink::WebSocketSend { url } => {
             ui.label(RichText::new("주소").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY))
+                .changed();
         }
-        Sink::HttpCall { method, url, headers, body_template } => {
+        Sink::HttpCall {
+            method,
+            url,
+            headers,
+            body_template,
+        } => {
             ui.horizontal(|ui| {
                 ui.label("메서드");
-                egui::ComboBox::from_id_salt("sink-method").selected_text(method.clone()).show_ui(ui, |ui| {
-                    for m in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
-                        if ui.selectable_label(method == m, m).clicked() && method != m {
-                            *method = m.to_string();
-                            changed = true;
+                egui::ComboBox::from_id_salt("sink-method")
+                    .selected_text(method.clone())
+                    .show_ui(ui, |ui| {
+                        for m in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                            if ui.selectable_label(method == m, m).clicked() && method != m {
+                                *method = m.to_string();
+                                changed = true;
+                            }
                         }
-                    }
-                });
+                    });
             });
             ui.label(RichText::new("주소").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY)).changed();
-            changed |= headers_editor(ui, headers, "sink");
-            ui.label(RichText::new("본문 틀 ({{value}} 가 입력 값으로 바뀝니다)").color(COL_WEAK).size(11.0));
             changed |= ui
-                .add(egui::TextEdit::multiline(body_template).desired_rows(3).desired_width(f32::INFINITY))
+                .add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY))
+                .changed();
+            changed |= headers_editor(ui, headers, "sink");
+            ui.label(
+                RichText::new("본문 틀 ({{value}} 가 입력 값으로 바뀝니다)")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
+            changed |= ui
+                .add(
+                    egui::TextEdit::multiline(body_template)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                )
                 .changed();
         }
         Sink::HttpReply { server } => {
@@ -855,7 +1058,14 @@ fn sink_editor(
                 .map(|pl| {
                     pl.nodes
                         .values()
-                        .filter(|n| matches!(n.kind, PNodeKind::Source { source: Source::HttpServer { .. } }))
+                        .filter(|n| {
+                            matches!(
+                                n.kind,
+                                PNodeKind::Source {
+                                    source: Source::HttpServer { .. }
+                                }
+                            )
+                        })
                         .map(|n| (n.id, crate::pcanvas::node_title(n)))
                         .collect()
                 })
@@ -865,32 +1075,43 @@ fn sink_editor(
                 .find(|(id, _)| id == server)
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| "(고르세요)".into());
-            egui::ComboBox::from_id_salt("sink-http-server").selected_text(label).show_ui(ui, |ui| {
-                if servers.is_empty() {
-                    ui.label(RichText::new("같은 파이프라인에 HTTP 서버 소스가 없습니다").weak());
-                }
-                for (id, name) in &servers {
-                    if ui.selectable_label(server == id, name).clicked() && server != id {
-                        *server = *id;
-                        changed = true;
+            egui::ComboBox::from_id_salt("sink-http-server")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    if servers.is_empty() {
+                        ui.label(RichText::new("같은 파이프라인에 HTTP 서버 소스가 없습니다").weak());
                     }
-                }
-            });
+                    for (id, name) in &servers {
+                        if ui.selectable_label(server == id, name).clicked() && server != id {
+                            *server = *id;
+                            changed = true;
+                        }
+                    }
+                });
             if servers.iter().any(|(id, _)| id == server) {
                 ui.label(RichText::new("✔ 서버 노드와 짝지어졌습니다").color(COL_OK).size(11.0));
             } else {
                 ui.label(
-                    RichText::new("✖ 짝이 없으면 요청이 타임아웃까지 기다립니다").color(COL_ERROR).size(11.0),
+                    RichText::new("✖ 짝이 없으면 요청이 타임아웃까지 기다립니다")
+                        .color(COL_ERROR)
+                        .size(11.0),
                 );
             }
         }
-        Sink::MouseKeyboard { actions: list, cooldown_ms } => {
+        Sink::MouseKeyboard {
+            actions: list,
+            cooldown_ms,
+        } => {
             ui.horizontal(|ui| {
                 ui.label("쿨다운");
-                changed |= ui.add(DragValue::new(cooldown_ms).range(0..=600_000).suffix(" ms")).changed();
+                changed |= ui
+                    .add(DragValue::new(cooldown_ms).range(0..=600_000).suffix(" ms"))
+                    .changed();
             });
             ui.label(
-                RichText::new("입력 값(정수 인덱스)에 해당하는 액션을 실행합니다.").color(COL_WEAK).size(11.0),
+                RichText::new("입력 값(정수 인덱스)에 해당하는 액션을 실행합니다.")
+                    .color(COL_WEAK)
+                    .size(11.0),
             );
             changed |= actions_editor(ui, list, state);
         }
@@ -907,16 +1128,19 @@ fn headers_editor(ui: &mut egui::Ui, headers: &mut BTreeMap<String, String>, sal
     ui.add_space(4.0);
     ui.label(RichText::new("헤더").color(COL_WEAK).size(11.0));
     let mut remove: Option<String> = None;
-    egui::Grid::new(format!("{salt}-headers")).num_columns(3).spacing([6.0, 3.0]).show(ui, |ui| {
-        for (k, v) in headers.iter_mut() {
-            ui.label(RichText::new(k.as_str()).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(v).desired_width(140.0)).changed();
-            if ui.small_button("✖").clicked() {
-                remove = Some(k.clone());
+    egui::Grid::new(format!("{salt}-headers"))
+        .num_columns(3)
+        .spacing([6.0, 3.0])
+        .show(ui, |ui| {
+            for (k, v) in headers.iter_mut() {
+                ui.label(RichText::new(k.as_str()).size(11.0));
+                changed |= ui.add(egui::TextEdit::singleline(v).desired_width(140.0)).changed();
+                if ui.small_button("✖").clicked() {
+                    remove = Some(k.clone());
+                }
+                ui.end_row();
             }
-            ui.end_row();
-        }
-    });
+        });
     if let Some(k) = remove {
         headers.remove(&k);
         changed = true;
@@ -925,8 +1149,16 @@ fn headers_editor(ui: &mut egui::Ui, headers: &mut BTreeMap<String, String>, sal
     let id = ui.id().with((salt, "new-header"));
     let mut draft: (String, String) = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut draft.0).desired_width(90.0).hint_text("이름"));
-        ui.add(egui::TextEdit::singleline(&mut draft.1).desired_width(110.0).hint_text("값"));
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.0)
+                .desired_width(90.0)
+                .hint_text("이름"),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.1)
+                .desired_width(110.0)
+                .hint_text("값"),
+        );
         let ok = !draft.0.trim().is_empty();
         ui.add_enabled_ui(ok, |ui| {
             if ui.small_button("＋").clicked() {
@@ -949,28 +1181,32 @@ fn actions_editor(ui: &mut egui::Ui, list: &mut Vec<InputAction>, state: &mut Pi
     let mut swap: Option<(usize, usize)> = None;
     let len = list.len();
     for (i, action) in list.iter_mut().enumerate() {
-        egui::Frame::NONE.fill(COL_SURFACE).inner_margin(6).corner_radius(3).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("[{i}]")).color(COL_WEAK).size(11.0));
-                ui.label(RichText::new(nl_io::input::describe(action)).size(11.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✖").clicked() {
-                        remove = Some(i);
-                    }
-                    ui.add_enabled_ui(i + 1 < len, |ui| {
-                        if ui.small_button("▼").clicked() {
-                            swap = Some((i, i + 1));
+        egui::Frame::NONE
+            .fill(COL_SURFACE)
+            .inner_margin(6)
+            .corner_radius(3)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("[{i}]")).color(COL_WEAK).size(11.0));
+                    ui.label(RichText::new(nl_io::input::describe(action)).size(11.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✖").clicked() {
+                            remove = Some(i);
                         }
-                    });
-                    ui.add_enabled_ui(i > 0, |ui| {
-                        if ui.small_button("▲").clicked() {
-                            swap = Some((i, i - 1));
-                        }
+                        ui.add_enabled_ui(i + 1 < len, |ui| {
+                            if ui.small_button("▼").clicked() {
+                                swap = Some((i, i + 1));
+                            }
+                        });
+                        ui.add_enabled_ui(i > 0, |ui| {
+                            if ui.small_button("▲").clicked() {
+                                swap = Some((i, i - 1));
+                            }
+                        });
                     });
                 });
+                changed |= action_editor(ui, action, 0, i);
             });
-            changed |= action_editor(ui, action, 0, i);
-        });
     }
     if let Some((a, b)) = swap {
         list.swap(a, b);
@@ -993,9 +1229,9 @@ fn action_editor(ui: &mut egui::Ui, action: &mut InputAction, depth: usize, salt
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new("종류").color(COL_WEAK).size(11.0));
-        egui::ComboBox::from_id_salt(("act-kind", depth, salt)).selected_text(action_label(action)).show_ui(
-            ui,
-            |ui| {
+        egui::ComboBox::from_id_salt(("act-kind", depth, salt))
+            .selected_text(action_label(action))
+            .show_ui(ui, |ui| {
                 for a in action_palette() {
                     let same = std::mem::discriminant(action) == std::mem::discriminant(&a);
                     if ui.selectable_label(same, action_label(&a)).clicked() && !same {
@@ -1003,8 +1239,7 @@ fn action_editor(ui: &mut egui::Ui, action: &mut InputAction, depth: usize, salt
                         changed = true;
                     }
                 }
-            },
-        );
+            });
     });
     match action {
         InputAction::None => {}
@@ -1046,7 +1281,11 @@ fn action_editor(ui: &mut egui::Ui, action: &mut InputAction, depth: usize, salt
             ui.horizontal(|ui| {
                 ui.label("키");
                 changed |= ui
-                    .add(egui::TextEdit::singleline(key).desired_width(110.0).id_salt(("key", depth, salt)))
+                    .add(
+                        egui::TextEdit::singleline(key)
+                            .desired_width(110.0)
+                            .id_salt(("key", depth, salt)),
+                    )
                     .changed();
                 // 키 이름은 실행기가 쓰는 `parse_key` 로 즉시 검증한다 — 실행 때 처음 알면 늦다.
                 match nl_io::parse_key(key) {
@@ -1054,7 +1293,8 @@ fn action_editor(ui: &mut egui::Ui, action: &mut InputAction, depth: usize, salt
                         ui.label(RichText::new("✔").color(COL_OK));
                     }
                     Err(e) => {
-                        ui.label(RichText::new("✖").color(COL_ERROR)).on_hover_text(format!("{e}"));
+                        ui.label(RichText::new("✖").color(COL_ERROR))
+                            .on_hover_text(format!("{e}"));
                     }
                 }
             });
@@ -1062,12 +1302,20 @@ fn action_editor(ui: &mut egui::Ui, action: &mut InputAction, depth: usize, salt
         InputAction::TypeText { text } => {
             ui.label(RichText::new("문자열").color(COL_WEAK).size(11.0));
             changed |= ui
-                .add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY).id_salt(("txt", depth, salt)))
+                .add(
+                    egui::TextEdit::singleline(text)
+                        .desired_width(f32::INFINITY)
+                        .id_salt(("txt", depth, salt)),
+                )
                 .changed();
         }
         InputAction::Sequence { steps } => {
             if depth >= 2 {
-                ui.label(RichText::new("더 깊은 중첩은 편집기에서 지원하지 않습니다").color(COL_WARN).size(11.0));
+                ui.label(
+                    RichText::new("더 깊은 중첩은 편집기에서 지원하지 않습니다")
+                        .color(COL_WARN)
+                        .size(11.0),
+                );
                 return changed;
             }
             ui.indent(("seq", depth, salt), |ui| {
@@ -1101,7 +1349,9 @@ pub fn action_palette() -> Vec<InputAction> {
         InputAction::None,
         InputAction::MoveTo { x: 0, y: 0 },
         InputAction::MoveBy { dx: 0, dy: 0 },
-        InputAction::Click { button: MouseButton::Left },
+        InputAction::Click {
+            button: MouseButton::Left,
+        },
         InputAction::Scroll { dx: 0, dy: 0 },
         InputAction::KeyTap { key: "space".into() },
         InputAction::KeyDown { key: "shift".into() },
@@ -1133,7 +1383,10 @@ mod tests {
     #[test]
     fn manual_number_accepts_one_or_many() {
         assert_eq!(parse_manual(ManualKind::Number, "1.5"), Ok(Value::Number(1.5)));
-        assert_eq!(parse_manual(ManualKind::Number, "0, 1"), Ok(Value::Numbers(vec![0.0, 1.0])));
+        assert_eq!(
+            parse_manual(ManualKind::Number, "0, 1"),
+            Ok(Value::Numbers(vec![0.0, 1.0]))
+        );
         assert!(parse_manual(ManualKind::Number, "").is_err());
         assert!(parse_manual(ManualKind::Number, "a").is_err());
     }
@@ -1183,7 +1436,9 @@ mod tests {
             .into_iter()
             .find(|s| matches!(s, Source::HttpServer { .. }))
             .expect("팔레트에 HTTP 서버");
-        let Source::HttpServer { token, .. } = found else { panic!("HTTP 서버") };
+        let Source::HttpServer { token, .. } = found else {
+            panic!("HTTP 서버")
+        };
         let token = token.expect("토큰이 채워져 있어야 한다");
         assert_eq!(token.chars().count(), nl_core::pipeline::TOKEN_LEN);
     }

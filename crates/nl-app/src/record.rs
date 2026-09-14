@@ -40,7 +40,10 @@ pub fn spawn_shot(region: Region) -> Receiver<Result<Shot, String>> {
 fn grab_once(region: Region) -> Result<Shot, String> {
     let mut cap = Capturer::new().map_err(|e| format!("{e:#}"))?;
     let frame = cap.capture(&region).map_err(|e| format!("{e:#}"))?;
-    Ok(Shot { frame, backend: cap.backend() })
+    Ok(Shot {
+        frame,
+        backend: cap.backend(),
+    })
 }
 
 /// "지금 한 장 캡처" 결과. 캡처 소스 인스펙터와 녹화 폼이 함께 쓴다.
@@ -135,10 +138,8 @@ impl RecordSession {
         }
         self.last_preview = now;
         if let Some(frame) = self.handle.last_frame() {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [frame.width as usize, frame.height as usize],
-                &frame.rgba,
-            );
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba);
             let name = format!("record-preview-{}", self.started_at as i64);
             match &mut self.texture {
                 Some(t) => t.set(image, egui::TextureOptions::LINEAR),
@@ -193,7 +194,9 @@ fn read_backend(dir: &Path) -> Option<Backend> {
 
 /// `Backend::label()` 의 역방향.
 pub fn backend_from_label(label: &str) -> Option<Backend> {
-    [Backend::Wayland, Backend::Portal, Backend::X11, Backend::XCap].into_iter().find(|b| b.label() == label)
+    [Backend::Wayland, Backend::Portal, Backend::X11, Backend::XCap]
+        .into_iter()
+        .find(|b| b.label() == label)
 }
 
 /// 녹화 폴더 기본 자리: `<프로젝트 폴더>/recordings/<이름>`.
@@ -205,7 +208,13 @@ pub fn default_dir(base: &Path, name: &str) -> PathBuf {
 pub fn sanitize_dir(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let t = cleaned.trim();
     if t.is_empty() {
@@ -246,8 +255,14 @@ mod tests {
         let d = default_dir(Path::new("/proj"), "책상 화면");
         assert_eq!(d, PathBuf::from("/proj/recordings/책상 화면"));
         // 경로 구분자는 접힌다 — 폴더가 엉뚱한 곳에 생기면 안 된다.
-        assert_eq!(default_dir(Path::new("/proj"), "a/b"), PathBuf::from("/proj/recordings/a_b"));
-        assert_eq!(default_dir(Path::new("/proj"), "  "), PathBuf::from("/proj/recordings/recording"));
+        assert_eq!(
+            default_dir(Path::new("/proj"), "a/b"),
+            PathBuf::from("/proj/recordings/a_b")
+        );
+        assert_eq!(
+            default_dir(Path::new("/proj"), "  "),
+            PathBuf::from("/proj/recordings/recording")
+        );
     }
 
     #[test]
@@ -265,7 +280,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nl-record-meta-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), r#"{"backend":"portal(xdg-desktop-portal)","fps":2.0}"#).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            r#"{"backend":"portal(xdg-desktop-portal)","fps":2.0}"#,
+        )
+        .unwrap();
         assert_eq!(read_backend(&dir), Some(Backend::Portal));
         // 파일이 없거나 필드가 없으면 조용히 None.
         std::fs::write(dir.join("meta.json"), "{}").unwrap();

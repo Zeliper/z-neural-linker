@@ -9,6 +9,7 @@ pub mod paths;
 pub mod pcanvas;
 pub mod project;
 pub mod record;
+pub mod recovery;
 pub mod sample;
 pub mod session;
 pub mod tools;

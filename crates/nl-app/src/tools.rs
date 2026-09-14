@@ -101,20 +101,32 @@ fn check_runtime(target: BuildTarget) -> ToolState {
             format!("찾은 곳 없음 — {}", places.join(" · "))
         }
     };
-    ToolState { kind: ToolKind::Runtime(target), path, note }
+    ToolState {
+        kind: ToolKind::Runtime(target),
+        path,
+        note,
+    }
 }
 
 fn check_inno() -> ToolState {
     // 탐지 규칙은 nl-bundle 이 소유한다 — 빌드할 때 실제로 쓰는 것과 같은 경로여야 한다.
     if let Some(found) = nl_bundle::find_inno_setup() {
         let note = found.describe();
-        return ToolState { kind: ToolKind::InnoSetup, path: Some(found.path.clone()), note };
+        return ToolState {
+            kind: ToolKind::InnoSetup,
+            path: Some(found.path.clone()),
+            note,
+        };
     }
     let note = match which("wine") {
         Some(w) => format!("wine 은 있음({}) — Inno Setup 컴파일러는 없음", w.display()),
         None => "Inno Setup 도 wine 도 찾지 못함".into(),
     };
-    ToolState { kind: ToolKind::InnoSetup, path: None, note }
+    ToolState {
+        kind: ToolKind::InnoSetup,
+        path: None,
+        note,
+    }
 }
 
 /// 내려받은 런타임을 두는 폴더: `<사용자 데이터>/neural-linker/runtimes/`.
@@ -179,7 +191,9 @@ impl Manifest {
     /// 대상에 맞는 자산. 트리플 키(`x86_64-unknown-linux-gnu`)를 먼저 보고,
     /// 없으면 패키징 스크립트가 쓰는 짧은 키(`linux-x86_64`)를 본다.
     pub fn asset_for(&self, target: BuildTarget) -> Option<&Asset> {
-        self.assets.get(target.triple()).or_else(|| self.assets.get(short_key(target)))
+        self.assets
+            .get(target.triple())
+            .or_else(|| self.assets.get(short_key(target)))
     }
 }
 
@@ -192,7 +206,10 @@ pub fn short_key(target: BuildTarget) -> &'static str {
 
 /// 설정에서 매니페스트 주소를 정한다: 환경 변수 → 저장된 값 → 기본값.
 pub fn manifest_url(stored: Option<&str>) -> String {
-    if let Some(v) = std::env::var("NL_RUNTIME_MANIFEST").ok().filter(|v| !v.trim().is_empty()) {
+    if let Some(v) = std::env::var("NL_RUNTIME_MANIFEST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
         return v;
     }
     match stored.map(str::trim).filter(|v| !v.is_empty()) {
@@ -204,7 +221,13 @@ pub fn manifest_url(stored: Option<&str>) -> String {
 fn fetch_manifest(url: &str) -> Result<Manifest, String> {
     let body = nl_io::call("GET", url, &Default::default(), None, NET_TIMEOUT)
         .map_err(|e| format!("{e:#}"))
-        .and_then(|r| if r.is_success() { Ok(r.body) } else { Err(format!("HTTP {}", r.status)) })?;
+        .and_then(|r| {
+            if r.is_success() {
+                Ok(r.body)
+            } else {
+                Err(format!("HTTP {}", r.status))
+            }
+        })?;
     serde_json::from_str(&body).map_err(|e| format!("매니페스트를 읽지 못했습니다: {e}"))
 }
 
@@ -239,14 +262,22 @@ impl Plan {
     /// 이 계획이 무엇을 확인하는지.
     pub fn verification(&self) -> Verification {
         match &self.method {
-            Method::Download { sha256, .. } => {
-                Verification { sha256: !sha256.trim().is_empty(), signature: false, downloads: true }
-            }
+            Method::Download { sha256, .. } => Verification {
+                sha256: !sha256.trim().is_empty(),
+                signature: false,
+                downloads: true,
+            },
             // nl-bundle 이 계획을 만들 때 이미 정해 둔 값을 그대로 쓴다 — 두 곳에서 따로 판단하면 어긋난다.
-            Method::BundleTool(inner) => {
-                Verification { sha256: inner.verified, signature: false, downloads: true }
-            }
-            Method::CargoBuild { .. } => Verification { sha256: false, signature: false, downloads: false },
+            Method::BundleTool(inner) => Verification {
+                sha256: inner.verified,
+                signature: false,
+                downloads: true,
+            },
+            Method::CargoBuild { .. } => Verification {
+                sha256: false,
+                signature: false,
+                downloads: false,
+            },
         }
     }
 }
@@ -279,15 +310,26 @@ impl Verification {
     /// 사람이 읽는 줄 목록.
     pub fn lines(&self) -> Vec<(String, bool)> {
         if !self.downloads {
-            return vec![("이 컴퓨터에서 직접 빌드합니다 — 내려받는 파일이 없습니다".to_string(), true)];
+            return vec![(
+                "이 컴퓨터에서 직접 빌드합니다 — 내려받는 파일이 없습니다".to_string(),
+                true,
+            )];
         }
         vec![
             (
-                if self.sha256 { "sha256 으로 받은 파일을 확인합니다".into() } else { "sha256 이 없어 확인하지 못합니다".to_string() },
+                if self.sha256 {
+                    "sha256 으로 받은 파일을 확인합니다".into()
+                } else {
+                    "sha256 이 없어 확인하지 못합니다".to_string()
+                },
                 self.sha256,
             ),
             (
-                if self.signature { "서명을 검증합니다".into() } else { "서명 검증은 하지 않습니다".to_string() },
+                if self.signature {
+                    "서명을 검증합니다".into()
+                } else {
+                    "서명 검증은 하지 않습니다".to_string()
+                },
                 self.signature,
             ),
         ]
@@ -347,7 +389,10 @@ pub fn plan_runtime(target: BuildTarget, manifest_url: &str) -> Result<Plan, Str
                     from: a.url.clone(),
                     to,
                     size: a.size,
-                    method: Method::Download { url: a.url.clone(), sha256: a.sha256.clone() },
+                    method: Method::Download {
+                        url: a.url.clone(),
+                        sha256: a.sha256.clone(),
+                    },
                 })
             }
             None => format!("매니페스트에 {} 자산이 없습니다", target.label()),
@@ -363,7 +408,10 @@ pub fn plan_runtime(target: BuildTarget, manifest_url: &str) -> Result<Plan, Str
                 what: "이 소스 워크스페이스에서 런타임을 직접 빌드합니다".to_string(),
                 steps: vec![
                     format!("내려받기로는 구할 수 없었습니다: {manifest_err}"),
-                    format!("워크스페이스 {} 에서 `cargo build --release -p nl-runtime` 를 돌립니다.", ws.display()),
+                    format!(
+                        "워크스페이스 {} 에서 `cargo build --release -p nl-runtime` 를 돌립니다.",
+                        ws.display()
+                    ),
                     "빌드에는 몇 분이 걸릴 수 있고 그동안 네트워크로 의존성을 받습니다.".to_string(),
                 ],
                 from: "cargo build --release -p nl-runtime".into(),
@@ -490,7 +538,9 @@ fn download(
     }
     let got = nl_bundle::sha256_hex(&buf);
     if !got.eq_ignore_ascii_case(sha256.trim()) {
-        return Err(format!("sha256 이 다릅니다 (기대 {sha256}, 실제 {got}) — 파일을 버렸습니다"));
+        return Err(format!(
+            "sha256 이 다릅니다 (기대 {sha256}, 실제 {got}) — 파일을 버렸습니다"
+        ));
     }
     let _ = tx.send(ToolEvent::Log("sha256 검증 통과".into()));
 
@@ -508,7 +558,10 @@ fn cargo_build_runtime(
     dest: &Path,
     tx: &std::sync::mpsc::Sender<ToolEvent>,
 ) -> Result<PathBuf, String> {
-    let _ = tx.send(ToolEvent::Log(format!("cargo build --release -p nl-runtime ({})", workspace.display())));
+    let _ = tx.send(ToolEvent::Log(format!(
+        "cargo build --release -p nl-runtime ({})",
+        workspace.display()
+    )));
     let mut child = std::process::Command::new("cargo")
         .args(["build", "--release", "-p", "nl-runtime"])
         .current_dir(workspace)
@@ -535,7 +588,14 @@ fn cargo_build_runtime(
     }
     let status = child.wait().map_err(|e| format!("cargo 를 기다리지 못했습니다: {e}"))?;
     if !status.success() {
-        let tail = err_lines.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" / ");
+        let tail = err_lines
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" / ");
         return Err(format!("cargo 빌드 실패 ({status}): {tail}"));
     }
     if !dest.is_file() {
@@ -659,7 +719,11 @@ mod tests {
         assert!(plan.from.starts_with("https://"), "어디서 받는지가 보여야 한다");
         assert!(!plan.what.trim().is_empty(), "무엇을 하는지가 보여야 한다");
         // 단계는 모달에 줄줄이 그려진다 — 한 줄로 이어 붙이면 창이 화면 밖까지 커진다.
-        assert!(plan.steps.len() >= 3, "자세한 단계가 목록으로 있어야 한다: {:?}", plan.steps);
+        assert!(
+            plan.steps.len() >= 3,
+            "자세한 단계가 목록으로 있어야 한다: {:?}",
+            plan.steps
+        );
         assert!(plan.steps.iter().all(|s| !s.trim().is_empty()));
         assert!(plan.what.lines().count() == 1, "요약은 한 줄이어야 한다");
         assert!(plan.size > 0, "크기 어림값이 있어야 한다");
@@ -689,7 +753,11 @@ mod tests {
     /// 소스 빌드는 내려받는 것이 없으니 해시 이야기를 하지 않는다.
     #[test]
     fn a_source_build_says_it_downloads_nothing() {
-        let v = Verification { sha256: false, signature: false, downloads: false };
+        let v = Verification {
+            sha256: false,
+            signature: false,
+            downloads: false,
+        };
         let lines = v.lines();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].1, "직접 빌드는 경고할 일이 아니다");

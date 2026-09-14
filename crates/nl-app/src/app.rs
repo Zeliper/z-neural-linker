@@ -5,6 +5,7 @@ use crate::canvas::{CanvasAction, CanvasState, Selection, SelectionState};
 use crate::pcanvas::{PipelineAction, PipelineCanvas};
 use crate::project::{self, Recent};
 use crate::record::{self, RecordSession, Shot, ShotPreview};
+use crate::recovery;
 use crate::sample;
 use crate::session::{self, RunnerSession};
 use crate::tools::{self, Plan, ToolEvent, ToolState};
@@ -13,6 +14,7 @@ use crate::views::{self, train::TrainSession, ViewAction, ViewCtx, ViewState};
 use chrono::{DateTime, Local};
 use eframe::egui::{self, Color32, RichText};
 use nl_core::dataset::{DataSource, DatasetSpec, SyntheticKind};
+use nl_core::pipeline::Region;
 use nl_core::shape::{self, ShapeReport};
 use nl_core::validate::Where;
 use nl_core::{
@@ -23,7 +25,6 @@ use nl_engine::{DeviceInfo, TrainRequest};
 use nl_gui::{GuiEvent, GuiState};
 use nl_io::runner::RunnerInput;
 use nl_io::MonitorInfo;
-use nl_core::pipeline::Region;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -45,6 +46,8 @@ macro_rules! view_ctx {
             recording: $app.recording.as_ref(),
             shot: &$app.shot,
             update_check: $app.update_check,
+            autosave_file: $app.autosave_file,
+            recovery_dir: &$app.recovery_dir,
             update_state: $app.updater.as_ref().map(|u| u.state()),
             now: $now,
         }
@@ -259,8 +262,15 @@ pub enum View {
 
 impl View {
     /// 뷰 바 순서 = Ctrl+1..Ctrl+7 순서 = 저장되는 인덱스.
-    pub const ALL: [View; 7] =
-        [View::Model, View::Data, View::Train, View::Pipeline, View::Gui, View::Build, View::Resources];
+    pub const ALL: [View; 7] = [
+        View::Model,
+        View::Data,
+        View::Train,
+        View::Pipeline,
+        View::Gui,
+        View::Build,
+        View::Resources,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -428,6 +438,15 @@ pub struct NlApp {
     tool_progress: Option<f32>,
     /// 진행 중인 설치를 멈추라는 신호. 청크 사이에서 확인된다.
     tool_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// 자동 저장·복구.
+    autosaver: recovery::AutoSaver,
+    /// 시작 때 찾은 복구 스냅샷. 비어 있지 않으면 복구 모달이 뜬다.
+    pub recover_candidates: Vec<recovery::Entry>,
+    pub(crate) recovery_dir: PathBuf,
+    /// 원본 파일 자동 저장 설정 (기본 꺼짐).
+    pub(crate) autosave_file: bool,
+    /// 복구 직후에는 원본 자동 저장을 멈춘다 — 되살린 내용이 원본을 조용히 덮으면 안 된다.
+    file_autosave_held: bool,
     /// 프로젝트 폴더 밖에 쓰려 할 때 띄우는 확인 질문.
     outside_ask: Option<OutsideAsk>,
     /// 사용자가 방금 승인한 질문. 한 번의 빌드에만 쓰인다.
@@ -479,7 +498,10 @@ impl NlApp {
             Some(path) => match project::load(&path) {
                 Ok(l) => {
                     if l.newer {
-                        startup_error = Some(format!("이 파일은 앱보다 새 형식입니다 — 모르는 항목은 저장 시 사라집니다: {}", path.display()));
+                        startup_error = Some(format!(
+                            "이 파일은 앱보다 새 형식입니다 — 모르는 항목은 저장 시 사라집니다: {}",
+                            path.display()
+                        ));
                     }
                     let mut d = DocState::new(l.project);
                     d.file_path = Some(path);
@@ -507,14 +529,19 @@ impl NlApp {
         };
 
         let stored = |key: &str, default: bool| {
-            cc.storage.and_then(|s| eframe::get_value::<bool>(s, key)).unwrap_or(default)
+            cc.storage
+                .and_then(|s| eframe::get_value::<bool>(s, key))
+                .unwrap_or(default)
         };
         let view = cc
             .storage
             .and_then(|s| eframe::get_value::<usize>(s, "view"))
             .map(View::from_index)
             .unwrap_or_default();
-        let recent = cc.storage.and_then(|s| eframe::get_value::<Recent>(s, "recent")).unwrap_or_default();
+        let recent = cc
+            .storage
+            .and_then(|s| eframe::get_value::<Recent>(s, "recent"))
+            .unwrap_or_default();
 
         let mut app = Self {
             doc,
@@ -552,6 +579,11 @@ impl NlApp {
             tool_job: None,
             tool_progress: None,
             tool_cancel: None,
+            autosaver: recovery::AutoSaver::default(),
+            recover_candidates: recovery::list(&recovery::default_dir()),
+            recovery_dir: recovery::default_dir(),
+            autosave_file: stored("autosave_file", false),
+            file_autosave_held: false,
             outside_ask: None,
             outside_confirmed: None,
             build_job: None,
@@ -609,7 +641,9 @@ impl NlApp {
             // 자동 선택만 한 번 돌려 둔다. 구체 장치는 목록이 채워진 순간부터 `resolve_cached` 가
             // 검사 없이 답하므로 설정을 바꿔도 다시 물을 일이 없다.
             let _ = nl_engine::resolve(DevicePref::Auto);
-            let _ = tx.send(DeviceMsg::Ready { note: nl_engine::describe(DevicePref::Auto) });
+            let _ = tx.send(DeviceMsg::Ready {
+                note: nl_engine::describe(DevicePref::Auto),
+            });
         });
         match spawned {
             Ok(_) => self.device_job = Some(rx),
@@ -702,7 +736,9 @@ impl NlApp {
 
     /// 활성 모델의 형상 추론 결과 (문서가 바뀔 때만 다시 계산).
     pub fn shapes(&mut self) -> ShapeReport {
-        let Some(id) = self.active_model() else { return ShapeReport::default() };
+        let Some(id) = self.active_model() else {
+            return ShapeReport::default();
+        };
         let seq = self.doc.edit_seq;
         if let Some((s, m, rep)) = &self.shape_cache {
             if *s == seq && *m == id {
@@ -761,8 +797,15 @@ impl NlApp {
         match project::save(&path, &snapshot) {
             Ok(()) => {
                 self.doc.modified = false;
+                // 원본에 들어갔으니 복구 스냅샷은 더 필요 없다. 사용자가 Ctrl+S 로 확정했으므로
+                // 복구 직후 걸어 둔 원본 자동 저장 보류도 푼다.
+                self.discard_recovery(now);
+                self.file_autosave_held = false;
                 self.recent.push(&path);
-                self.toast(format!("저장됨: {}", crate::views::short_path(&path.display().to_string())), now);
+                self.toast(
+                    format!("저장됨: {}", crate::views::short_path(&path.display().to_string())),
+                    now,
+                );
             }
             Err(e) => self.toast(format!("저장 실패: {e}"), now),
         }
@@ -815,7 +858,9 @@ impl NlApp {
     }
 
     fn open_sample(&mut self, index: usize, now: f64) {
-        let Some((name, make)) = sample::SAMPLES.get(index) else { return };
+        let Some((name, make)) = sample::SAMPLES.get(index) else {
+            return;
+        };
         self.doc = DocState::new(make());
         self.after_document_swap();
         self.toast(format!("샘플 열기: {name}"), now);
@@ -864,18 +909,35 @@ impl NlApp {
         self.pending_action = None;
         match action {
             PendingAction::Close => {
+                // 사용자가 스스로 끝냈으니 복구할 것이 없다. 다음 시작 때 묻지 않게 지운다.
+                self.discard_recovery(now);
                 self.close_confirmed = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            PendingAction::New => self.new_project(now),
-            PendingAction::Open => self.open_dialog(now),
-            PendingAction::OpenPath(p) => self.open_path(&p, now),
-            PendingAction::Sample(i) => self.open_sample(i, now),
+            // 문서를 바꾸기 전에 옛 문서의 스냅샷을 정리한다 — 버리기로 한 변경이다.
+            PendingAction::New => {
+                self.discard_recovery(now);
+                self.new_project(now);
+            }
+            PendingAction::Open => {
+                self.discard_recovery(now);
+                self.open_dialog(now);
+            }
+            PendingAction::OpenPath(p) => {
+                self.discard_recovery(now);
+                self.open_path(&p, now);
+            }
+            PendingAction::Sample(i) => {
+                self.discard_recovery(now);
+                self.open_sample(i, now);
+            }
         }
     }
 
     fn unsaved_modal(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(action) = self.pending_action.clone() else { return };
+        let Some(action) = self.pending_action.clone() else {
+            return;
+        };
         let what = action.describe();
         let modal = egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
             ui.set_width(330.0);
@@ -918,7 +980,9 @@ impl NlApp {
 
     /// 캔버스가 돌려준 편집 의도를 op 로 바꿔 적용한다.
     fn apply_canvas_action(&mut self, model: ModelId, action: CanvasAction, now: f64) {
-        let Some(graph) = self.doc.project.models.get(&model).map(|m| m.graph.clone()) else { return };
+        let Some(graph) = self.doc.project.models.get(&model).map(|m| m.graph.clone()) else {
+            return;
+        };
         match action {
             CanvasAction::AddNode { kind, pos } => {
                 let node = Node::new(kind, pos);
@@ -942,7 +1006,10 @@ impl NlApp {
                 if let Some(e) = replace {
                     ops.push(Op::DeleteEdge { model, id: e });
                 }
-                ops.push(Op::UpsertEdge { model, edge: Edge::new(from, to) });
+                ops.push(Op::UpsertEdge {
+                    model,
+                    edge: Edge::new(from, to),
+                });
                 self.doc.apply_local(ops);
             }
             CanvasAction::DeleteNodes(ids) => {
@@ -1024,7 +1091,14 @@ impl NlApp {
                 if let Some(r) = &self.runner {
                     if r.is_running() {
                         r.handle.set_armed(on);
-                        self.log(if on { "입력 무장: 켬 — 실제 입력을 보냅니다" } else { "입력 무장: 끔" }.to_string());
+                        self.log(
+                            if on {
+                                "입력 무장: 켬 — 실제 입력을 보냅니다"
+                            } else {
+                                "입력 무장: 끔"
+                            }
+                            .to_string(),
+                        );
                     }
                 }
             }
@@ -1062,12 +1136,29 @@ impl NlApp {
                     }
                 }
             }
-            ViewAction::StartRecording { dir, name, region, fps, labels } => {
-                self.start_recording(dir, name, region, fps, labels, now)
-            }
+            ViewAction::StartRecording {
+                dir,
+                name,
+                region,
+                fps,
+                labels,
+            } => self.start_recording(dir, name, region, fps, labels, now),
             ViewAction::StopRecording => self.stop_recording(now),
             ViewAction::CaptureShot(region) => self.start_shot(region),
             ViewAction::ShowUpdateWindow(on) => self.update_show = on,
+            ViewAction::SetAutosaveFile(on) => {
+                self.autosave_file = on;
+                if on {
+                    // 방금 켰다고 곧바로 원본을 덮지 않는다 — 다음 주기부터.
+                    self.autosaver.mark_file_save(now);
+                }
+            }
+            ViewAction::FindRecoveryFiles => {
+                self.recover_candidates = recovery::list(&self.recovery_dir);
+                if self.recover_candidates.is_empty() {
+                    self.toast("남아 있는 복구 파일이 없습니다", now);
+                }
+            }
             ViewAction::SetUpdateCheck(on) => {
                 self.update_check = on;
                 if on {
@@ -1092,13 +1183,18 @@ impl NlApp {
 
     /// 앱 아이콘 PNG 고르기. 프로젝트 폴더 아래면 상대 경로로 저장한다.
     fn pick_icon(&mut self, now: f64) {
-        let Some(path) = rfd::FileDialog::new().add_filter("PNG 이미지", &["png"]).pick_file() else { return };
+        let Some(path) = rfd::FileDialog::new().add_filter("PNG 이미지", &["png"]).pick_file() else {
+            return;
+        };
         let stored = match self.doc.file_path.as_deref() {
             Some(p) => relative_to(&project::base_dir(p), &path),
             None => path.display().to_string(),
         };
         let mut settings = self.doc.project.settings.clone();
-        let mut spec = settings.build.clone().unwrap_or_else(|| BuildSpec::from_project(&self.doc.project));
+        let mut spec = settings
+            .build
+            .clone()
+            .unwrap_or_else(|| BuildSpec::from_project(&self.doc.project));
         spec.icon = Some(stored);
         settings.build = Some(spec);
         self.doc.apply_local(vec![Op::SetSettings { settings }]);
@@ -1129,11 +1225,19 @@ impl NlApp {
     }
 
     fn pick_csv(&mut self, now: f64) {
-        let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv", "tsv", "txt"]).pick_file() else { return };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv", "tsv", "txt"])
+            .pick_file()
+        else {
+            return;
+        };
         match project::csv_columns(&path, true) {
             Ok(names) => {
                 let n = names.len();
-                let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "CSV".into());
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "CSV".into());
                 // 마지막 열을 타깃으로 미리 골라 둔다 — 가장 흔한 배치다.
                 let mut inputs = vec![true; n];
                 let mut targets = vec![false; n];
@@ -1156,10 +1260,19 @@ impl NlApp {
     }
 
     fn pick_folder_dataset(&mut self, recorded: bool, now: f64) {
-        let Some(path) = rfd::FileDialog::new().pick_folder() else { return };
-        let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "폴더".into());
+        let Some(path) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "폴더".into());
         let p = path.display().to_string();
-        let source = if recorded { DataSource::Recorded { path: p } } else { DataSource::ImageFolder { path: p } };
+        let source = if recorded {
+            DataSource::Recorded { path: p }
+        } else {
+            DataSource::ImageFolder { path: p }
+        };
         let spec = DatasetSpec::new(name, source);
         let id = spec.id;
         self.doc.apply_local(vec![Op::UpsertDataset { dataset: spec }]);
@@ -1169,7 +1282,9 @@ impl NlApp {
     }
 
     fn scan_dataset(&mut self, id: DatasetId, now: f64) {
-        let Some(spec) = self.doc.project.datasets.get(&id).cloned() else { return };
+        let Some(spec) = self.doc.project.datasets.get(&id).cloned() else {
+            return;
+        };
         let base = self.base_dir();
         match nl_engine::scan(&spec, &base) {
             Ok(info) => {
@@ -1178,7 +1293,11 @@ impl NlApp {
                     info.samples,
                     views::shape_text(&info.input_shape),
                     views::shape_text(&info.target_shape),
-                    if info.classes.is_empty() { String::new() } else { format!(" · 클래스 {}", info.classes.len()) }
+                    if info.classes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · 클래스 {}", info.classes.len())
+                    }
                 );
                 self.views.data.scan.insert(id, Ok(msg));
                 let mut next = spec;
@@ -1195,7 +1314,9 @@ impl NlApp {
     }
 
     fn preview_dataset(&mut self, id: DatasetId, ctx: &egui::Context) {
-        let Some(spec) = self.doc.project.datasets.get(&id).cloned() else { return };
+        let Some(spec) = self.doc.project.datasets.get(&id).cloned() else {
+            return;
+        };
         let base = self.base_dir();
         let result = match nl_engine::preview(&spec, &base, 8) {
             Ok(samples) => Ok(samples
@@ -1231,7 +1352,9 @@ impl NlApp {
             }
         }
         // 형상 오류가 있는 그래프는 엔진에 넘기지 않는다 (검증 통과 그래프만 받는 계약).
-        let Some(def) = self.doc.project.models.get(&model).cloned() else { return };
+        let Some(def) = self.doc.project.models.get(&model).cloned() else {
+            return;
+        };
         let rep = shape::infer(&def.graph);
         if !rep.is_ok() {
             self.toast(format!("형상 오류 {}개를 먼저 고치세요", rep.errors.len()), now);
@@ -1239,7 +1362,9 @@ impl NlApp {
             self.dock_tab = DockTab::Issues;
             return;
         }
-        let Some(spec) = self.doc.project.datasets.get(&dataset).cloned() else { return };
+        let Some(spec) = self.doc.project.datasets.get(&dataset).cloned() else {
+            return;
+        };
         let path = self.doc.file_path.clone().unwrap();
         let base_dir = project::base_dir(&path);
         let run_id = RunId::new();
@@ -1267,7 +1392,9 @@ impl NlApp {
 
     /// 매 프레임 학습 이벤트를 소비한다.
     fn tick_training(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(poll) = self.training.as_mut().map(|t| t.poll(now)) else { return };
+        let Some(poll) = self.training.as_mut().map(|t| t.poll(now)) else {
+            return;
+        };
         for line in poll.logs {
             self.log(line);
         }
@@ -1302,8 +1429,12 @@ impl NlApp {
     }
 
     fn apply_run_weights(&mut self, id: RunId, now: f64) {
-        let Some(run) = self.doc.project.runs.get(&id).cloned() else { return };
-        let Some(ckpt) = run.checkpoint.clone() else {
+        let Some(run) = self.doc.project.runs.get(&id).cloned() else {
+            return;
+        };
+        // 조기 종료를 켜면 마지막 에포크보다 검증 손실이 가장 낮았던 가중치가 낫다. 그것을 먼저 쓴다.
+        let best = run.best_checkpoint.clone();
+        let Some(ckpt) = best.clone().or_else(|| run.checkpoint.clone()) else {
             self.toast("이 실행에는 체크포인트가 없습니다", now);
             return;
         };
@@ -1319,7 +1450,8 @@ impl NlApp {
             payload: m.payload,
             weights: Some(weights),
         }]);
-        self.toast("가중치를 모델에 적용했습니다", now);
+        let which = if best.is_some() { "최적 체크포인트" } else { "마지막 체크포인트" };
+        self.toast(format!("{which} 가중치를 모델에 적용했습니다"), now);
     }
 
     // ── 파이프라인 ──────────────────────────────────────────────
@@ -1335,7 +1467,9 @@ impl NlApp {
 
     /// 파이프라인 캔버스가 돌려준 편집을 op 로 적용한다.
     fn apply_pipeline_action(&mut self, pid: nl_core::PipelineId, action: PipelineAction, now: f64) {
-        let Some(pl) = self.doc.project.pipelines.get(&pid).cloned() else { return };
+        let Some(pl) = self.doc.project.pipelines.get(&pid).cloned() else {
+            return;
+        };
         match action {
             PipelineAction::AddNode { kind, pos } => {
                 let node = PNode::new(kind, pos);
@@ -1355,11 +1489,18 @@ impl NlApp {
                 self.doc.apply_local(ops);
             }
             PipelineAction::Link { from, to } => {
-                let link = Link { id: LinkId::new(), from, to };
+                let link = Link {
+                    id: LinkId::new(),
+                    from,
+                    to,
+                };
                 self.doc.apply_local(vec![Op::UpsertLink { pipeline: pid, link }]);
             }
             PipelineAction::DeleteNodes(ids) => {
-                let ops: Vec<Op> = ids.iter().map(|id| Op::DeletePNode { pipeline: pid, id: *id }).collect();
+                let ops: Vec<Op> = ids
+                    .iter()
+                    .map(|id| Op::DeletePNode { pipeline: pid, id: *id })
+                    .collect();
                 self.doc.apply_local(ops);
                 self.sel.set(Selection::Pipeline(pid));
             }
@@ -1373,7 +1514,10 @@ impl NlApp {
                     .links
                     .values()
                     .filter(|l| l.from == id || l.to == id)
-                    .map(|l| Op::DeleteLink { pipeline: pid, id: l.id })
+                    .map(|l| Op::DeleteLink {
+                        pipeline: pid,
+                        id: l.id,
+                    })
                     .collect();
                 if ops.is_empty() {
                     self.toast("연결이 없습니다", now);
@@ -1398,13 +1542,18 @@ impl NlApp {
             self.toast("이미 실행 중입니다", now);
             return;
         }
-        let Some(pl) = self.doc.project.pipelines.get(&pid).cloned() else { return };
+        let Some(pl) = self.doc.project.pipelines.get(&pid).cloned() else {
+            return;
+        };
         let (base_dir, temp) = match self.doc.file_path.as_deref() {
             Some(p) => (project::base_dir(p), None),
             None => {
                 let d = session::temp_run_dir();
                 let _ = std::fs::create_dir_all(&d);
-                self.toast("저장되지 않은 프로젝트라 임시 폴더에서 돕니다 — 모델 가중치 경로는 풀리지 않습니다", now);
+                self.toast(
+                    "저장되지 않은 프로젝트라 임시 폴더에서 돕니다 — 모델 가중치 경로는 풀리지 않습니다",
+                    now,
+                );
                 (d.clone(), Some(d))
             }
         };
@@ -1538,7 +1687,9 @@ impl NlApp {
         match spawned {
             Ok(_) => {
                 self.plan_job = Some(rx);
-                self.views.build.log(format!("{} 설치 방법을 확인하는 중…", target.label()));
+                self.views
+                    .build
+                    .log(format!("{} 설치 방법을 확인하는 중…", target.label()));
             }
             Err(e) => self.toast(format!("작업 스레드를 만들지 못했습니다: {e}"), now),
         }
@@ -1603,13 +1754,172 @@ impl NlApp {
         }
     }
 
+    fn recovery_key(&self) -> String {
+        recovery::key_for(self.doc.file_path.as_deref(), &self.doc.project)
+    }
+
+    /// 매 프레임: 저장하지 않은 변경이 잠잠해지면 복구 스냅샷을 적고, 설정돼 있으면 원본에도 저장한다.
+    ///
+    /// 직렬화만 여기서 하고 쓰기는 스레드가 맡으므로 학습이나 파이프라인이 도는 중에도 화면이 멎지 않는다.
+    fn tick_autosave(&mut self, ctx: &egui::Context, now: f64) {
+        if let Some(e) = self.autosaver.take_error(now) {
+            self.toast(format!("복구 스냅샷을 쓰지 못했습니다: {e}"), now);
+        }
+        let key = self.recovery_key();
+        let (modified, seq) = (self.doc.modified, self.doc.edit_seq);
+        if self.autosaver.snapshot_due(&key, modified, seq, now) {
+            self.autosaver.write_snapshot(
+                &self.recovery_dir,
+                &key,
+                &self.doc.project,
+                self.doc.file_path.as_deref(),
+                seq,
+                now,
+            );
+        } else if let Some(wake) = self.autosaver.wake_in(modified, seq, now) {
+            // 입력이 멎은 뒤 스냅샷을 적으려면 그때 한 번 깨어나야 한다.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wake));
+        }
+        let allowed = self.autosave_file && !self.file_autosave_held;
+        if self
+            .autosaver
+            .file_save_due(allowed, self.doc.file_path.is_some(), modified, now)
+        {
+            self.save(now);
+        }
+    }
+
+    /// 이 문서의 복구 스냅샷을 지운다: 저장했거나, 문서를 닫거나, 정상 종료한다.
+    fn discard_recovery(&mut self, now: f64) {
+        let key = self.recovery_key();
+        recovery::remove(&recovery::snapshot_path(&self.recovery_dir, &key));
+        self.autosaver.mark_discarded(self.doc.edit_seq, now);
+    }
+
+    /// 복구 스냅샷을 현재 문서로 되살린다. 원본 경로가 있으면 그 파일로 연 것처럼, 저장 필요 상태로.
+    fn recover(&mut self, entry: recovery::Entry, now: f64) {
+        match recovery::load(&entry.path) {
+            Ok(rf) => {
+                let name = rf.project_name.clone();
+                self.doc.set_snapshot(rf.file.project);
+                self.doc.file_path = rf.original_path.map(PathBuf::from);
+                self.doc.modified = true;
+                self.doc.edit_seq += 1;
+                self.after_document_swap();
+                // 되살린 내용이 원본을 조용히 덮으면 안 된다 — Ctrl+S 로 확정할 때까지 멈춘다.
+                self.file_autosave_held = true;
+                self.autosaver.mark_file_save(now);
+                // 되살린 직후 바로 적어 둔다. 또 죽어도 잃지 않는다.
+                let key = self.recovery_key();
+                let own = recovery::snapshot_path(&self.recovery_dir, &key);
+                self.autosaver.snapshot_due(&key, true, self.doc.edit_seq, now);
+                self.autosaver.write_snapshot(
+                    &self.recovery_dir,
+                    &key,
+                    &self.doc.project,
+                    self.doc.file_path.as_deref(),
+                    self.doc.edit_seq,
+                    now,
+                );
+                if own != entry.path {
+                    recovery::remove(&entry.path);
+                }
+                self.recover_candidates.retain(|e| e.path != entry.path);
+                self.toast(format!("복구했습니다: {name} — 저장(Ctrl+S)으로 확정하세요"), now);
+            }
+            Err(e) => self.toast(format!("복구 파일을 읽을 수 없습니다: {e}"), now),
+        }
+    }
+
+    /// 시작 때(또는 요청 시) 남아 있는 복구 스냅샷을 보여 주고 복구·삭제를 고르게 한다.
+    fn recovery_modal(&mut self, ctx: &egui::Context, now: f64) {
+        if self.recover_candidates.is_empty() || self.pending_action.is_some() {
+            return;
+        }
+        let mut recover_now: Option<recovery::Entry> = None;
+        let mut remove_now: Option<PathBuf> = None;
+        let (mut close, mut remove_all) = (false, false);
+        egui::Modal::new(egui::Id::new("recovery")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.heading("저장하지 않은 작업이 남아 있습니다");
+            ui.label(
+                RichText::new("앱이 갑자기 끝나기 전에 자동으로 적어 둔 내용입니다. 복구하면 지금 문서를 대체합니다.")
+                    .color(views::COL_WEAK)
+                    .size(11.0),
+            );
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for e in &self.recover_candidates {
+                    // 버튼을 오른쪽 끝에 두고 경로·시각은 아래 줄에 — 긴 경로가 버튼을 덮지 않는다.
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&e.project_name).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(RichText::new("복구").strong()).clicked() {
+                                recover_now = Some(e.clone());
+                            }
+                            if ui.button("삭제").on_hover_text("이 복구 파일을 버립니다").clicked() {
+                                remove_now = Some(e.path.clone());
+                            }
+                        });
+                    });
+                    let origin = e.original_path.as_deref().unwrap_or("저장한 적 없는 새 문서");
+                    ui.add(egui::Label::new(RichText::new(origin).color(views::COL_WEAK).size(11.0)).wrap());
+                    ui.label(
+                        RichText::new(format!("적어 둔 시각 {}", e.when()))
+                            .color(views::COL_WEAK)
+                            .size(11.0),
+                    );
+                    ui.separator();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .button("나중에")
+                    .on_hover_text("복구 파일을 두고 다음 시작 때 다시 묻습니다")
+                    .clicked()
+                {
+                    close = true;
+                }
+                if ui.button("모두 삭제").clicked() {
+                    remove_all = true;
+                }
+            });
+        });
+        if let Some(e) = recover_now {
+            if self.doc.modified {
+                self.toast("지금 문서에 저장하지 않은 변경이 있습니다. 먼저 저장하세요", now);
+            } else {
+                self.recover(e, now);
+            }
+        }
+        if let Some(p) = remove_now {
+            recovery::remove(&p);
+            self.recover_candidates.retain(|e| e.path != p);
+        }
+        if remove_all {
+            for e in std::mem::take(&mut self.recover_candidates) {
+                recovery::remove(&e.path);
+            }
+        }
+        if close {
+            self.recover_candidates.clear();
+        }
+    }
+
     /// 산출물 폴더가 프로젝트 폴더 밖이면 물어볼 내용을 만든다.
     fn outside_build_dir(&self, project_file: &Path) -> Option<OutsideAsk> {
         let spec = self.doc.project.settings.build.clone()?;
-        let raw = spec.output_dir.clone().unwrap_or_else(|| nl_core::bundle::DEFAULT_OUTPUT_DIR.to_string());
+        let raw = spec
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| nl_core::bundle::DEFAULT_OUTPUT_DIR.to_string());
         crate::paths::outside_project(&raw)?;
         let base = project::base_dir(project_file);
-        Some(OutsideAsk { what: "산출물".into(), dir: views::build::resolve_out_dir(&base, &spec) })
+        Some(OutsideAsk {
+            what: "산출물".into(),
+            dir: views::build::resolve_out_dir(&base, &spec),
+        })
     }
 
     /// 프로젝트 폴더 밖에 쓰기 전 확인 모달.
@@ -1661,7 +1971,11 @@ impl NlApp {
             plan_row(
                 ui,
                 "크기",
-                &if plan.size > 0 { views::fmt_bytes(plan.size) } else { "모름".into() },
+                &if plan.size > 0 {
+                    views::fmt_bytes(plan.size)
+                } else {
+                    "모름".into()
+                },
             );
             // 무엇을 확인하고 무엇을 확인하지 않는지 — 빠진 항목이 보여야 승인 여부를 판단할 수 있다.
             ui.add_space(8.0);
@@ -1675,12 +1989,14 @@ impl NlApp {
             if !plan.steps.is_empty() {
                 ui.add_space(8.0);
                 ui.label(RichText::new("이렇게 진행합니다").color(views::COL_WEAK));
-                egui::ScrollArea::vertical().max_height(MODAL_STEPS_HEIGHT).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    for (i, step) in plan.steps.iter().enumerate() {
-                        plan_row(ui, &format!("{}.", i + 1), step);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(MODAL_STEPS_HEIGHT)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        for (i, step) in plan.steps.iter().enumerate() {
+                            plan_row(ui, &format!("{}.", i + 1), step);
+                        }
+                    });
             }
             ui.add_space(10.0);
             match self.tool_progress {
@@ -1765,7 +2081,10 @@ impl NlApp {
                 }
             }
         }
-        let icon = spec.icon.as_deref().map(|rel| views::build::resolve_path(Some(&base_dir), rel));
+        let icon = spec
+            .icon
+            .as_deref()
+            .map(|rel| views::build::resolve_path(Some(&base_dir), rel));
         if let Some(p) = &icon {
             if !p.is_file() {
                 self.toast(format!("아이콘 파일이 없습니다: {}", p.display()), now);
@@ -1957,8 +2276,8 @@ impl NlApp {
             .ok()
             .filter(|u| !u.trim().is_empty())
             .unwrap_or_else(|| crate::update_key::UPDATE_URL.to_string());
-        let mut u = nl_update::Updater::new(url, nl_update::current_version!())
-            .with_public_key(crate::update_key::PUBLIC_KEY);
+        let mut u =
+            nl_update::Updater::new(url, nl_update::current_version!()).with_public_key(crate::update_key::PUBLIC_KEY);
         u.check();
         self.updater = Some(u);
     }
@@ -2015,57 +2334,66 @@ impl NlApp {
         let mut open = true;
         let state = self.updater.as_ref().map(|u| u.state().clone());
         let mut action: Option<UpdateAction> = None;
-        egui::Window::new("빌더 업데이트").open(&mut open).resizable(false).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.label(format!("현재 v{}", env!("CARGO_PKG_VERSION")));
-            match &state {
-                None => {
-                    ui.label(RichText::new("업데이트 확인이 꺼져 있습니다").color(views::COL_WEAK));
-                }
-                Some(s) => {
-                    ui.label(s.message());
-                    if let nl_update::State::Available(a) = s {
-                        if !a.notes.trim().is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(a.notes.trim()).size(11.5));
-                        }
+        egui::Window::new("빌더 업데이트")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(format!("현재 v{}", env!("CARGO_PKG_VERSION")));
+                match &state {
+                    None => {
+                        ui.label(RichText::new("업데이트 확인이 꺼져 있습니다").color(views::COL_WEAK));
                     }
-                    if let nl_update::State::Downloading { received, total } = s {
-                        let p = nl_update::Progress { received: *received, total: *total };
-                        match p.fraction() {
-                            Some(f) => {
-                                ui.add(egui::ProgressBar::new(f).desired_width(260.0).show_percentage());
-                            }
-                            None => {
-                                ui.add(egui::ProgressBar::new(0.0).desired_width(260.0).text("내려받는 중"));
+                    Some(s) => {
+                        ui.label(s.message());
+                        if let nl_update::State::Available(a) = s {
+                            if !a.notes.trim().is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(a.notes.trim()).size(11.5));
                             }
                         }
+                        if let nl_update::State::Downloading { received, total } = s {
+                            let p = nl_update::Progress {
+                                received: *received,
+                                total: *total,
+                            };
+                            match p.fraction() {
+                                Some(f) => {
+                                    ui.add(egui::ProgressBar::new(f).desired_width(260.0).show_percentage());
+                                }
+                                None => {
+                                    ui.add(egui::ProgressBar::new(0.0).desired_width(260.0).text("내려받는 중"));
+                                }
+                            }
+                        }
                     }
                 }
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let busy = self.updater.as_ref().map(|u| u.is_busy()).unwrap_or(false);
-                ui.add_enabled_ui(!busy, |ui| {
-                    if ui.button("지금 확인").clicked() {
-                        action = Some(UpdateAction::Check);
-                    }
-                    if matches!(state, Some(nl_update::State::Available(_))) && ui.button("⬇ 내려받기").clicked() {
-                        action = Some(UpdateAction::Download);
-                    }
-                    if matches!(state, Some(nl_update::State::Downloaded { .. }))
-                        && ui.button(RichText::new("⬆ 적용하고 다시 시작").color(views::COL_OK)).clicked()
-                    {
-                        action = Some(UpdateAction::Apply);
-                    }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let busy = self.updater.as_ref().map(|u| u.is_busy()).unwrap_or(false);
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if ui.button("지금 확인").clicked() {
+                            action = Some(UpdateAction::Check);
+                        }
+                        if matches!(state, Some(nl_update::State::Available(_))) && ui.button("⬇ 내려받기").clicked()
+                        {
+                            action = Some(UpdateAction::Download);
+                        }
+                        if matches!(state, Some(nl_update::State::Downloaded { .. }))
+                            && ui
+                                .button(RichText::new("⬆ 적용하고 다시 시작").color(views::COL_OK))
+                                .clicked()
+                        {
+                            action = Some(UpdateAction::Apply);
+                        }
+                    });
                 });
+                ui.add_space(6.0);
+                let mut check = self.update_check;
+                if ui.checkbox(&mut check, "시작할 때 확인").changed() {
+                    action = Some(UpdateAction::SetCheck(check));
+                }
             });
-            ui.add_space(6.0);
-            let mut check = self.update_check;
-            if ui.checkbox(&mut check, "시작할 때 확인").changed() {
-                action = Some(UpdateAction::SetCheck(check));
-            }
-        });
         if !open {
             self.update_show = false;
         }
@@ -2178,23 +2506,28 @@ impl NlApp {
             let devices = self.devices.clone();
             let mut chosen: Option<nl_core::DevicePref> = None;
             let mut refresh = false;
-            egui::ComboBox::from_id_salt("device-picker").selected_text(format!("🖳 {label}")).show_ui(ui, |ui| {
-                if ui.selectable_label(current == nl_core::DevicePref::Auto, "자동 (첫 GPU → CPU)").clicked() {
-                    chosen = Some(nl_core::DevicePref::Auto);
-                }
-                if devices.is_empty() {
-                    ui.label(RichText::new("장치를 찾는 중…").color(views::COL_WEAK));
-                }
-                for d in &devices {
-                    if ui.selectable_label(current == d.pref, views::device_label(d)).clicked() {
-                        chosen = Some(d.pref);
+            egui::ComboBox::from_id_salt("device-picker")
+                .selected_text(format!("🖳 {label}"))
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(current == nl_core::DevicePref::Auto, "자동 (첫 GPU → CPU)")
+                        .clicked()
+                    {
+                        chosen = Some(nl_core::DevicePref::Auto);
                     }
-                }
-                ui.separator();
-                if ui.button("↻ 다시 찾기").clicked() {
-                    refresh = true;
-                }
-            });
+                    if devices.is_empty() {
+                        ui.label(RichText::new("장치를 찾는 중…").color(views::COL_WEAK));
+                    }
+                    for d in &devices {
+                        if ui.selectable_label(current == d.pref, views::device_label(d)).clicked() {
+                            chosen = Some(d.pref);
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("↻ 다시 찾기").clicked() {
+                        refresh = true;
+                    }
+                });
             if refresh {
                 // 열거도 검사도 백그라운드로 — 목록이 길면 UI 스레드가 그만큼 멈춘다.
                 self.device_asked = false;
@@ -2218,7 +2551,11 @@ impl NlApp {
                     ui.add_enabled_ui(ready, |ui| {
                         if ui
                             .button(RichText::new("▶ 학습 시작").color(views::COL_OK))
-                            .on_hover_text(if ready { "학습 뷰에서 자세히" } else { "모델에 데이터셋을 지정하세요" })
+                            .on_hover_text(if ready {
+                                "학습 뷰에서 자세히"
+                            } else {
+                                "모델에 데이터셋을 지정하세요"
+                            })
                             .clicked()
                         {
                             if let Some(m) = self.active_model() {
@@ -2235,7 +2572,10 @@ impl NlApp {
                             t.handle.resume();
                         }
                     }
-                    if ui.button(RichText::new("⏹ 학습 정지").color(views::COL_ERROR)).clicked() {
+                    if ui
+                        .button(RichText::new("⏹ 학습 정지").color(views::COL_ERROR))
+                        .clicked()
+                    {
                         if let Some(t) = &self.training {
                             t.handle.stop();
                         }
@@ -2247,7 +2587,10 @@ impl NlApp {
                             t.handle.pause();
                         }
                     }
-                    if ui.button(RichText::new("⏹ 학습 정지").color(views::COL_ERROR)).clicked() {
+                    if ui
+                        .button(RichText::new("⏹ 학습 정지").color(views::COL_ERROR))
+                        .clicked()
+                    {
                         if let Some(t) = &self.training {
                             t.handle.stop();
                         }
@@ -2275,10 +2618,18 @@ impl NlApp {
                 {
                     self.show_inspector = !self.show_inspector;
                 }
-                if ui.selectable_label(self.show_dock, "▤").on_hover_text("하단 도크 (Ctrl+J)").clicked() {
+                if ui
+                    .selectable_label(self.show_dock, "▤")
+                    .on_hover_text("하단 도크 (Ctrl+J)")
+                    .clicked()
+                {
                     self.show_dock = !self.show_dock;
                 }
-                if ui.selectable_label(self.show_outline, "☰").on_hover_text("아웃라인 (Ctrl+B)").clicked() {
+                if ui
+                    .selectable_label(self.show_outline, "☰")
+                    .on_hover_text("아웃라인 (Ctrl+B)")
+                    .clicked()
+                {
                     self.show_outline = !self.show_outline;
                 }
             });
@@ -2303,14 +2654,21 @@ impl NlApp {
     fn dock(&mut self, ui: &mut egui::Ui, now: f64) {
         let issues = self.issues();
         ui.horizontal(|ui| {
-            let label = if issues.is_empty() { "⚠ 문제".to_string() } else { format!("⚠ 문제 {}", issues.len()) };
+            let label = if issues.is_empty() {
+                "⚠ 문제".to_string()
+            } else {
+                format!("⚠ 문제 {}", issues.len())
+            };
             if ui.selectable_label(self.dock_tab == DockTab::Issues, label).clicked() {
                 self.dock_tab = DockTab::Issues;
             }
             if ui.selectable_label(self.dock_tab == DockTab::Log, "☰ 로그").clicked() {
                 self.dock_tab = DockTab::Log;
             }
-            if ui.selectable_label(self.dock_tab == DockTab::Activity, "🕘 활동").clicked() {
+            if ui
+                .selectable_label(self.dock_tab == DockTab::Activity, "🕘 활동")
+                .clicked()
+            {
                 self.dock_tab = DockTab::Activity;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2323,21 +2681,27 @@ impl NlApp {
         match self.dock_tab {
             DockTab::Issues => self.dock_issues(ui, &issues),
             DockTab::Log => {
-                egui::ScrollArea::vertical().id_salt("dock-log").stick_to_bottom(true).show(ui, |ui| {
-                    if self.logs.is_empty() {
-                        ui.label(RichText::new("로그가 없습니다").weak());
-                    }
-                    for l in &self.logs {
-                        ui.label(RichText::new(l).size(11.5));
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .id_salt("dock-log")
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if self.logs.is_empty() {
+                            ui.label(RichText::new("로그가 없습니다").weak());
+                        }
+                        for l in &self.logs {
+                            ui.label(RichText::new(l).size(11.5));
+                        }
+                    });
             }
             DockTab::Activity => {
-                egui::ScrollArea::vertical().id_salt("dock-activity").stick_to_bottom(true).show(ui, |ui| {
-                    for (at, msg) in &self.activity {
-                        ui.label(RichText::new(format!("{} {msg}", at.format("%H:%M:%S"))).size(11.5));
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .id_salt("dock-activity")
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for (at, msg) in &self.activity {
+                            ui.label(RichText::new(format!("{} {msg}", at.format("%H:%M:%S"))).size(11.5));
+                        }
+                    });
             }
         }
         let _ = now;
@@ -2361,8 +2725,12 @@ impl NlApp {
                     _ => None,
                 };
                 let resp = ui.add(
-                    egui::Label::new(RichText::new(format!("{icon} {}", issue.message)).color(color).size(12.0))
-                        .sense(egui::Sense::click()),
+                    egui::Label::new(
+                        RichText::new(format!("{icon} {}", issue.message))
+                            .color(color)
+                            .size(12.0),
+                    )
+                    .sense(egui::Sense::click()),
                 );
                 if target.is_some() && resp.on_hover_text("눌러서 해당 노드로 이동").clicked() {
                     jump = target;
@@ -2407,12 +2775,18 @@ impl NlApp {
             ui.label(format!("장치 {dev}")).on_hover_text(self.device_note(pref));
             ui.separator();
             if self.view == View::Model {
-                ui.label(format!("표시 {}/{} 노드", self.canvas.visible_nodes, self.canvas.total_nodes))
-                    .on_hover_text("뷰포트 밖 노드는 그리지 않습니다");
+                ui.label(format!(
+                    "표시 {}/{} 노드",
+                    self.canvas.visible_nodes, self.canvas.total_nodes
+                ))
+                .on_hover_text("뷰포트 밖 노드는 그리지 않습니다");
             } else {
                 // 캔버스를 그리지 않는 뷰에서는 컬링 수치가 지난 프레임 값이라 뜻이 없다.
-                let layers =
-                    self.active_model().and_then(|m| self.doc.project.models.get(&m)).map(|m| m.graph.nodes.len()).unwrap_or(0);
+                let layers = self
+                    .active_model()
+                    .and_then(|m| self.doc.project.models.get(&m))
+                    .map(|m| m.graph.nodes.len())
+                    .unwrap_or(0);
                 ui.label(format!("레이어 {layers}"));
             }
             let n = self.sel.count();
@@ -2447,7 +2821,11 @@ impl NlApp {
                     views::train::SessionState::Finished => "학습 완료",
                     views::train::SessionState::Failed => "학습 실패",
                 };
-                ui.label(RichText::new(label).color(if t.state.is_live() { views::COL_SELECT } else { views::COL_WEAK }));
+                ui.label(RichText::new(label).color(if t.state.is_live() {
+                    views::COL_SELECT
+                } else {
+                    views::COL_WEAK
+                }));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak());
@@ -2466,7 +2844,11 @@ impl NlApp {
         // 킬 스위치는 무엇보다 먼저 본다 — 텍스트 칸에 포커스가 있어도, 모달이 떠 있어도 멈춰야 한다.
         self.tick_kill_switch(ctx, now);
         // 모달이 떠 있으면 아래 단축키는 전부 막는다 — 모달이 먼저 답을 받아야 한다.
-        if self.pending_action.is_some() || self.pending_plan.is_some() || self.outside_ask.is_some() {
+        if self.pending_action.is_some()
+            || self.pending_plan.is_some()
+            || self.outside_ask.is_some()
+            || !self.recover_candidates.is_empty()
+        {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
@@ -2489,7 +2871,11 @@ impl NlApp {
             digit: (!i.modifiers.command && !i.modifiers.alt)
                 .then(|| DIGIT_KEYS.iter().position(|k| i.key_pressed(*k)))
                 .flatten(),
-            view: i.modifiers.command.then(|| VIEW_KEYS.iter().position(|key| i.key_pressed(*key))).flatten(),
+            view: i
+                .modifiers
+                .command
+                .then(|| VIEW_KEYS.iter().position(|key| i.key_pressed(*key)))
+                .flatten(),
         });
         let k = if typing { k.while_typing() } else { k };
 
@@ -2766,6 +3152,7 @@ impl eframe::App for NlApp {
         self.tick_build(ctx, now);
         self.tick_updater(ctx);
         self.tick_devices(ctx);
+        self.tick_autosave(ctx, now);
         self.doc.tick(now);
         if self.doc.in_burst() {
             // 입력이 멎어도 burst 를 undo 항목으로 확정하려면 한 번 더 깨어나야 한다.
@@ -2773,9 +3160,14 @@ impl eframe::App for NlApp {
         }
 
         // 저장하지 않은 변경이 있으면 창 닫기를 한 번 붙잡는다.
-        if !self.close_confirmed && self.doc.modified && ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending_action = Some(PendingAction::Close);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.close_confirmed && self.doc.modified {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending_action = Some(PendingAction::Close);
+            } else {
+                // 정상 종료다 — 남은 스냅샷은 다음 시작 때 헛되이 복구를 권하게 된다.
+                self.discard_recovery(now);
+            }
         }
 
         self.handle_keys(ctx, now);
@@ -2824,6 +3216,7 @@ impl eframe::App for NlApp {
             self.apply_view_action(action, ctx, now);
         }
 
+        self.recovery_modal(ctx, now);
         self.unsaved_modal(ctx, now);
         self.tool_modal(ctx, now);
         self.outside_modal(ctx, now);
@@ -2849,9 +3242,15 @@ impl eframe::App for NlApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let last_file = self.doc.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        let last_file = self
+            .doc
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         eframe::set_value(storage, "last_file", &last_file);
         eframe::set_value(storage, "recent", &self.recent);
+        eframe::set_value(storage, "autosave_file", &self.autosave_file);
         eframe::set_value(storage, "show_outline", &self.show_outline);
         eframe::set_value(storage, "show_inspector", &self.show_inspector);
         eframe::set_value(storage, "show_dock", &self.show_dock);
@@ -2902,7 +3301,15 @@ impl NlApp {
                 let pipe_out = {
                     let live = self.runner.as_ref().map(|r| &r.live).unwrap_or(&empty);
                     let ctx = view_ctx!(self, now);
-                    views::pipeline::show(ui, &ctx, &mut self.pcanvas, live, run_state, self.arm_input, &mut self.sel)
+                    views::pipeline::show(
+                        ui,
+                        &ctx,
+                        &mut self.pcanvas,
+                        live,
+                        run_state,
+                        self.arm_input,
+                        &mut self.sel,
+                    )
                 };
                 out.extend(pipe_out.actions);
                 if let Some(pid) = self.active_pipeline() {
@@ -2950,7 +3357,10 @@ pub fn duplicate_ops(graph: &nl_core::Graph, model: ModelId, ids: &[NodeId]) -> 
     }
     for e in graph.edges.values() {
         if let (Some(&from), Some(&to)) = (map.get(&e.from), map.get(&e.to.node)) {
-            ops.push(Op::UpsertEdge { model, edge: Edge::new(from, Port::new(to, e.to.slot)) });
+            ops.push(Op::UpsertEdge {
+                model,
+                edge: Edge::new(from, Port::new(to, e.to.slot)),
+            });
         }
     }
     (ops, new_ids)
@@ -2993,7 +3403,14 @@ pub fn duplicate_pnode_ops(
     }
     for l in pl.links.values() {
         if let (Some(&from), Some(&to)) = (map.get(&l.from), map.get(&l.to)) {
-            ops.push(Op::UpsertLink { pipeline: pid, link: Link { id: LinkId::new(), from, to } });
+            ops.push(Op::UpsertLink {
+                pipeline: pid,
+                link: Link {
+                    id: LinkId::new(),
+                    from,
+                    to,
+                },
+            });
         }
     }
     (ops, new_ids)
@@ -3006,7 +3423,9 @@ fn extract_and_run(archive: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let file = std::fs::File::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
     let gz = flate2::read::GzDecoder::new(file);
-    tar::Archive::new(gz).unpack(&dir).map_err(|e| format!("압축을 풀지 못했습니다: {e}"))?;
+    tar::Archive::new(gz)
+        .unpack(&dir)
+        .map_err(|e| format!("압축을 풀지 못했습니다: {e}"))?;
     // `<slug>/<slug>` 규칙 (nl-bundle templates).
     let exe = find_executable(&dir).ok_or_else(|| "아카이브에서 실행 파일을 찾지 못했습니다".to_string())?;
     std::process::Command::new(&exe)
@@ -3036,7 +3455,9 @@ fn find_executable(dir: &Path) -> Option<PathBuf> {
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.extension().is_none()
-        && std::fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        && std::fs::metadata(p)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
 }
 
 #[cfg(not(unix))]
@@ -3048,7 +3469,13 @@ fn is_executable(p: &Path) -> bool {
 pub fn sanitize(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let t = cleaned.trim();
     if t.is_empty() {
@@ -3088,7 +3515,9 @@ fn sample_texture(ctx: &egui::Context, name: &str, t: &nl_engine::HostTensor) ->
     if !(1..=4).contains(&c) || h == 0 || w == 0 || t.data.len() < c * h * w {
         return None;
     }
-    let (min, max) = t.data.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let (min, max) = t.data.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| {
+        (lo.min(v), hi.max(v))
+    });
     let span = if (max - min).abs() < 1e-9 { 1.0 } else { max - min };
     let mut rgb = Vec::with_capacity(w * h * 3);
     for y in 0..h {
@@ -3232,7 +3661,16 @@ mod tests {
         let original = doc.project.models[&model].graph.nodes[&node_id].name.clone();
         // 인스펙터 타이핑처럼 한 글자씩 (같은 burst 안).
         for (i, ch) in "abc".chars().enumerate() {
-            doc.project.models.get_mut(&model).unwrap().graph.nodes.get_mut(&node_id).unwrap().name.push(ch);
+            doc.project
+                .models
+                .get_mut(&model)
+                .unwrap()
+                .graph
+                .nodes
+                .get_mut(&node_id)
+                .unwrap()
+                .name
+                .push(ch);
             doc.note_edited(1.0 + i as f64 * 0.1);
         }
         assert!(doc.in_burst());
@@ -3243,7 +3681,10 @@ mod tests {
         doc.undo();
         assert_eq!(doc.project, before);
         doc.redo();
-        assert_eq!(doc.project.models[&model].graph.nodes[&node_id].name, format!("{original}abc"));
+        assert_eq!(
+            doc.project.models[&model].graph.nodes[&node_id].name,
+            format!("{original}abc")
+        );
     }
 
     #[test]
@@ -3252,9 +3693,25 @@ mod tests {
         let model = first_model(&doc.project);
         let node_id = *doc.project.models[&model].graph.nodes.keys().next().unwrap();
         let original = doc.project.models[&model].graph.nodes[&node_id].name.clone();
-        doc.project.models.get_mut(&model).unwrap().graph.nodes.get_mut(&node_id).unwrap().name = "임시".into();
+        doc.project
+            .models
+            .get_mut(&model)
+            .unwrap()
+            .graph
+            .nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .name = "임시".into();
         doc.note_edited(1.0);
-        doc.project.models.get_mut(&model).unwrap().graph.nodes.get_mut(&node_id).unwrap().name = original;
+        doc.project
+            .models
+            .get_mut(&model)
+            .unwrap()
+            .graph
+            .nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .name = original;
         doc.note_edited(1.2);
         doc.tick(5.0);
         assert!(!doc.can_undo(), "결국 그대로면 undo 항목이 생기지 않는다");
@@ -3267,7 +3724,15 @@ mod tests {
         let model = first_model(&doc.project);
         let node_id = *doc.project.models[&model].graph.nodes.keys().next().unwrap();
         let before = doc.project.clone();
-        doc.project.models.get_mut(&model).unwrap().graph.nodes.get_mut(&node_id).unwrap().name = "새 이름".into();
+        doc.project
+            .models
+            .get_mut(&model)
+            .unwrap()
+            .graph
+            .nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .name = "새 이름".into();
         doc.note_edited(1.0);
         doc.undo();
         assert_eq!(doc.project, before);
@@ -3294,7 +3759,10 @@ mod tests {
         let mut doc = doc_with_sample();
         let model = first_model(&doc.project);
         let start = doc.edit_seq;
-        doc.apply_local(vec![Op::UpsertNode { model, node: Node::new(LayerKind::Flatten, [0.0, 0.0]) }]);
+        doc.apply_local(vec![Op::UpsertNode {
+            model,
+            node: Node::new(LayerKind::Flatten, [0.0, 0.0]),
+        }]);
         let after_local = doc.edit_seq;
         assert!(after_local > start);
         doc.undo();
@@ -3308,7 +3776,13 @@ mod tests {
     fn duplicate_copies_inner_edges_only() {
         let mut g = Graph::default();
         let a = g.add_node(Node::new(LayerKind::Input { shape: vec![4] }, [0.0, 0.0]));
-        let b = g.add_node(Node::new(LayerKind::Linear { out_features: 2, bias: true }, [220.0, 0.0]));
+        let b = g.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+            [220.0, 0.0],
+        ));
         let c = g.add_node(Node::new(LayerKind::Output, [440.0, 0.0]));
         g.add_edge(a, Port::new(b, 0)).unwrap();
         g.add_edge(b, Port::new(c, 0)).unwrap();
@@ -3321,7 +3795,14 @@ mod tests {
         assert_eq!(edges, 1, "복제 집합 바깥으로 나가는 엣지는 복사하지 않는다");
         // 새 노드는 원본과 다른 id 이고 위치가 어긋나 있다.
         let mut p = Project::new("t");
-        p.models.insert(model, nl_core::ModelDef { id: model, graph: g.clone(), ..nl_core::ModelDef::new("m") });
+        p.models.insert(
+            model,
+            nl_core::ModelDef {
+                id: model,
+                graph: g.clone(),
+                ..nl_core::ModelDef::new("m")
+            },
+        );
         apply_ops(&mut p, &ops);
         let dup = &p.models[&model].graph;
         assert_eq!(dup.nodes.len(), 5);
@@ -3343,7 +3824,12 @@ mod tests {
         let mut doc = doc_with_sample();
         let pid = *doc.project.pipelines.keys().next().unwrap();
         let before = doc.project.clone();
-        let node = PNode::new(nl_core::PNodeKind::Sink { sink: nl_core::Sink::Log }, [10.0, 20.0]);
+        let node = PNode::new(
+            nl_core::PNodeKind::Sink {
+                sink: nl_core::Sink::Log,
+            },
+            [10.0, 20.0],
+        );
         let id = node.id;
         doc.apply_local(vec![Op::UpsertPNode { pipeline: pid, node }]);
         assert!(doc.project.pipelines[&pid].nodes.contains_key(&id));
@@ -3366,7 +3852,10 @@ mod tests {
             .find(|id| pl.links.values().filter(|l| l.from == *id || l.to == *id).count() == 2)
             .expect("가운데 노드");
         let before = doc.project.clone();
-        doc.apply_local(vec![Op::DeletePNode { pipeline: pid, id: victim }]);
+        doc.apply_local(vec![Op::DeletePNode {
+            pipeline: pid,
+            id: victim,
+        }]);
         assert!(doc.project.pipelines[&pid].links.len() < pl.links.len());
         doc.undo();
         assert_eq!(doc.project, before);
@@ -3379,7 +3868,12 @@ mod tests {
         let pl = doc.project.pipelines[&pid].clone();
         // Manual → 모델 → 로그 사슬에서 앞의 둘만 복제한다.
         let chain: Vec<PNodeId> = {
-            let first = pl.nodes.values().find(|n| n.kind.is_source() && n.name == "입력").unwrap().id;
+            let first = pl
+                .nodes
+                .values()
+                .find(|n| n.kind.is_source() && n.name == "입력")
+                .unwrap()
+                .id;
             let second = pl.links.values().find(|l| l.from == first).unwrap().to;
             vec![first, second]
         };
@@ -3424,7 +3918,10 @@ mod tests {
         let before = doc.project.clone();
         let mut settings = doc.project.settings.clone();
         let spec = settings.build.clone().expect("샘플에 빌드 설정이 있다");
-        settings.build = Some(BuildSpec { app_version: "9.9.9".into(), ..spec });
+        settings.build = Some(BuildSpec {
+            app_version: "9.9.9".into(),
+            ..spec
+        });
         doc.apply_local(vec![Op::SetSettings { settings }]);
         assert_eq!(doc.project.settings.build.as_ref().unwrap().app_version, "9.9.9");
 
@@ -3457,7 +3954,13 @@ mod tests {
     #[test]
     fn relative_to_strips_the_base_or_keeps_the_absolute_path() {
         let base = Path::new("/proj");
-        assert_eq!(relative_to(base, Path::new("/proj/demo.runs/a/w.safetensors")), "demo.runs/a/w.safetensors");
-        assert_eq!(relative_to(base, Path::new("/elsewhere/w.safetensors")), "/elsewhere/w.safetensors");
+        assert_eq!(
+            relative_to(base, Path::new("/proj/demo.runs/a/w.safetensors")),
+            "demo.runs/a/w.safetensors"
+        );
+        assert_eq!(
+            relative_to(base, Path::new("/elsewhere/w.safetensors")),
+            "/elsewhere/w.safetensors"
+        );
     }
 }

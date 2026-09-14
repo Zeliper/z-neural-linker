@@ -229,11 +229,18 @@ impl SelectionState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanvasAction {
     /// 팔레트에서 만든 새 레이어.
-    AddNode { kind: LayerKind, pos: [f32; 2] },
+    AddNode {
+        kind: LayerKind,
+        pos: [f32; 2],
+    },
     /// 드래그로 옮긴 노드들 (다중 선택은 한 묶음 = undo 한 번).
     MoveNodes(Vec<(NodeId, [f32; 2])>),
     /// 포트 → 포트 연결. `replace` 가 있으면 그 엣지를 떼어 다시 붙이는 것이다.
-    Connect { from: NodeId, to: Port, replace: Option<EdgeId> },
+    Connect {
+        from: NodeId,
+        to: Port,
+        replace: Option<EdgeId>,
+    },
     DeleteNodes(Vec<NodeId>),
     DeleteEdges(Vec<EdgeId>),
     DuplicateNodes(Vec<NodeId>),
@@ -284,7 +291,9 @@ impl BoxSelect {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CtxTarget {
     /// 빈 곳 — 레이어 팔레트. 월드 좌표에 만든다.
-    Canvas { world: Pos2 },
+    Canvas {
+        world: Pos2,
+    },
     Edge(EdgeId),
 }
 
@@ -313,7 +322,10 @@ impl Camera {
 
 impl Default for Camera {
     fn default() -> Self {
-        Self { pan: Vec2::new(-40.0, -40.0), zoom: 1.0 }
+        Self {
+            pan: Vec2::new(-40.0, -40.0),
+            zoom: 1.0,
+        }
     }
 }
 
@@ -392,8 +404,13 @@ impl CanvasState {
             return;
         };
         let b = b.expand(20.0);
-        let avail = Vec2::new((viewport.width() - FIT_MARGIN).max(80.0), (viewport.height() - FIT_MARGIN).max(80.0));
-        let zoom = (avail.x / b.width().max(1.0)).min(avail.y / b.height().max(1.0)).clamp(ZOOM_MIN, ZOOM_MAX);
+        let avail = Vec2::new(
+            (viewport.width() - FIT_MARGIN).max(80.0),
+            (viewport.height() - FIT_MARGIN).max(80.0),
+        );
+        let zoom = (avail.x / b.width().max(1.0))
+            .min(avail.y / b.height().max(1.0))
+            .clamp(ZOOM_MIN, ZOOM_MAX);
         self.camera.zoom = zoom;
         self.camera.pan = b.center().to_vec2() - viewport.size() / (2.0 * zoom);
     }
@@ -427,10 +444,18 @@ impl CanvasState {
             self.initialized = false;
         }
         // 다른 경로(undo·원격 삭제)로 사라진 노드 정리.
-        if self.node_drag.map(|d| !graph.nodes.contains_key(&d.id)).unwrap_or(false) {
+        if self
+            .node_drag
+            .map(|d| !graph.nodes.contains_key(&d.id))
+            .unwrap_or(false)
+        {
             self.node_drag = None;
         }
-        if self.link_drag.map(|d| !graph.nodes.contains_key(&d.from)).unwrap_or(false) {
+        if self
+            .link_drag
+            .map(|d| !graph.nodes.contains_key(&d.from))
+            .unwrap_or(false)
+        {
             self.link_drag = None;
         }
         sel.prune_graph(graph);
@@ -464,7 +489,11 @@ impl CanvasState {
         let bg = ui.interact(viewport, ui.id().with("canvas-bg"), Sense::click_and_drag());
         let mods = ui.input(|i| i.modifiers);
         let (pointer, press_origin, primary_released) = ui.input(|i| {
-            (i.pointer.interact_pos(), i.pointer.press_origin(), i.pointer.button_released(egui::PointerButton::Primary))
+            (
+                i.pointer.interact_pos(),
+                i.pointer.press_origin(),
+                i.pointer.button_released(egui::PointerButton::Primary),
+            )
         });
 
         if self.swallow_drag && !ui.input(|i| i.pointer.any_down()) {
@@ -474,16 +503,22 @@ impl CanvasState {
         // ── 팬 / 줌 / 러버밴드 ─────────────────────────────────
         if bg.drag_started_by(egui::PointerButton::Primary) && mods.alt {
             let origin = press_origin.or(pointer).unwrap_or(viewport.center());
-            self.box_select = Some(BoxSelect { origin, current: origin, additive: mods.shift || mods.command });
+            self.box_select = Some(BoxSelect {
+                origin,
+                current: origin,
+                additive: mods.shift || mods.command,
+            });
         }
         let panning = bg.dragged_by(egui::PointerButton::Primary) || bg.dragged_by(egui::PointerButton::Middle);
         if panning && self.box_select.is_none() && !self.swallow_drag {
             self.camera.pan -= bg.drag_delta() / self.camera.zoom;
         }
         if bg.contains_pointer() {
-            let (zoom_delta, scroll, hover) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
+            let (zoom_delta, scroll, hover) =
+                ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
             if zoom_delta != 1.0 {
-                self.camera.zoom_at(viewport, hover.unwrap_or_else(|| viewport.center()), zoom_delta);
+                self.camera
+                    .zoom_at(viewport, hover.unwrap_or_else(|| viewport.center()), zoom_delta);
             }
             if scroll != Vec2::ZERO {
                 // 휠은 스크롤(세로/가로), Ctrl+휠은 egui 가 zoom_delta 로 바꿔 준다.
@@ -536,8 +571,14 @@ impl CanvasState {
             if Some(eid) == detached {
                 continue; // 떼어 끌고 있는 중 — 고스트만 보인다
             }
-            let (Some(fw), Some(tw)) = (world_rect(edge.from), world_rect(edge.to.node)) else { continue };
-            let slots = graph.nodes.get(&edge.to.node).map(|n| n.kind.spec().inputs).unwrap_or(1);
+            let (Some(fw), Some(tw)) = (world_rect(edge.from), world_rect(edge.to.node)) else {
+                continue;
+            };
+            let slots = graph
+                .nodes
+                .get(&edge.to.node)
+                .map(|n| n.kind.spec().inputs)
+                .unwrap_or(1);
             let p0 = self.camera.to_screen(viewport, output_port_pos(fw));
             let p3 = self.camera.to_screen(viewport, input_port_pos(tw, edge.to.slot, slots));
             let (p1, p2) = control_points(p0, p3);
@@ -551,7 +592,12 @@ impl CanvasState {
                 (COL_EDGE, 1.8)
             };
             let stroke = Stroke::new(width * zoom.clamp(0.6, 1.4), color);
-            painter.add(CubicBezierShape::from_points_stroke([p0, p1, p2, p3], false, Color32::TRANSPARENT, stroke));
+            painter.add(CubicBezierShape::from_points_stroke(
+                [p0, p1, p2, p3],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            ));
             // 화살촉
             let dir = (p3 - p2).normalized();
             let orth = Vec2::new(-dir.y, dir.x);
@@ -563,7 +609,10 @@ impl CanvasState {
             ));
             if let Some(pp) = pointer {
                 if hovered_edge.is_none()
-                    && Rect::from_two_pos(p0, p3).union(Rect::from_two_pos(p1, p2)).expand(14.0).contains(pp)
+                    && Rect::from_two_pos(p0, p3)
+                        .union(Rect::from_two_pos(p1, p2))
+                        .expand(14.0)
+                        .contains(pp)
                     && bezier_near(p0, p1, p2, p3, pp, 7.0)
                 {
                     hovered_edge = Some(eid);
@@ -597,7 +646,9 @@ impl CanvasState {
                 sel.set(Selection::Node(model, id));
             }
             if resp.drag_started_by(egui::PointerButton::Primary) {
-                let origin = press_origin.or_else(|| resp.interact_pointer_pos()).unwrap_or_else(|| sr.center());
+                let origin = press_origin
+                    .or_else(|| resp.interact_pointer_pos())
+                    .unwrap_or_else(|| sr.center());
                 match zone_at(origin) {
                     Some(Zone::Output) if spec.has_output => {
                         self.link_drag = Some(LinkDrag { from: id, detach: None });
@@ -606,7 +657,12 @@ impl CanvasState {
                         // 이미 꽂혀 있으면 떼어 재연결, 비어 있으면 그냥 이동.
                         let existing = graph.edges.values().find(|e| e.to == Port::new(id, slot));
                         match existing {
-                            Some(e) => self.link_drag = Some(LinkDrag { from: e.from, detach: Some(e.id) }),
+                            Some(e) => {
+                                self.link_drag = Some(LinkDrag {
+                                    from: e.from,
+                                    detach: Some(e.id),
+                                })
+                            }
                             None => self.node_drag = Some(NodeDrag { id, delta: Vec2::ZERO }),
                         }
                     }
@@ -651,7 +707,12 @@ impl CanvasState {
             }
 
             let err = report.errors.get(&id);
-            let style = NodeStyle { selected: sel.is_node_selected(id), hovered, error: err.is_some(), zone };
+            let style = NodeStyle {
+                selected: sel.is_node_selected(id),
+                hovered,
+                error: err.is_some(),
+                zone,
+            };
             draw_node(&painter, node, sr, style, zoom, report, graph);
 
             // 오류 노드는 사유를 툴팁으로 (검증 도크의 문구와 같은 출처).
@@ -660,8 +721,11 @@ impl CanvasState {
                 _ => resp,
             };
             // 컨텍스트 메뉴는 노드 응답에 붙인다 — 선택 전체에 적용할지는 이 노드가 선택에 든 지로 정한다.
-            let group: Vec<NodeId> =
-                if sel.count() > 1 && sel.is_node_selected(id) { sel.node_list() } else { vec![id] };
+            let group: Vec<NodeId> = if sel.count() > 1 && sel.is_node_selected(id) {
+                sel.node_list()
+            } else {
+                vec![id]
+            };
             resp.context_menu(|ui| node_menu(ui, id, &group, &mut actions));
         }
 
@@ -676,8 +740,11 @@ impl CanvasState {
             self.box_select = Some(b);
             if primary_released {
                 self.box_select = None;
-                let picked: Vec<NodeId> =
-                    visible.iter().filter(|(_, sr)| sr.intersects(r)).map(|(id, _)| *id).collect();
+                let picked: Vec<NodeId> = visible
+                    .iter()
+                    .filter(|(_, sr)| sr.intersects(r))
+                    .map(|(id, _)| *id)
+                    .collect();
                 if !picked.is_empty() || !b.additive {
                     sel.select_nodes(model, picked, b.additive);
                 }
@@ -712,7 +779,12 @@ impl CanvasState {
                 painter.circle_filled(target_pos, 4.5, color);
                 if drop_target.is_some() && !ok {
                     let why = connect_error(graph, link.from, drop_target.map(|(n, s)| Port::new(n, s)).unwrap());
-                    label_pill_right(&painter, Pos2::new(target_pos.x - 12.0, target_pos.y - 6.0), &why, COL_ERROR);
+                    label_pill_right(
+                        &painter,
+                        Pos2::new(target_pos.x - 12.0, target_pos.y - 6.0),
+                        &why,
+                        COL_ERROR,
+                    );
                 }
             }
             if primary_released {
@@ -721,7 +793,11 @@ impl CanvasState {
                     Some((to, slot)) => {
                         let port = Port::new(to, slot);
                         if connect_allowed(graph, link.from, port, link.detach) {
-                            actions.push(CanvasAction::Connect { from: link.from, to: port, replace: link.detach });
+                            actions.push(CanvasAction::Connect {
+                                from: link.from,
+                                to: port,
+                                replace: link.detach,
+                            });
                         }
                     }
                     // 빈 곳에 놓았다: 떼어 온 엣지는 삭제, 새로 만들던 것은 없던 일로.
@@ -739,8 +815,11 @@ impl CanvasState {
             if primary_released {
                 self.node_drag = None;
                 if d.delta.length() > 0.5 {
-                    let group: Vec<NodeId> =
-                        if sel.is_node_selected(d.id) { sel.node_list() } else { vec![d.id] };
+                    let group: Vec<NodeId> = if sel.is_node_selected(d.id) {
+                        sel.node_list()
+                    } else {
+                        vec![d.id]
+                    };
                     let items: Vec<(NodeId, [f32; 2])> = group
                         .iter()
                         .filter_map(|&gid| {
@@ -766,7 +845,9 @@ impl CanvasState {
             self.ctx_target = Some(match hovered_edge {
                 Some(e) => CtxTarget::Edge(e),
                 None => CtxTarget::Canvas {
-                    world: pointer.map(|pp| self.camera.to_world(viewport, pp)).unwrap_or(Pos2::ZERO),
+                    world: pointer
+                        .map(|pp| self.camera.to_world(viewport, pp))
+                        .unwrap_or(Pos2::ZERO),
                 },
             });
         }
@@ -903,7 +984,9 @@ fn connect_check(graph: &Graph, from: NodeId, to: Port, replace: Option<EdgeId>)
     if !graph.nodes.contains_key(&from) {
         return Some("없는 노드".into());
     }
-    let Some(target) = graph.nodes.get(&to.node) else { return Some("없는 노드".into()) };
+    let Some(target) = graph.nodes.get(&to.node) else {
+        return Some("없는 노드".into());
+    };
     if to.slot >= target.kind.spec().inputs {
         return Some("입력 슬롯 없음".into());
     }
@@ -911,7 +994,10 @@ fn connect_check(graph: &Graph, from: NodeId, to: Port, replace: Option<EdgeId>)
     if taken {
         return Some("이미 연결된 슬롯".into());
     }
-    let dup = graph.edges.values().any(|e| e.from == from && e.to.node == to.node && Some(e.id) != replace);
+    let dup = graph
+        .edges
+        .values()
+        .any(|e| e.from == from && e.to.node == to.node && Some(e.id) != replace);
     if dup {
         return Some("이미 연결됨".into());
     }
@@ -953,7 +1039,10 @@ fn draw_grid(painter: &egui::Painter, camera: &Camera, viewport: Rect) {
     let mut i = (start.x / 40.0).floor() as i64;
     while x < viewport.max.x {
         let c = if i % 5 == 0 { COL_GRID_STRONG } else { COL_GRID };
-        painter.line_segment([Pos2::new(x, viewport.min.y), Pos2::new(x, viewport.max.y)], Stroke::new(1.0, c));
+        painter.line_segment(
+            [Pos2::new(x, viewport.min.y), Pos2::new(x, viewport.max.y)],
+            Stroke::new(1.0, c),
+        );
         x += step;
         i += 1;
     }
@@ -961,7 +1050,10 @@ fn draw_grid(painter: &egui::Painter, camera: &Camera, viewport: Rect) {
     let mut j = (start.y / 40.0).floor() as i64;
     while y < viewport.max.y {
         let c = if j % 5 == 0 { COL_GRID_STRONG } else { COL_GRID };
-        painter.line_segment([Pos2::new(viewport.min.x, y), Pos2::new(viewport.max.x, y)], Stroke::new(1.0, c));
+        painter.line_segment(
+            [Pos2::new(viewport.min.x, y), Pos2::new(viewport.max.x, y)],
+            Stroke::new(1.0, c),
+        );
         y += step;
         j += 1;
     }
@@ -990,7 +1082,12 @@ fn draw_node(
         base.gamma_multiply(0.9)
     };
     let bw = if style.selected || style.error { 2.4 } else { 1.4 };
-    painter.rect_stroke(sr, cr, Stroke::new(bw * zoom.clamp(0.6, 1.4), border), StrokeKind::Outside);
+    painter.rect_stroke(
+        sr,
+        cr,
+        Stroke::new(bw * zoom.clamp(0.6, 1.4), border),
+        StrokeKind::Outside,
+    );
     // 왼쪽 종류 색 띠
     let stripe = Rect::from_min_max(sr.min, Pos2::new(sr.min.x + 4.0 * zoom.clamp(0.6, 1.4), sr.max.y));
     painter.rect_filled(stripe, cr, base);
@@ -1030,7 +1127,12 @@ fn draw_node(
         let filled = graph.inputs_of(node.id).contains_key(&slot);
         let hot = style.zone == Some(Zone::Input(slot));
         let c = if filled { COL_EDGE } else { COL_TEXT_DIM };
-        painter.circle(p, if hot { pr * 1.5 } else { pr }, if filled { c } else { COL_BG }, Stroke::new(1.5, c));
+        painter.circle(
+            p,
+            if hot { pr * 1.5 } else { pr },
+            if filled { c } else { COL_BG },
+            Stroke::new(1.5, c),
+        );
     }
     // 출력 포트
     if spec.has_output {
@@ -1044,8 +1146,17 @@ fn draw_node(
             Some(_) => "오류".to_string(),
             None => shape_label(report.shape(node.id)),
         };
-        let color = if report.errors.contains_key(&node.id) { COL_ERROR } else { COL_TEXT_DIM };
-        label_pill_right(painter, Pos2::new(sr.max.x - 8.0 * zoom, sr.max.y - 7.0 * zoom), &text, color);
+        let color = if report.errors.contains_key(&node.id) {
+            COL_ERROR
+        } else {
+            COL_TEXT_DIM
+        };
+        label_pill_right(
+            painter,
+            Pos2::new(sr.max.x - 8.0 * zoom, sr.max.y - 7.0 * zoom),
+            &text,
+            color,
+        );
     }
 }
 
@@ -1068,7 +1179,11 @@ fn node_menu(ui: &mut egui::Ui, id: NodeId, group: &[NodeId], actions: &mut Vec<
         actions.push(CanvasAction::DuplicateNodes(group.to_vec()));
         ui.close();
     }
-    if ui.button("⊘ 연결 끊기").on_hover_text("이 노드에 붙은 엣지를 모두 뗀다").clicked() {
+    if ui
+        .button("⊘ 연결 끊기")
+        .on_hover_text("이 노드에 붙은 엣지를 모두 뗀다")
+        .clicked()
+    {
         actions.push(CanvasAction::DisconnectNode(id));
         ui.close();
     }
@@ -1088,7 +1203,11 @@ fn palette_menu(ui: &mut egui::Ui, world: Pos2, actions: &mut Vec<CanvasAction>)
     let mut by_cat: BTreeMap<usize, (LayerCategory, Vec<LayerKind>)> = BTreeMap::new();
     for kind in LayerKind::palette() {
         let cat = kind.spec().category;
-        by_cat.entry(category_order(cat)).or_insert_with(|| (cat, Vec::new())).1.push(kind);
+        by_cat
+            .entry(category_order(cat))
+            .or_insert_with(|| (cat, Vec::new()))
+            .1
+            .push(kind);
     }
     for (_, (cat, kinds)) in by_cat {
         ui.menu_button(cat.label(), |ui| {
@@ -1101,7 +1220,10 @@ fn palette_menu(ui: &mut egui::Ui, world: Pos2, actions: &mut Vec<CanvasAction>)
                     format!("{}  {}", spec.label, kind.summary())
                 };
                 if ui.button(text).clicked() {
-                    actions.push(CanvasAction::AddNode { kind: kind.clone(), pos: spawn_pos(world) });
+                    actions.push(CanvasAction::AddNode {
+                        kind: kind.clone(),
+                        pos: spawn_pos(world),
+                    });
                     ui.close();
                 }
             }
@@ -1131,7 +1253,11 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 fn lighten(c: Color32, amount: u8) -> Color32 {
-    Color32::from_rgb(c.r().saturating_add(amount), c.g().saturating_add(amount), c.b().saturating_add(amount))
+    Color32::from_rgb(
+        c.r().saturating_add(amount),
+        c.g().saturating_add(amount),
+        c.b().saturating_add(amount),
+    )
 }
 
 #[cfg(test)]
@@ -1168,10 +1294,16 @@ mod tests {
         let r = node_rect([0.0, 0.0]);
         // 출력 포트 바로 위 — 사각형 안쪽이기도 하지만 포트가 이긴다.
         let out = output_port_pos(r);
-        assert_eq!(hit_zone(r, 1, true, out - Vec2::new(2.0, 0.0), 10.0), Some(Zone::Output));
+        assert_eq!(
+            hit_zone(r, 1, true, out - Vec2::new(2.0, 0.0), 10.0),
+            Some(Zone::Output)
+        );
         // 입력 포트.
         let inp = input_port_pos(r, 0, 2);
-        assert_eq!(hit_zone(r, 2, true, inp + Vec2::new(3.0, 0.0), 10.0), Some(Zone::Input(0)));
+        assert_eq!(
+            hit_zone(r, 2, true, inp + Vec2::new(3.0, 0.0), 10.0),
+            Some(Zone::Input(0))
+        );
         // 가운데는 바디.
         assert_eq!(hit_zone(r, 1, true, r.center(), 10.0), Some(Zone::Body));
         // 바깥은 아무것도 아니다.
@@ -1205,7 +1337,10 @@ mod tests {
     fn connect_rules_block_cycles_taken_slots_and_duplicates() {
         let (mut g, ids) = graph_with(vec![
             LayerKind::Input { shape: vec![4] },
-            LayerKind::Linear { out_features: 4, bias: true },
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
             LayerKind::Add,
         ]);
         let (i, l, a) = (ids[0], ids[1], ids[2]);
@@ -1231,7 +1366,10 @@ mod tests {
         let (mut g, ids) = graph_with(vec![
             LayerKind::Input { shape: vec![4] },
             LayerKind::Activation { act: Act::Relu },
-            LayerKind::Linear { out_features: 2, bias: true },
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
         ]);
         let (i, act, lin) = (ids[0], ids[1], ids[2]);
         let e = g.add_edge(i, Port::new(lin, 0)).unwrap();
@@ -1243,9 +1381,18 @@ mod tests {
     #[test]
     fn cycle_is_blocked_even_through_a_longer_path() {
         let (mut g, ids) = graph_with(vec![
-            LayerKind::Linear { out_features: 4, bias: true },
-            LayerKind::Linear { out_features: 4, bias: true },
-            LayerKind::Linear { out_features: 4, bias: true },
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
         ]);
         g.add_edge(ids[0], Port::new(ids[1], 0)).unwrap();
         g.add_edge(ids[1], Port::new(ids[2], 0)).unwrap();
@@ -1264,7 +1411,10 @@ mod tests {
     #[test]
     fn camera_zoom_keeps_the_pivot_in_place() {
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let mut cam = Camera { pan: Vec2::new(10.0, 20.0), zoom: 1.0 };
+        let mut cam = Camera {
+            pan: Vec2::new(10.0, 20.0),
+            zoom: 1.0,
+        };
         let pivot = Pos2::new(300.0, 200.0);
         let before = cam.to_world(viewport, pivot);
         cam.zoom_at(viewport, pivot, 1.4);

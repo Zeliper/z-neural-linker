@@ -38,7 +38,12 @@ pub fn snap_rect(rect: [f32; 4], snap: bool) -> [f32; 4] {
         return rect.map(|v| (v * 100.0).round() / 100.0);
     }
     let q = |v: f32| (v / SNAP).round() * SNAP;
-    [q(rect[0]), q(rect[1]), q(rect[2]).max(SNAP * 2.0), q(rect[3]).max(SNAP * 2.0)]
+    [
+        q(rect[0]),
+        q(rect[1]),
+        q(rect[2]).max(SNAP * 2.0),
+        q(rect[3]).max(SNAP * 2.0),
+    ]
 }
 
 pub fn show(
@@ -52,34 +57,53 @@ pub fn show(
     let layout = &ctx.project.gui;
 
     // ── 상단 바 ─────────────────────────────────────────────────
-    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("창").color(COL_WEAK));
-            let mut win = layout.window.clone();
-            let mut changed = false;
-            changed |= ui.add(egui::TextEdit::singleline(&mut win.title).desired_width(180.0)).changed();
-            changed |= ui.add(DragValue::new(&mut win.width).range(120.0..=4096.0).speed(4.0).prefix("w ")).changed();
-            changed |= ui.add(DragValue::new(&mut win.height).range(120.0..=4096.0).speed(4.0).prefix("h ")).changed();
-            changed |= ui.checkbox(&mut win.dark, "다크").changed();
-            if changed {
-                out.actions.push(ViewAction::Edit(vec![Op::SetGuiWindow { window: win }]));
-            }
-            ui.separator();
-            ui.checkbox(&mut state.snap, format!("{SNAP:.0}px 격자"));
-            ui.separator();
-            let mut on = preview;
-            if ui
-                .checkbox(&mut on, "▶ 미리보기")
-                .on_hover_text("런타임과 같은 Run 모드로 바꾸고 선택한 파이프라인을 실행합니다")
-                .changed()
-            {
-                out.actions.push(ViewAction::SetGuiPreview(on));
-            }
-            if preview {
-                ui.label(RichText::new("● 미리보기 중 — 편집은 꺼짐").color(COL_SELECT));
-            }
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("창").color(COL_WEAK));
+                let mut win = layout.window.clone();
+                let mut changed = false;
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut win.title).desired_width(180.0))
+                    .changed();
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut win.width)
+                            .range(120.0..=4096.0)
+                            .speed(4.0)
+                            .prefix("w "),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut win.height)
+                            .range(120.0..=4096.0)
+                            .speed(4.0)
+                            .prefix("h "),
+                    )
+                    .changed();
+                changed |= ui.checkbox(&mut win.dark, "다크").changed();
+                if changed {
+                    out.actions
+                        .push(ViewAction::Edit(vec![Op::SetGuiWindow { window: win }]));
+                }
+                ui.separator();
+                ui.checkbox(&mut state.snap, format!("{SNAP:.0}px 격자"));
+                ui.separator();
+                let mut on = preview;
+                if ui
+                    .checkbox(&mut on, "▶ 미리보기")
+                    .on_hover_text("런타임과 같은 Run 모드로 바꾸고 선택한 파이프라인을 실행합니다")
+                    .changed()
+                {
+                    out.actions.push(ViewAction::SetGuiPreview(on));
+                }
+                if preview {
+                    ui.label(RichText::new("● 미리보기 중 — 편집은 꺼짐").color(COL_SELECT));
+                }
+            });
         });
-    });
     ui.separator();
 
     // ── 팔레트 + 캔버스 ─────────────────────────────────────────
@@ -93,7 +117,9 @@ pub fn show(
             ui.separator();
             ui.add_enabled_ui(!preview, |ui| {
                 for kind in WidgetKind::palette() {
-                    if ui.add(egui::Button::new(kind.label()).min_size(egui::Vec2::new(palette_w - 12.0, 0.0))).clicked()
+                    if ui
+                        .add(egui::Button::new(kind.label()).min_size(egui::Vec2::new(palette_w - 12.0, 0.0)))
+                        .clicked()
                     {
                         let rect = default_rect(&kind, layout);
                         let w = Widget::new(kind.clone(), rect);
@@ -104,9 +130,17 @@ pub fn show(
                 }
             });
             ui.add_space(8.0);
-            ui.label(RichText::new(format!("{}개 배치됨", layout.widgets.len())).color(COL_WEAK).size(11.0));
+            ui.label(
+                RichText::new(format!("{}개 배치됨", layout.widgets.len()))
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
             if preview {
-                ui.label(RichText::new("미리보기를 끄면 편집할 수 있습니다").color(COL_WEAK).size(11.0));
+                ui.label(
+                    RichText::new("미리보기를 끄면 편집할 수 있습니다")
+                        .color(COL_WEAK)
+                        .size(11.0),
+                );
             }
         });
         ui.separator();
@@ -155,7 +189,8 @@ pub fn show(
                         if let Some(w) = layout.widgets.get(&id) {
                             let mut next = w.clone();
                             next.rect = snap_rect(rect, state.snap);
-                            out.actions.push(ViewAction::Ops(vec![Op::UpsertWidget { widget: next }]));
+                            out.actions
+                                .push(ViewAction::Ops(vec![Op::UpsertWidget { widget: next }]));
                         }
                     }
                     other => out.events.push(other),
@@ -208,30 +243,53 @@ pub fn inspect_widget(ui: &mut egui::Ui, ctx: &ViewCtx, id: WidgetId, gui: &GuiS
     ui.separator();
 
     ui.label(RichText::new("종류").color(COL_WEAK).size(11.5));
-    egui::ComboBox::from_id_salt("widget-kind").selected_text(next.kind.label()).show_ui(ui, |ui| {
-        for k in WidgetKind::palette() {
-            let same = std::mem::discriminant(&next.kind) == std::mem::discriminant(&k);
-            if ui.selectable_label(same, k.label()).clicked() && !same {
-                next.kind = k;
-                changed = true;
+    egui::ComboBox::from_id_salt("widget-kind")
+        .selected_text(next.kind.label())
+        .show_ui(ui, |ui| {
+            for k in WidgetKind::palette() {
+                let same = std::mem::discriminant(&next.kind) == std::mem::discriminant(&k);
+                if ui.selectable_label(same, k.label()).clicked() && !same {
+                    next.kind = k;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     changed |= kind_fields(ui, &mut next.kind);
 
     ui.add_space(6.0);
     ui.label(RichText::new("자리 (창 기준 논리 px)").color(COL_WEAK).size(11.5));
     ui.horizontal(|ui| {
-        changed |= ui.add(DragValue::new(&mut next.rect[0]).prefix("x ").speed(1.0)).changed();
-        changed |= ui.add(DragValue::new(&mut next.rect[1]).prefix("y ").speed(1.0)).changed();
+        changed |= ui
+            .add(DragValue::new(&mut next.rect[0]).prefix("x ").speed(1.0))
+            .changed();
+        changed |= ui
+            .add(DragValue::new(&mut next.rect[1]).prefix("y ").speed(1.0))
+            .changed();
     });
     ui.horizontal(|ui| {
-        changed |= ui.add(DragValue::new(&mut next.rect[2]).prefix("w ").speed(1.0).range(8.0..=4096.0)).changed();
-        changed |= ui.add(DragValue::new(&mut next.rect[3]).prefix("h ").speed(1.0).range(8.0..=4096.0)).changed();
+        changed |= ui
+            .add(
+                DragValue::new(&mut next.rect[2])
+                    .prefix("w ")
+                    .speed(1.0)
+                    .range(8.0..=4096.0),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                DragValue::new(&mut next.rect[3])
+                    .prefix("h ")
+                    .speed(1.0)
+                    .range(8.0..=4096.0),
+            )
+            .changed();
     });
     ui.horizontal(|ui| {
         ui.label("z");
-        changed |= ui.add(DragValue::new(&mut next.z).speed(1.0)).on_hover_text("클수록 위에 그려집니다").changed();
+        changed |= ui
+            .add(DragValue::new(&mut next.z).speed(1.0))
+            .on_hover_text("클수록 위에 그려집니다")
+            .changed();
     });
 
     // 그룹 부모.
@@ -253,18 +311,20 @@ pub fn inspect_widget(ui: &mut egui::Ui, ctx: &ViewCtx, id: WidgetId, gui: &GuiS
         .and_then(|p| groups.iter().find(|(gid, _)| *gid == p))
         .map(|(_, n)| n.clone())
         .unwrap_or_else(|| "(없음)".into());
-    egui::ComboBox::from_id_salt("widget-parent").selected_text(parent_label).show_ui(ui, |ui| {
-        if ui.selectable_label(next.parent.is_none(), "(없음)").clicked() && next.parent.is_some() {
-            next.parent = None;
-            changed = true;
-        }
-        for (gid, name) in &groups {
-            if ui.selectable_label(next.parent == Some(*gid), name).clicked() && next.parent != Some(*gid) {
-                next.parent = Some(*gid);
+    egui::ComboBox::from_id_salt("widget-parent")
+        .selected_text(parent_label)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(next.parent.is_none(), "(없음)").clicked() && next.parent.is_some() {
+                next.parent = None;
                 changed = true;
             }
-        }
-    });
+            for (gid, name) in &groups {
+                if ui.selectable_label(next.parent == Some(*gid), name).clicked() && next.parent != Some(*gid) {
+                    next.parent = Some(*gid);
+                    changed = true;
+                }
+            }
+        });
 
     ui.add_space(8.0);
     ui.label(RichText::new("바인딩").size(13.0).strong());
@@ -304,19 +364,27 @@ fn kind_fields(ui: &mut egui::Ui, kind: &mut WidgetKind) -> bool {
     match kind {
         WidgetKind::Label { text } | WidgetKind::Button { text } | WidgetKind::Toggle { text } => {
             ui.label(RichText::new("문구").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY))
+                .changed();
         }
         WidgetKind::Group { title } => {
             ui.label(RichText::new("제목").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY))
+                .changed();
         }
         WidgetKind::Value { prefix } => {
             ui.label(RichText::new("앞에 붙일 말").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(prefix).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(prefix).desired_width(f32::INFINITY))
+                .changed();
         }
         WidgetKind::TextInput { hint } => {
             ui.label(RichText::new("힌트").color(COL_WEAK).size(11.0));
-            changed |= ui.add(egui::TextEdit::singleline(hint).desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(hint).desired_width(f32::INFINITY))
+                .changed();
         }
         WidgetKind::Slider { min, max, value } => {
             ui.horizontal(|ui| {
@@ -343,21 +411,36 @@ fn kind_fields(ui: &mut egui::Ui, kind: &mut WidgetKind) -> bool {
 fn binding_editor(ui: &mut egui::Ui, w: &mut Widget, ctx: &ViewCtx, actions: &mut Vec<ViewAction>) -> bool {
     let mut changed = false;
     let current = binding_tag(&w.binding);
-    egui::ComboBox::from_id_salt("widget-binding").selected_text(binding_tag_label(current)).show_ui(ui, |ui| {
-        for tag in [BindingTag::None, BindingTag::Input, BindingTag::Output, BindingTag::Action] {
-            if ui.selectable_label(current == tag, binding_tag_label(tag)).clicked() && current != tag {
-                w.binding = default_binding(tag, ctx, w.id);
-                changed = true;
+    egui::ComboBox::from_id_salt("widget-binding")
+        .selected_text(binding_tag_label(current))
+        .show_ui(ui, |ui| {
+            for tag in [
+                BindingTag::None,
+                BindingTag::Input,
+                BindingTag::Output,
+                BindingTag::Action,
+            ] {
+                if ui.selectable_label(current == tag, binding_tag_label(tag)).clicked() && current != tag {
+                    w.binding = default_binding(tag, ctx, w.id);
+                    changed = true;
+                }
             }
-        }
-    });
+        });
 
     match &mut w.binding {
         None => {
-            ui.label(RichText::new("아무 데도 연결되지 않았습니다.").color(COL_WEAK).size(11.0));
+            ui.label(
+                RichText::new("아무 데도 연결되지 않았습니다.")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            );
         }
         Some(Binding::Action { action }) => {
-            for a in [BuiltinAction::StartPipeline, BuiltinAction::StopPipeline, BuiltinAction::Quit] {
+            for a in [
+                BuiltinAction::StartPipeline,
+                BuiltinAction::StopPipeline,
+                BuiltinAction::Quit,
+            ] {
                 let text = match a {
                     BuiltinAction::StartPipeline => "파이프라인 시작",
                     BuiltinAction::StopPipeline => "파이프라인 정지",
@@ -376,7 +459,11 @@ fn binding_editor(ui: &mut egui::Ui, w: &mut Widget, ctx: &ViewCtx, actions: &mu
             changed |= node_picker(ui, node, ctx, NodeRole::GuiWidgetSink, w.id, actions, "bind-out");
         }
         Some(Binding::ModelOutput { .. }) => {
-            ui.label(RichText::new("모델 출력 바인딩은 파이프라인 노드로 대신하세요.").color(COL_WARN).size(11.0));
+            ui.label(
+                RichText::new("모델 출력 바인딩은 파이프라인 노드로 대신하세요.")
+                    .color(COL_WARN)
+                    .size(11.0),
+            );
         }
     }
     changed
@@ -411,7 +498,9 @@ fn binding_tag_label(t: BindingTag) -> &'static str {
 fn default_binding(tag: BindingTag, ctx: &ViewCtx, widget: WidgetId) -> Option<Binding> {
     match tag {
         BindingTag::None => None,
-        BindingTag::Action => Some(Binding::Action { action: BuiltinAction::StartPipeline }),
+        BindingTag::Action => Some(Binding::Action {
+            action: BuiltinAction::StartPipeline,
+        }),
         BindingTag::Input => {
             let node = find_node(ctx, NodeRole::GuiEventSource, widget).unwrap_or_default();
             Some(Binding::PipelineInput { node })
@@ -433,15 +522,25 @@ enum NodeRole {
 
 /// 이 위젯에 이미 묶인 노드를 찾는다.
 fn find_node(ctx: &ViewCtx, role: NodeRole, widget: WidgetId) -> Option<PNodeId> {
-    ctx.project.pipelines.values().flat_map(|p| p.nodes.values()).find_map(|n| match (&n.kind, role) {
-        (PNodeKind::Source { source: Source::GuiEvent { widget: w } }, NodeRole::GuiEventSource) if *w == widget => {
-            Some(n.id)
-        }
-        (PNodeKind::Sink { sink: Sink::GuiWidget { widget: w } }, NodeRole::GuiWidgetSink) if *w == widget => {
-            Some(n.id)
-        }
-        _ => None,
-    })
+    ctx.project
+        .pipelines
+        .values()
+        .flat_map(|p| p.nodes.values())
+        .find_map(|n| match (&n.kind, role) {
+            (
+                PNodeKind::Source {
+                    source: Source::GuiEvent { widget: w },
+                },
+                NodeRole::GuiEventSource,
+            ) if *w == widget => Some(n.id),
+            (
+                PNodeKind::Sink {
+                    sink: Sink::GuiWidget { widget: w },
+                },
+                NodeRole::GuiWidgetSink,
+            ) if *w == widget => Some(n.id),
+            _ => None,
+        })
 }
 
 /// 역할에 맞는 파이프라인 노드 콤보 + 없을 때 만들기.
@@ -469,17 +568,19 @@ fn node_picker(
         .find(|(id, _)| id == node)
         .map(|(_, n)| n.clone())
         .unwrap_or_else(|| "(고르세요)".into());
-    egui::ComboBox::from_id_salt(salt).selected_text(label).show_ui(ui, |ui| {
-        if candidates.is_empty() {
-            ui.label(RichText::new("맞는 노드가 없습니다").weak());
-        }
-        for (id, name) in &candidates {
-            if ui.selectable_label(node == id, name).clicked() && node != id {
-                *node = *id;
-                changed = true;
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            if candidates.is_empty() {
+                ui.label(RichText::new("맞는 노드가 없습니다").weak());
             }
-        }
-    });
+            for (id, name) in &candidates {
+                if ui.selectable_label(node == id, name).clicked() && node != id {
+                    *node = *id;
+                    changed = true;
+                }
+            }
+        });
 
     if !candidates.iter().any(|(id, _)| id == node) {
         let what = match role {
@@ -502,8 +603,17 @@ fn node_picker(
 fn matches_role(kind: &PNodeKind, role: NodeRole) -> bool {
     matches!(
         (kind, role),
-        (PNodeKind::Source { source: Source::GuiEvent { .. } }, NodeRole::GuiEventSource)
-            | (PNodeKind::Sink { sink: Sink::GuiWidget { .. } }, NodeRole::GuiWidgetSink)
+        (
+            PNodeKind::Source {
+                source: Source::GuiEvent { .. }
+            },
+            NodeRole::GuiEventSource
+        ) | (
+            PNodeKind::Sink {
+                sink: Sink::GuiWidget { .. }
+            },
+            NodeRole::GuiWidgetSink
+        )
     )
 }
 
@@ -514,14 +624,22 @@ fn create_node_for_widget(ctx: &ViewCtx, role: NodeRole, widget: WidgetId) -> (V
         Some(p) => p,
         None => {
             let pl = Pipeline::new("파이프라인 1");
-            ops.push(Op::UpsertPipelineMeta { id: pl.id, name: pl.name.clone(), tick_hz: pl.tick_hz });
+            ops.push(Op::UpsertPipelineMeta {
+                id: pl.id,
+                name: pl.name.clone(),
+                tick_hz: pl.tick_hz,
+            });
             pl.id
         }
     };
     let count = ctx.project.pipelines.get(&pid).map(|p| p.nodes.len()).unwrap_or(0);
     let kind = match role {
-        NodeRole::GuiEventSource => PNodeKind::Source { source: Source::GuiEvent { widget } },
-        NodeRole::GuiWidgetSink => PNodeKind::Sink { sink: Sink::GuiWidget { widget } },
+        NodeRole::GuiEventSource => PNodeKind::Source {
+            source: Source::GuiEvent { widget },
+        },
+        NodeRole::GuiWidgetSink => PNodeKind::Sink {
+            sink: Sink::GuiWidget { widget },
+        },
     };
     let row = match role {
         NodeRole::GuiEventSource => 60.0,
@@ -550,18 +668,38 @@ mod tests {
     #[test]
     fn binding_tags_round_trip() {
         assert_eq!(binding_tag(&None), BindingTag::None);
-        assert_eq!(binding_tag(&Some(Binding::PipelineInput { node: PNodeId::from_u128(1) })), BindingTag::Input);
-        assert_eq!(binding_tag(&Some(Binding::PipelineOutput { node: PNodeId::from_u128(1) })), BindingTag::Output);
         assert_eq!(
-            binding_tag(&Some(Binding::Action { action: BuiltinAction::Quit })),
+            binding_tag(&Some(Binding::PipelineInput {
+                node: PNodeId::from_u128(1)
+            })),
+            BindingTag::Input
+        );
+        assert_eq!(
+            binding_tag(&Some(Binding::PipelineOutput {
+                node: PNodeId::from_u128(1)
+            })),
+            BindingTag::Output
+        );
+        assert_eq!(
+            binding_tag(&Some(Binding::Action {
+                action: BuiltinAction::Quit
+            })),
             BindingTag::Action
         );
     }
 
     #[test]
     fn role_matching_is_exclusive() {
-        let src = PNodeKind::Source { source: Source::GuiEvent { widget: WidgetId::from_u128(1) } };
-        let sink = PNodeKind::Sink { sink: Sink::GuiWidget { widget: WidgetId::from_u128(1) } };
+        let src = PNodeKind::Source {
+            source: Source::GuiEvent {
+                widget: WidgetId::from_u128(1),
+            },
+        };
+        let sink = PNodeKind::Sink {
+            sink: Sink::GuiWidget {
+                widget: WidgetId::from_u128(1),
+            },
+        };
         assert!(matches_role(&src, NodeRole::GuiEventSource));
         assert!(!matches_role(&src, NodeRole::GuiWidgetSink));
         assert!(matches_role(&sink, NodeRole::GuiWidgetSink));

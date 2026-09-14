@@ -51,8 +51,14 @@ mod tests {
 
         for pl in p.pipelines.values() {
             for n in pl.nodes.values() {
-                if let PNodeKind::Sink { sink: Sink::GuiWidget { widget } } = &n.kind {
-                    assert!(p.gui.widgets.contains_key(widget), "싱크가 없는 위젯을 가리킨다: {widget:?}");
+                if let PNodeKind::Sink {
+                    sink: Sink::GuiWidget { widget },
+                } = &n.kind
+                {
+                    assert!(
+                        p.gui.widgets.contains_key(widget),
+                        "싱크가 없는 위젯을 가리킨다: {widget:?}"
+                    );
                 }
             }
         }
