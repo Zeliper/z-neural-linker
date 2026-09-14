@@ -19,26 +19,116 @@ const DEFAULT_POINTS: usize = 300;
 /// 실행 중일 때 최소 다시 그리기 간격.
 const REPAINT: Duration = Duration::from_millis(33);
 
-// ───────────────────────────── 임시 작업 폴더 ─────────────────────────────
+// ───────────────────────────── 작업 폴더 ─────────────────────────────
 
-/// 번들 가중치를 풀어 두는 임시 폴더. 살아 있는 동안만 존재하고 `Drop` 에서 지워진다.
+/// 번들 해시를 적어 두는 파일. 다음 실행이 "같은 번들인가" 를 이것으로 판단한다.
+const BUNDLE_MARK: &str = ".bundle-sha256";
+/// 사용자가 직접 놓는 파일을 두는 곳. 번들을 갱신해도 **여기는 건드리지 않는다.**
+pub const LOCAL_DIR: &str = "local";
+
+/// 번들 가중치·에셋을 푸는 작업 폴더.
 ///
-/// 이름은 무작위이고 권한은 0700 이다. 예전처럼 `temp_dir()/nl-runtime-<pid>` 를 쓰면 경로가
-/// 완전히 예측 가능해서, sticky 비트가 걸린 `/tmp` 에서 다른 로컬 사용자가 미리 그 폴더를 만들어
-/// 둘 수 있었다. 그러면 `remove_dir_all` 은 권한 부족으로 실패하고 `create_dir_all` 은
-/// "이미 있음" 으로 성공해, 가중치가 **공격자 소유 폴더**에 풀렸다.
-pub struct WorkDir(tempfile::TempDir);
+/// 두 모드가 있다.
+/// - [`WorkDir::create`] — 무작위 이름 임시 폴더. 살아 있는 동안만 있고 `Drop` 에서 지워진다. **기본값.**
+/// - [`WorkDir::fixed`] — 사용자가 정한 경로. 서비스로 상시 운영할 때 쓴다. 지워지지 않는다.
+///
+/// 임시 폴더의 이름이 무작위인 이유는 예전에 `temp_dir()/nl-runtime-<pid>` 를 쓰다 겪은 문제 때문이다.
+/// 경로가 완전히 예측 가능해서 sticky 비트가 걸린 `/tmp` 에서 다른 로컬 사용자가 미리 그 폴더를
+/// 만들어 둘 수 있었고, 그러면 가중치가 **공격자 소유 폴더**에 풀렸다.
+///
+/// 고정 폴더는 그 위험을 사용자가 경로 선택으로 진다 — 그래서 홈 아래를 쓰라고 안내한다.
+pub enum WorkDir {
+    /// 끝나면 지워지는 임시 폴더.
+    Temp(tempfile::TempDir),
+    /// 사용자가 정한 폴더. 그대로 남는다.
+    Fixed(PathBuf),
+}
 
 impl WorkDir {
     pub fn create() -> std::io::Result<Self> {
         // tempdir 은 O_EXCL 로 만든다 — 선점된 폴더를 물려받는 일이 없다.
         let dir = tempfile::Builder::new().prefix("nl-runtime-").tempdir()?;
         set_owner_only(dir.path())?;
-        Ok(Self(dir))
+        Ok(Self::Temp(dir))
     }
+
+    /// 정해진 경로를 작업 폴더로 쓴다. 없으면 0700 으로 만든다.
+    ///
+    /// 이미 있으면 **소유권을 확인하지 않는다** — 사용자가 고른 경로라 그 판단을 존중한다.
+    /// 대신 권한을 0700 으로 다시 조여 다른 사용자가 읽지 못하게 한다.
+    pub fn fixed(path: &Path) -> std::io::Result<Self> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(path)?;
+        set_owner_only(path)?;
+        std::fs::create_dir_all(path.join(LOCAL_DIR))?;
+        Ok(Self::Fixed(path.to_path_buf()))
+    }
+
     pub fn path(&self) -> &Path {
-        self.0.path()
+        match self {
+            Self::Temp(d) => d.path(),
+            Self::Fixed(p) => p,
+        }
     }
+
+    /// 다음 실행에서 다시 쓸 수 있는 폴더인가. 로그 문구를 가르는 데 쓴다.
+    pub fn is_persistent(&self) -> bool {
+        matches!(self, Self::Fixed(_))
+    }
+}
+
+/// 번들 내용의 지문. 같은 내용이면 같은 값이다.
+///
+/// zip 바이트를 그대로 해싱하지 않는 이유는 압축 시각·순서 같은 것이 섞여 들어가 **같은 번들인데
+/// 값이 달라질 수 있어서**다. 매니페스트·프로젝트·가중치·에셋의 내용만 정해진 순서로 넣는다.
+pub fn bundle_fingerprint(bundle: &Bundle) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(nl_bundle::sha256_hex(
+        serde_json::to_string(&bundle.manifest).unwrap_or_default().as_bytes(),
+    ));
+    parts.push(nl_bundle::sha256_hex(
+        serde_json::to_string(&bundle.project).unwrap_or_default().as_bytes(),
+    ));
+    // BTreeMap 이라 순회 순서가 이름 순으로 정해져 있다 — 같은 번들이면 같은 순서다.
+    for (name, bytes) in bundle.weights.iter().chain(bundle.assets.iter()) {
+        parts.push(format!("{name}:{}", nl_bundle::sha256_hex(bytes)));
+    }
+    nl_bundle::sha256_hex(parts.join("\n").as_bytes())
+}
+
+/// 번들을 작업 폴더에 준비한다. 이미 같은 번들이 풀려 있으면 다시 풀지 않는다.
+///
+/// 돌려주는 값은 "실제로 풀었는가" 다. 임시 폴더는 언제나 `true`(비어 있으니까).
+///
+/// 판단 기준은 번들 zip 의 sha256 이다. 파일 목록을 비교하지 않는 이유는 사용자가
+/// `local/` 에 무엇을 두든 그것이 판단을 흔들면 안 되기 때문이다.
+pub fn sync_workspace(bundle: &Bundle, zip_sha256: &str, dir: &Path) -> anyhow::Result<bool> {
+    let mark = dir.join(BUNDLE_MARK);
+    let same = std::fs::read_to_string(&mark).is_ok_and(|s| s.trim() == zip_sha256);
+    if same && dir.join("weights").is_dir() {
+        return Ok(false);
+    }
+
+    // 갱신할 때는 번들이 소유한 폴더만 비운다. `local/` 은 사용자 것이라 그대로 둔다.
+    for owned in ["weights", "assets"] {
+        let p = dir.join(owned);
+        if p.exists() {
+            std::fs::remove_dir_all(&p).map_err(|e| anyhow::anyhow!("{} 를 비우지 못했습니다: {e}", p.display()))?;
+        }
+    }
+    let _ = std::fs::remove_file(&mark);
+
+    prepare_workspace(bundle, dir)?;
+    std::fs::create_dir_all(dir.join(LOCAL_DIR))?;
+    std::fs::write(&mark, format!("{zip_sha256}\n"))
+        .map_err(|e| anyhow::anyhow!("{} 를 쓰지 못했습니다: {e}", mark.display()))?;
+    Ok(true)
 }
 
 /// 소유자만 드나들 수 있게 한다. 번들 가중치가 같은 호스트의 다른 사용자에게 읽히지 않도록.
@@ -1237,6 +1327,179 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("runs/abc/model.safetensors")).unwrap(),
             vec![1, 2, 3]
+        );
+    }
+
+    // ── 고정 작업 폴더 ──
+
+    fn bundle_with_asset(name: &str, bytes: &[u8]) -> Bundle {
+        let mut b = demo_bundle(false);
+        b.assets.insert(name.to_string(), bytes.to_vec());
+        b
+    }
+
+    /// 고정 폴더는 `local/` 을 만들고 0700 으로 잠근다.
+    #[test]
+    fn a_fixed_work_dir_is_created_owner_only_with_a_local_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("작업");
+        let work = WorkDir::fixed(&dir).unwrap();
+
+        assert_eq!(work.path(), dir.as_path());
+        assert!(work.is_persistent());
+        assert!(dir.join(LOCAL_DIR).is_dir(), "local/ 이 없습니다");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+    }
+
+    /// 고정 폴더는 Drop 에서 지워지지 않는다 — 임시 폴더와 갈리는 지점이다.
+    #[test]
+    fn a_fixed_work_dir_survives_drop_but_a_temp_one_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("작업");
+        drop(WorkDir::fixed(&dir).unwrap());
+        assert!(dir.is_dir(), "고정 폴더가 사라졌습니다");
+
+        let temp = WorkDir::create().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        assert!(!temp.is_persistent());
+        drop(temp);
+        assert!(!temp_path.exists(), "임시 폴더가 남았습니다");
+    }
+
+    /// 같은 번들이면 다시 풀지 않는다. 서비스 재시작이 빨라야 한다.
+    #[test]
+    fn the_same_bundle_is_not_extracted_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("작업");
+        let bundle = bundle_with_asset("표.csv", b"a,b\n1,2\n");
+        let fp = bundle_fingerprint(&bundle);
+
+        let work = WorkDir::fixed(&dir).unwrap();
+        assert!(sync_workspace(&bundle, &fp, work.path()).unwrap(), "처음에는 푼다");
+        let asset = dir.join("assets/표.csv");
+        assert_eq!(std::fs::read(&asset).unwrap(), b"a,b\n1,2\n");
+
+        // 두 번째는 그대로 쓴다. 파일을 건드렸는지 보려고 내용을 바꿔 둔다.
+        std::fs::write(&asset, "손댐".as_bytes()).unwrap();
+        assert!(
+            !sync_workspace(&bundle, &fp, work.path()).unwrap(),
+            "같은 번들은 다시 풀지 않는다"
+        );
+        assert_eq!(
+            std::fs::read(&asset).unwrap(),
+            "손댐".as_bytes(),
+            "다시 풀어 덮어썼습니다"
+        );
+    }
+
+    /// 번들이 바뀌면 다시 푼다. 옛 에셋은 남지 않는다.
+    #[test]
+    fn a_changed_bundle_is_re_extracted_and_stale_files_go_away() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("작업");
+        let work = WorkDir::fixed(&dir).unwrap();
+
+        let old = bundle_with_asset("옛.csv", b"1");
+        sync_workspace(&old, &bundle_fingerprint(&old), work.path()).unwrap();
+        assert!(dir.join("assets/옛.csv").is_file());
+
+        let new = bundle_with_asset("새.csv", b"2");
+        let fp_new = bundle_fingerprint(&new);
+        assert_ne!(fp_new, bundle_fingerprint(&old), "내용이 다르면 지문도 달라야 합니다");
+        assert!(sync_workspace(&new, &fp_new, work.path()).unwrap(), "바뀌면 다시 푼다");
+
+        assert!(dir.join("assets/새.csv").is_file());
+        assert!(!dir.join("assets/옛.csv").exists(), "옛 에셋이 남았습니다");
+    }
+
+    /// 번들을 갱신해도 `local/` 은 건드리지 않는다. 인증서가 여기에 있다.
+    #[test]
+    fn refreshing_the_bundle_never_touches_the_local_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("작업");
+        let work = WorkDir::fixed(&dir).unwrap();
+
+        let old = bundle_with_asset("옛.csv", b"1");
+        sync_workspace(&old, &bundle_fingerprint(&old), work.path()).unwrap();
+
+        // 사용자가 인증서를 놓는다.
+        let cert = dir.join(LOCAL_DIR).join("server.crt");
+        std::fs::write(&cert, b"-----BEGIN CERTIFICATE-----").unwrap();
+
+        let new = bundle_with_asset("새.csv", b"2");
+        sync_workspace(&new, &bundle_fingerprint(&new), work.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read(&cert).unwrap(),
+            b"-----BEGIN CERTIFICATE-----",
+            "번들 갱신이 local/ 을 건드렸습니다"
+        );
+    }
+
+    /// 지문은 내용만 본다 — 같은 내용이면 같고, 한 바이트만 달라도 다르다.
+    ///
+    /// `demo_bundle()` 을 두 번 부르면 프로젝트 id 와 생성 시각이 달라 서로 다른 번들이 된다.
+    /// 그래서 같은 번들을 복제해 비교한다 — 배포에서는 `.nlapp` 하나를 읽으므로 매 실행이 같다.
+    #[test]
+    fn the_fingerprint_follows_content_only() {
+        let a = bundle_with_asset("x", b"same");
+        assert_eq!(
+            bundle_fingerprint(&a),
+            bundle_fingerprint(&a.clone()),
+            "같은 번들은 같은 지문"
+        );
+
+        // 에셋 내용이 다르면 다르다.
+        let mut c = a.clone();
+        c.assets.insert("x".into(), b"other".to_vec());
+        assert_ne!(bundle_fingerprint(&a), bundle_fingerprint(&c));
+
+        // 에셋 이름이 달라도 다르다.
+        let mut d = a.clone();
+        d.assets.clear();
+        d.assets.insert("y".into(), b"same".to_vec());
+        assert_ne!(bundle_fingerprint(&a), bundle_fingerprint(&d));
+
+        // 매니페스트가 달라도 다르다.
+        let mut e = a.clone();
+        e.manifest.app_version = "9.9.9".into();
+        assert_ne!(bundle_fingerprint(&a), bundle_fingerprint(&e));
+
+        // 가중치가 달라도 다르다.
+        let mut f = a.clone();
+        f.weights.insert("w.safetensors".into(), b"weights".to_vec());
+        assert_ne!(bundle_fingerprint(&a), bundle_fingerprint(&f));
+    }
+
+    /// 표시가 깨져 있으면 다시 푼다 — 반쯤 풀린 폴더를 그대로 쓰지 않는다.
+    #[test]
+    fn a_missing_or_wrong_marker_forces_a_re_extract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("작업");
+        let work = WorkDir::fixed(&dir).unwrap();
+        let bundle = bundle_with_asset("x", b"1");
+        let fp = bundle_fingerprint(&bundle);
+
+        sync_workspace(&bundle, &fp, work.path()).unwrap();
+        assert!(!sync_workspace(&bundle, &fp, work.path()).unwrap());
+
+        // 표시를 지우면 다시 푼다.
+        std::fs::remove_file(dir.join(".bundle-sha256")).unwrap();
+        assert!(
+            sync_workspace(&bundle, &fp, work.path()).unwrap(),
+            "표시가 없으면 다시 푼다"
+        );
+
+        // weights 폴더가 사라져도 다시 푼다.
+        std::fs::remove_dir_all(dir.join("weights")).unwrap();
+        assert!(
+            sync_workspace(&bundle, &fp, work.path()).unwrap(),
+            "내용이 없으면 다시 푼다"
         );
     }
 
