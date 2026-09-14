@@ -1,0 +1,9 @@
+[package]
+name = "onnxgen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+protox = "0.9"
+prost-build = "0.14"
+prost-types = "0.14"

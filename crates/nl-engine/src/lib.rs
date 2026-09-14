@@ -8,6 +8,7 @@ pub mod device;
 pub mod exec;
 pub mod infer;
 pub mod limits;
+pub mod onnx;
 pub mod tensor;
 pub mod train;
 pub mod weights;
@@ -16,6 +17,7 @@ pub use codec::{decode, decode_outputs, encode, encode_inputs, Value};
 pub use data::{preview, scan, Sample};
 pub use device::{enumerate, resolve, DeviceInfo, DeviceKind, Resolved};
 pub use infer::Session;
+pub use onnx::{export as export_onnx, Batch, ExportOptions, ExportReport};
 pub use tensor::HostTensor;
 pub use train::{start, TrainEvent, TrainHandle, TrainRequest};
 

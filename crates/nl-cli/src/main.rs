@@ -8,6 +8,7 @@
 mod build;
 mod common;
 mod devices;
+mod export;
 mod infer;
 mod inspect;
 mod record;
@@ -190,6 +191,26 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// 학습한 모델을 ONNX 파일로 내보낸다 (다른 도구로 가져가기 위한 추론용 그래프).
+    ExportOnnx {
+        /// `.nlproj` 파일.
+        project: PathBuf,
+        /// 내보낼 모델의 이름이나 id.
+        #[arg(long)]
+        model: String,
+        /// 쓸 파일. 기본은 프로젝트 폴더의 `<모델 이름>.onnx`.
+        #[arg(long, value_name = "경로")]
+        out: Option<PathBuf>,
+        /// 가중치 파일. 기본은 모델에 적힌 것.
+        #[arg(long, value_name = "경로")]
+        weights: Option<PathBuf>,
+        /// 배치 크기를 이 값으로 고정한다. 기본은 동적(어떤 배치든 받는다).
+        #[arg(long, value_name = "N")]
+        batch: Option<usize>,
+        /// 목표 opset. 기본 17 — 연산자 선택이 그 기준이라 바꾸면 읽는 쪽이 깨질 수 있다.
+        #[arg(long)]
+        opset: Option<i64>,
+    },
     /// XOR 샘플 프로젝트를 만든다.
     Sample {
         /// 만들 `.nlproj` 파일. `--list` 와 함께면 생략한다.
@@ -343,6 +364,21 @@ fn dispatch() -> Result<i32> {
             hosts: &hosts,
             days,
             force,
+        }),
+        Command::ExportOnnx {
+            project,
+            model,
+            out,
+            weights,
+            batch,
+            opset,
+        } => export::run(export::Args {
+            project: &project,
+            model: &model,
+            out: out.as_deref(),
+            weights: weights.as_deref(),
+            batch,
+            opset,
         }),
         Command::Sample { out, kind, list } => {
             if list {
