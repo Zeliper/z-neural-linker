@@ -2384,3 +2384,122 @@ fn stacked_template_blocks_keep_the_shape_and_save_weights() {
     assert_eq!(y[0].shape, vec![2, 2]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ───────────────────────────── 미지 필드 보존 (엔진 관점) ─────────────────────────────
+
+/// 새 버전이 만든 프로젝트를 이 버전으로 열어 **학습까지 돌린 뒤** 저장해도, 모르는 필드가
+/// 그대로 남고 새 실행 기록도 함께 들어가는지 본다.
+///
+/// `nl-core` 쪽 시험은 읽고 쓰는 왕복만 본다. 여기서는 엔진이 실제로 문서를 건드리는 경로
+/// (학습 → `RunRecord` → `Op::UpsertRun` → 저장)를 태운다 — 사용자가 하는 일이 그것이고,
+/// 옛 빌더로 한 번 열었다 저장하면 남의 설정이 통째로 날아가던 문제(보안 리뷰 L3)가
+/// 되살아나는지는 이 경로에서만 드러난다.
+#[test]
+fn unknown_fields_survive_training_and_a_save() {
+    use nl_core::{apply_op, Op, Project, ProjectFile};
+
+    let dir = temp_dir("extra");
+
+    // 1) 평범한 프로젝트를 만들고 모델·데이터셋을 넣는다.
+    let mut project = Project::new("보존");
+    let mut def = mlp(2, 8, 2);
+    def.name = "분류기".into();
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 2;
+    def.train.batch_size = 32;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 7;
+    let ds = synthetic(SyntheticKind::Xor, 128);
+    let (model_id, dataset_id, node_id) = (def.id, ds.id, def.graph.nodes.keys().next().copied().unwrap());
+    project.models.insert(model_id, def.clone());
+    project.datasets.insert(dataset_id, ds.clone());
+
+    // 2) 미래 버전이 여러 층에 필드를 더한 문서를 흉내 낸다.
+    let mut raw: serde_json::Value = serde_json::from_str(&ProjectFile::new(project).to_json()).unwrap();
+    raw["미래_최상위"] = serde_json::json!({"schema": 99});
+    raw["project"]["미래_프로젝트"] = serde_json::json!("값");
+    // `ProjectSettings` 에는 `extra` 가 없다 — 아래에서 그 경계를 확인한다.
+    raw["project"]["settings"]["미래_설정"] = serde_json::json!(true);
+    raw["project"]["models"][model_id.to_string()]["미래_모델"] = serde_json::json!([1, 2, 3]);
+    raw["project"]["models"][model_id.to_string()]["graph"]["nodes"][node_id.to_string()]["미래_노드"] =
+        serde_json::json!("노드 메모");
+    let on_disk = dir.join("p.nlproj");
+    std::fs::write(&on_disk, serde_json::to_string(&raw).unwrap()).unwrap();
+
+    // 3) 이 버전으로 읽는다. 모르는 필드는 해석하지 못해도 들고는 있어야 한다.
+    let loaded = ProjectFile::from_json(&std::fs::read_to_string(&on_disk).unwrap()).expect("읽기");
+    let mut project = loaded.project;
+    assert_eq!(project.models.len(), 1, "아는 필드가 평소대로 읽혀야 한다");
+
+    // 4) 엔진으로 실제 학습을 돌린다.
+    let run = train_to_end(project.models[&model_id].clone(), ds, &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    let weights = run.checkpoint.clone().expect("체크포인트 경로");
+
+    // 5) 빌더가 하는 그대로 op 으로 문서에 반영한다.
+    apply_op(&mut project, &Op::UpsertRun { run: run.clone() });
+    apply_op(
+        &mut project,
+        &Op::UpsertModelMeta {
+            id: model_id,
+            name: "분류기".into(),
+            description: String::new(),
+            payload: None,
+            weights: Some(weights.clone()),
+        },
+    );
+
+    // 6) 저장하고 다시 읽는다. `extra` 는 `ProjectFile` 에도 있으므로 최상위까지 되돌려야 한다.
+    let mut file = ProjectFile::new(project);
+    file.extra = loaded.extra;
+    std::fs::write(&on_disk, file.to_json()).unwrap();
+    let back: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&on_disk).unwrap()).unwrap();
+
+    // 모르는 필드가 층마다 살아 있다.
+    assert_eq!(back["미래_최상위"], serde_json::json!({"schema": 99}), "최상위");
+    assert_eq!(back["project"]["미래_프로젝트"], "값", "프로젝트");
+    assert_eq!(
+        back["project"]["models"][model_id.to_string()]["미래_모델"],
+        serde_json::json!([1, 2, 3]),
+        "모델"
+    );
+    assert_eq!(
+        back["project"]["models"][model_id.to_string()]["graph"]["nodes"][node_id.to_string()]["미래_노드"],
+        "노드 메모",
+        "노드"
+    );
+
+    // **경계**: `extra` 는 컨테이너·그래프 구조체에만 있다
+    // (`Project`·`ProjectFile`·`ModelDef`·`Graph`·`Node`·`PNode`·`Widget`).
+    // `ProjectSettings`·`DatasetSpec`·`PayloadSpec`·`Pipeline`·`TrainConfig`·`RunRecord` 등
+    // 잎 구조체는 아직 아니라, 그 안에 더해진 모르는 필드는 저장할 때 사라진다.
+    // 여기를 넓히면 이 단언이 깨진다 — 그때는 이 주석과 두 README 를 함께 고쳐야 한다.
+    assert!(
+        back["project"]["settings"]["미래_설정"].is_null(),
+        "ProjectSettings 에 extra 가 생겼다면 이 시험과 문서를 갱신하라"
+    );
+
+    // 새 실행 기록과 가중치 경로도 함께 들어갔다.
+    let reread = ProjectFile::from_json(&std::fs::read_to_string(&on_disk).unwrap()).expect("재읽기");
+    let saved = reread.project.runs.get(&run.id).expect("실행 기록이 없다");
+    assert_eq!(saved.status, RunStatus::Finished);
+    assert_eq!(saved.model, model_id);
+    assert_eq!(saved.epochs.len(), 2, "에포크 기록이 함께 남아야 한다");
+    assert_eq!(
+        reread.project.models[&model_id].weights.as_deref(),
+        Some(weights.as_str()),
+        "가중치 경로"
+    );
+
+    // 저장한 체크포인트가 실제로 열려야 실행 기록이 쓸모 있다.
+    let mut s = Session::load(
+        &reread.project.models[&model_id],
+        Some(&dir.join(&weights)),
+        DevicePref::Cpu,
+    )
+    .expect("세션");
+    let y = s.run(&[HostTensor::new(vec![1, 2], vec![0.2, 0.8])]).expect("추론");
+    assert_eq!(y[0].shape, vec![1, 2]);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
