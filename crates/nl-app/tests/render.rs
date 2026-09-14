@@ -259,6 +259,29 @@ fn build_view_renders_with_icon_and_update_settings() {
     assert!(h.query_by_label("입력 무장").is_some(), "빌드 뷰에 '입력 무장' 체크박스가 있어야 한다");
 }
 
+/// 번들 만들기가 거부할 값은 빌드를 누르기 전에 화면에서 걸러진다.
+///
+/// `archive_with` 는 semver 가 아닌 버전을, 배포 앱은 https 가 아닌 매니페스트 주소를 거부한다.
+/// 그때 가서 실패하면 받은 사람만 곤란해진다.
+#[test]
+fn build_view_flags_a_bad_version_and_a_plain_http_url() {
+    let mut p = sample::xor_project();
+    let mut settings = p.settings.clone();
+    let mut spec = settings.build.clone().unwrap();
+    spec.app_version = "1.0".into();
+    spec.update_url = Some("http://example.com/앱/latest.json".into());
+    settings.build = Some(spec);
+    p.settings = settings;
+
+    let mut h = harness(p);
+    h.state_mut().view = View::Build;
+    h.run();
+    h.run();
+
+    assert!(h.query_by_label_contains("semver 가 아닙니다").is_some(), "버전 경고가 없다");
+    assert!(h.query_by_label_contains("평문 http 는 받지 않습니다").is_some(), "http 주소 경고가 없다");
+}
+
 /// 녹화 폼이 열린 상태로 데이터 뷰가 그려지는지 (녹화 자체는 화면이 있어야 하므로 폼까지).
 #[test]
 fn recording_form_renders() {

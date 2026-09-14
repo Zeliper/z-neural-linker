@@ -352,7 +352,15 @@ fn spec_editor(
             changed |= ui.add(egui::TextEdit::singleline(&mut next.app_name).desired_width(260.0)).changed();
             ui.end_row();
             ui.label(RichText::new("버전").color(COL_WEAK));
-            changed |= ui.add(egui::TextEdit::singleline(&mut next.app_version).desired_width(120.0)).changed();
+            ui.vertical(|ui| {
+                changed |= ui.add(egui::TextEdit::singleline(&mut next.app_version).desired_width(120.0)).changed();
+                // 번들 만들기가 semver 를 강제한다. 빌드를 눌러 실패하기 전에 여기서 알려 준다.
+                if let Err(e) = semver::Version::parse(next.app_version.trim()) {
+                    ui.label(
+                        RichText::new(format!("✖ semver 가 아닙니다 ({e}) — 예: 0.1.0")).color(COL_ERROR).size(11.0),
+                    );
+                }
+            });
             ui.end_row();
 
             ui.label(RichText::new("대상").color(COL_WEAK));
@@ -490,14 +498,27 @@ fn spec_editor(
 
             ui.label(RichText::new("매니페스트 주소").color(COL_WEAK));
             let mut url = next.update_url.clone().unwrap_or_default();
-            if ui
-                .add(egui::TextEdit::singleline(&mut url).desired_width(320.0).hint_text("https://example.com/앱/latest.json"))
-                .on_hover_text("비우면 배포 앱의 자동 업데이트가 꺼집니다")
-                .changed()
-            {
-                next.update_url = (!url.trim().is_empty()).then_some(url);
-                changed = true;
-            }
+            ui.vertical(|ui| {
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut url)
+                            .desired_width(320.0)
+                            .hint_text("https://example.com/앱/latest.json"),
+                    )
+                    .on_hover_text("비우면 배포 앱의 자동 업데이트가 꺼집니다")
+                    .changed()
+                {
+                    next.update_url = (!url.trim().is_empty()).then_some(url.clone());
+                    changed = true;
+                }
+                // 배포 앱은 https 가 아닌 주소를 거부한다. 여기서 먼저 알려 주지 않으면
+                // 받은 사람만 "업데이트 사용 불가" 를 보게 된다.
+                if let Some(u) = next.update_url.as_deref() {
+                    if let Err(e) = nl_update::require_https(u) {
+                        ui.label(RichText::new(format!("✖ {e:#}")).color(COL_ERROR).size(11.0));
+                    }
+                }
+            });
             ui.end_row();
 
             ui.label(RichText::new("서명 공개키").color(COL_WEAK));
