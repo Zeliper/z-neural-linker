@@ -10,7 +10,7 @@ Windows 크로스 빌드를 한 러너에서 만들고 매니페스트에 서명
 
 ## 첫 릴리스 전에 반드시 끝낼 것
 
-이 셋이 없으면 자동 업데이트가 **꺼진 채로** 배포된다. 기능이 조용히 빠지는 것이 아니라
+이것들이 없으면 자동 업데이트가 **꺼진 채로** 배포된다. 기능이 조용히 빠지는 것이 아니라
 아예 켜지지 않으므로, 나가기 전에 확인해야 한다.
 
 ### 1. 서명 키
@@ -44,7 +44,21 @@ pub const UPDATE_URL: &str = "https://updates.trustanc.dev/neural-linker/latest.
 
 `PUBLIC_KEY` 가 `None` 이면 `Updater` 가 `Disabled` 로 남고 확인조차 하지 않는다.
 
-### 3. 배포 서버
+### 3. CI 러너
+
+워크플로는 `runs-on: ubuntu-latest` 하나로 Linux 네이티브와 Windows 크로스를 함께 만든다.
+GitHub 을 쓴다면 그대로 돈다. **Forgejo 를 쓴다면 러너를 먼저 붙여야 한다** — 등록된 러너가
+없으면 태그를 밀어도 잡이 큐에만 쌓이고 아무 일도 일어나지 않는다(실패로 보이지도 않는다).
+
+- 러너 하나가 `ubuntu-latest` 라벨을 들고 등록되어 있는가
+- 인스턴스 `app.ini` 에 `[actions] DEFAULT_ACTIONS_URL = github` 이 있는가 —
+  워크플로가 `actions/checkout` 같은 GitHub 액션을 받아 오기 때문이다
+- 러너가 root 로 도는가 — `clang lld llvm` 을 패키지로 깐다
+
+시크릿과 변수(`MINISIGN_KEY`·`UPDATE_PUBLIC_KEY`·`UPDATE_BASE_URL`)는 GitHub 과 Forgejo 에
+**각각** 넣어야 한다. 한쪽에만 넣고 다른 쪽에서 태그를 밀면 서명 없는 릴리스가 나간다.
+
+### 4. 배포 서버
 
 `UPDATE_URL` 과 CI 의 `UPDATE_BASE_URL` 변수가 가리키는 주소가 실제로 살아 있어야 한다.
 **https 여야 하고**, 자산은 매니페스트와 같은 오리진에 둔다(다른 호스트를 쓰려면 매니페스트의
@@ -57,6 +71,16 @@ pub const UPDATE_URL: &str = "https://updates.trustanc.dev/neural-linker/latest.
 ### ① 버전 올리기
 
 워크스페이스 `Cargo.toml` 의 `[workspace.package] version` 하나만 고치면 전 크레이트가 따라간다.
+고친 뒤 **정말 먹었는지 확인한다.** 여기서 빠뜨리면 태그와 자산 버전이 어긋난 채 끝까지 간다 —
+매니페스트의 `version` 은 태그에서 오고 바이너리의 `--version` 은 `Cargo.toml` 에서 오기 때문에,
+둘이 다르면 사용자가 업데이트를 받고도 같은 버전을 계속 보게 된다.
+
+```sh
+grep -m1 '^version' Cargo.toml              # [workspace.package] 의 값
+cargo build --release -p nl-cli && ./target/release/nl --version
+```
+
+그다음 검증을 돌린다.
 
 ```sh
 scripts/verify-all.sh          # 포맷·클리피·테스트·릴리스 빌드·종단 시험
@@ -137,17 +161,25 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 | `nl-app` · `nl-app.exe` | 빌더 자동 업데이트가 그대로 내려받는 알맹이 |
 | `nl-runtime` · `nl-runtime.exe` | 빌더가 배포 앱을 만들 때 쓰는 런타임 |
 | `latest.json` + `.minisig` | 빌더 자체 업데이트 매니페스트 |
-| `runtimes/latest.json` + `.minisig` | 빌더가 대상별 런타임을 받아 오는 매니페스트 |
+| `runtimes-latest.json` + `.minisig` | 빌더가 대상별 런타임을 받아 오는 매니페스트 |
 
 `.minisig` 가 없으면 `MINISIGN_KEY` 시크릿이 빠진 것이다. 그대로 올리면 안 된다.
+
+**릴리스 자산에서 런타임 매니페스트 이름이 다른 이유.** 릴리스 자산은 평평해서 이름이 basename
+하나뿐이다. `dist/latest.json` 과 `dist/runtimes/latest.json` 을 그대로 붙이면 둘 다 `latest.json`
+이 되어 하나가 다른 하나를 덮어쓴다. 그래서 워크플로가 릴리스용 사본만 `runtimes-latest.json` 으로
+바꿔 붙인다. **폴더 구조가 살아 있는 것은 `산출물 보관` 아티팩트(`dist/` 통째)다** — 배포 서버에는
+릴리스 자산이 아니라 이 아티팩트를 풀어서 올린다(⑧).
 
 ### ⑦ 서명 검증
 
 CI 에도 검증 단계가 있지만(`UPDATE_PUBLIC_KEY` 변수가 있을 때), 올리기 전에 손으로 한 번 더 본다.
 
+CI 산출물(`산출물 보관` 아티팩트)을 풀어 둔 폴더를 `dist/` 라 하면:
+
 ```sh
-cargo run -p nl-update --example nl-keygen -- verify latest.json --pubkey packaging/keys/neural-linker.pub
-cargo run -p nl-update --example nl-keygen -- verify runtimes/latest.json --pubkey packaging/keys/neural-linker.pub
+cargo run -p nl-update --example nl-keygen -- verify dist/latest.json --pubkey packaging/keys/neural-linker.pub
+cargo run -p nl-update --example nl-keygen -- verify dist/runtimes/latest.json --pubkey packaging/keys/neural-linker.pub
 ```
 
 이 명령은 배포 앱이 쓰는 `nl_update::verify_manifest` 를 그대로 부른다 — 여기서 통과하면
@@ -161,6 +193,9 @@ cargo run -p nl-update --example nl-keygen -- verify runtimes/latest.json --pubk
 - 자산마다 `sha256` 과 `size` 가 있는가
 
 ### ⑧ 배포 서버 업로드
+
+올릴 원본은 **`산출물 보관` 아티팩트(`dist/` 통째)** 를 받아서 푼 것이다. 릴리스 자산 낱개가
+아니다 — 그쪽은 평평해서 `runtimes/` 구조가 없다(⑥).
 
 자산과 매니페스트를 같은 곳에 올린다. **매니페스트와 서명을 마지막에, 같이 올린다** —
 자산보다 먼저 올리면 그 사이에 확인한 사용자가 404 를 만난다.
