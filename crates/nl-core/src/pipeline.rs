@@ -278,6 +278,12 @@ pub struct Link {
     pub id: LinkId,
     pub from: PNodeId,
     pub to: PNodeId,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// 토큰에 쓰는 글자. URL·헤더·셸 어디에 넣어도 따옴표가 필요 없다.
@@ -340,6 +346,12 @@ pub struct Pipeline {
     /// 소스가 시간 기반이 아닐 때의 최대 틱 속도.
     #[serde(default = "d_hz")]
     pub tick_hz: f32,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn d_hz() -> f32 {
@@ -354,6 +366,7 @@ impl Pipeline {
             nodes: BTreeMap::new(),
             links: BTreeMap::new(),
             tick_hz: d_hz(),
+            extra: Default::default(),
         }
     }
 
@@ -379,6 +392,7 @@ impl Pipeline {
             id: LinkId::new(),
             from,
             to,
+            extra: Default::default(),
         };
         let id = l.id;
         self.links.insert(id, l);

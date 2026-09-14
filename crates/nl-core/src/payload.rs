@@ -2,6 +2,7 @@
 
 use crate::ids::PayloadId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Dtype {
@@ -115,6 +116,12 @@ pub struct Field {
     /// 텐서 → 바깥.
     #[serde(default)]
     pub decode: Vec<Transform>,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Field {
@@ -124,6 +131,7 @@ impl Field {
             kind,
             encode: vec![],
             decode: vec![],
+            extra: Default::default(),
         }
     }
 
@@ -174,6 +182,12 @@ pub struct PayloadSpec {
     pub inputs: Vec<Field>,
     #[serde(default)]
     pub outputs: Vec<Field>,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl PayloadSpec {
@@ -183,6 +197,7 @@ impl PayloadSpec {
             name: name.into(),
             inputs: vec![],
             outputs: vec![],
+            extra: Default::default(),
         }
     }
 

@@ -2,6 +2,7 @@
 
 use crate::ids::{DatasetId, PayloadId};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 데이터 소스.
 ///
@@ -99,6 +100,12 @@ pub struct DatasetSpec {
     /// 최근 스캔 결과(샘플 수·클래스) — 캐시일 뿐 진실은 소스.
     #[serde(default)]
     pub cached_info: Option<DatasetInfo>,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -153,6 +160,7 @@ impl DatasetSpec {
             split: Split::Ratio,
             shuffle: true,
             cached_info: None,
+            extra: Default::default(),
         }
     }
 }

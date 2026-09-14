@@ -7,6 +7,7 @@
 use crate::ids::{ModelId, PipelineId};
 use crate::train::DevicePref;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const BUNDLE_TRAILER_MAGIC: &[u8; 6] = b"NLAPP1";
 pub const BUNDLE_EXT: &str = "nlapp";
@@ -50,6 +51,12 @@ pub struct BundleManifest {
     /// 없도록 빌더에서 명시적으로 켜야 한다 (`nl build --arm-input`, 빌드 뷰 체크박스).
     #[serde(default)]
     pub arm_input: bool,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,6 +81,7 @@ impl BundleManifest {
             update_public_key: None,
             auto_update: false,
             arm_input: false,
+            extra: Default::default(),
         }
     }
 }
@@ -149,6 +157,12 @@ pub struct BuildSpec {
     /// 그대로 `BundleManifest::arm_input` 으로 들어간다.
     #[serde(default)]
     pub arm_input: bool,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn yes() -> bool {
@@ -175,6 +189,7 @@ impl Default for BuildSpec {
             update_public_key: None,
             auto_update: false,
             arm_input: false,
+            extra: Default::default(),
         }
     }
 }

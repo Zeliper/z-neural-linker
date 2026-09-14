@@ -3,6 +3,7 @@
 use crate::ids::{DatasetId, ModelId, RunId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 장치 선호. 실제 장치 해석은 `nl-engine::device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -221,6 +222,12 @@ pub struct TrainConfig {
     /// 처음 N 스텝 동안 학습률을 0 → 기본값으로 선형 증가 (0 = 끄기).
     #[serde(default)]
     pub warmup_steps: usize,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn d_epochs() -> usize {
@@ -253,6 +260,7 @@ impl Default for TrainConfig {
             schedule: LrSchedule::None,
             early_stop_patience: 0,
             warmup_steps: 0,
+            extra: Default::default(),
         }
     }
 }
@@ -309,6 +317,12 @@ pub struct RunRecord {
     /// 사용자 메모/태그.
     #[serde(default)]
     pub note: String,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl RunRecord {

@@ -93,6 +93,7 @@ fn link(pl: &mut Pipeline, id: u128, from: PNodeId, to: PNodeId) {
         id: LinkId::from_u128(id),
         from,
         to,
+        extra: Default::default(),
     };
     pl.links.insert(l.id, l);
 }
