@@ -52,7 +52,15 @@ pub fn scan(spec: &DatasetSpec, base_dir: &Path) -> Result<DatasetInfo> {
 }
 
 /// 앞에서 `n` 개 샘플 (데이터 뷰 미리보기).
+/// 앞에서 `n` 개 샘플 (데이터 뷰 미리보기).
+///
+/// 클래스가 있는 소스(이미지 폴더·녹화)는 **클래스별로 고르게** 뽑는다. 앞에서 그냥 자르면
+/// 첫 클래스만 보이는데, 미리보기의 목적은 데이터가 어떤 모습인지 훑는 것이다.
+/// CSV·합성은 클래스를 미리 알 수 없어 앞에서부터 자른다.
 pub fn preview(spec: &DatasetSpec, base_dir: &Path, n: usize) -> Result<Vec<Sample>> {
+    if n == 0 {
+        return Ok(vec![]);
+    }
     let (samples, _) = load_source(&spec.source, base_dir, None, Some(n))?;
     Ok(samples)
 }
@@ -462,19 +470,42 @@ fn load_image_folder(
     let mut out = Vec::new();
     let mut names = Vec::with_capacity(classes.len());
 
+    // 미리보기처럼 limit 이 있으면 클래스마다 같은 수만큼 뽑아 첫 클래스로 쏠리지 않게 한다.
+    let per_class = limit.map(|l| l.div_ceil(classes.len().max(1)));
+    let mut buckets: Vec<Vec<Sample>> = Vec::with_capacity(classes.len());
+
     for (ci, (name, cdir)) in classes.iter().enumerate() {
         names.push(name.clone());
+        let mut bucket = Vec::new();
         for f in image_files(cdir)? {
-            if let Some(l) = limit {
-                if out.len() >= l {
-                    break;
-                }
+            if per_class.is_some_and(|p| bucket.len() >= p) {
+                break;
             }
             let t = load_image(&f, shape.as_deref())?;
             if shape.is_none() {
                 shape = Some(t.shape.clone());
             }
-            out.push(Sample { input: t, target: HostTensor::new(vec![1], vec![ci as f32]) });
+            bucket.push(Sample { input: t, target: HostTensor::new(vec![1], vec![ci as f32]) });
+        }
+        buckets.push(bucket);
+    }
+
+    if limit.is_some() {
+        // 클래스를 번갈아 가며 채운다 — 어느 클래스가 몇 장이든 고르게 섞인다.
+        let deepest = buckets.iter().map(|b| b.len()).max().unwrap_or(0);
+        for i in 0..deepest {
+            for b in buckets.iter_mut() {
+                if i < b.len() {
+                    out.push(b[i].clone());
+                }
+            }
+        }
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+    } else {
+        for b in buckets {
+            out.extend(b);
         }
     }
     if out.is_empty() {
@@ -497,6 +528,37 @@ fn load_image_folder(
 struct LabelLine {
     frame: String,
     label: i64,
+}
+
+/// 라벨별로 고르게 `limit` 개 줄을 고른다 (돌아가며 한 줄씩). 파싱이 안 되는 줄은 그대로 남겨
+/// 본 적재에서 오류가 나게 한다 — 미리보기가 조용히 건너뛰면 문제를 못 본다.
+fn balanced_label_lines(text: &str, limit: usize) -> std::collections::BTreeSet<usize> {
+    use std::collections::BTreeMap;
+    let mut by_label: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    let mut broken: Vec<usize> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<LabelLine>(line) {
+            Ok(rec) => by_label.entry(rec.label).or_default().push(i),
+            Err(_) => broken.push(i),
+        }
+    }
+    let mut out: std::collections::BTreeSet<usize> = broken.into_iter().take(limit).collect();
+    let deepest = by_label.values().map(|v| v.len()).max().unwrap_or(0);
+    'fill: for k in 0..deepest {
+        for lines in by_label.values() {
+            if out.len() >= limit {
+                break 'fill;
+            }
+            if let Some(&i) = lines.get(k) {
+                out.insert(i);
+            }
+        }
+    }
+    out
 }
 
 /// `labels.jsonl` 의 `frame` 을 `frames/` 바로 아래의 단일 파일 이름으로만 받아들인다.
@@ -534,15 +596,17 @@ fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Re
     let mut out = Vec::new();
     let mut max_label = 0i64;
 
+    // limit 이 있으면 라벨별로 고르게 뽑는다. 줄 파싱은 싸고 이미지 디코드가 비싸므로
+    // **디코드하기 전에** 어떤 줄을 쓸지 먼저 정한다.
+    let chosen: Option<std::collections::BTreeSet<usize>> = limit.map(|l| balanced_label_lines(&text, l));
+
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(l) = limit {
-            if out.len() >= l {
-                break;
-            }
+        if chosen.as_ref().is_some_and(|c| !c.contains(&i)) {
+            continue;
         }
         let rec: LabelLine = serde_json::from_str(line)
             .with_context(|| format!("{} {}줄을 읽을 수 없습니다", labels_path.display(), i + 1))?;
@@ -828,6 +892,56 @@ mod tests {
         // 프로젝트 파일이 정한 목표 형상이 터무니없으면 할당 전에 거절한다.
         let e = format!("{:#}", load_image_folder(&dir, Some(&[3, 100_000, 100_000]), None).unwrap_err());
         assert!(e.contains("상한"), "{e}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_spreads_samples_across_classes() {
+        let dir = tmp("preview-balance");
+        for (ci, name) in ["a", "b", "c"].iter().enumerate() {
+            let c = dir.join(name);
+            std::fs::create_dir_all(&c).unwrap();
+            for k in 0..10 {
+                write_png(&c.join(format!("{k}.png")), 4, 4, (ci * 40 + k) as u8);
+            }
+        }
+        let spec = DatasetSpec::new("p", DataSource::ImageFolder { path: dir.to_string_lossy().into() });
+        let got = preview(&spec, Path::new("."), 6).unwrap();
+        assert_eq!(got.len(), 6);
+        let mut seen: Vec<f32> = got.iter().map(|s| s.target.data[0]).collect();
+        seen.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        seen.dedup();
+        assert_eq!(seen, vec![0.0, 1.0, 2.0], "미리보기가 첫 클래스에 쏠렸습니다");
+
+        // 클래스 수보다 적게 요청해도 서로 다른 클래스에서 온다.
+        let two = preview(&spec, Path::new("."), 2).unwrap();
+        assert_eq!(two.len(), 2);
+        assert_ne!(two[0].target.data[0], two[1].target.data[0]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recorded_preview_spreads_across_labels() {
+        let dir = tmp("preview-recorded");
+        let frames = dir.join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        let mut labels = String::new();
+        // 라벨 0 이 앞에 몰려 있다 — 앞에서 자르면 라벨 1 이 안 보인다.
+        for k in 0..8 {
+            write_png(&frames.join(format!("a{k}.png")), 4, 4, k as u8);
+            labels.push_str(&format!("{{\"frame\":\"a{k}.png\",\"label\":0}}\n"));
+        }
+        for k in 0..8 {
+            write_png(&frames.join(format!("b{k}.png")), 4, 4, (100 + k) as u8);
+            labels.push_str(&format!("{{\"frame\":\"b{k}.png\",\"label\":1}}\n"));
+        }
+        std::fs::write(dir.join("labels.jsonl"), labels).unwrap();
+
+        let spec = DatasetSpec::new("r", DataSource::Recorded { path: dir.to_string_lossy().into() });
+        let got = preview(&spec, Path::new("."), 4).unwrap();
+        assert_eq!(got.len(), 4);
+        assert!(got.iter().any(|s| s.target.data[0] == 0.0));
+        assert!(got.iter().any(|s| s.target.data[0] == 1.0), "라벨 1 이 미리보기에 없습니다");
         std::fs::remove_dir_all(&dir).ok();
     }
 

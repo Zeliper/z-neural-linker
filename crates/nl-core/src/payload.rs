@@ -34,6 +34,15 @@ fn three() -> usize {
 }
 
 /// 인코드(바깥 → 텐서) / 디코드(텐서 → 바깥) 단계.
+///
+/// `decode` 는 `encode` 를 자동으로 되짚는 것이 **아니다**. 두 목록은 서로 독립적인 정방향 체인이며,
+/// 같은 변형이라도 어느 쪽에 있느냐에 따라 뜻이 갈린다.
+///
+/// - 디코드에서 **역변환**인 것: [`Transform::Scale`], [`Transform::Normalize`], [`Transform::OneHot`].
+/// - 디코드에서도 **정방향**인 것: [`Transform::Softmax`], [`Transform::Argmax`],
+///   [`Transform::Threshold`], [`Transform::MapLabel`].
+/// - 인코드 전용: [`Transform::Resize`], [`Transform::Grayscale`], [`Transform::Crop`],
+///   [`Transform::JsonPointer`], [`Transform::Tokenize`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Transform {
