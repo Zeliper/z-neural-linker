@@ -62,10 +62,24 @@ pub const UPDATE_URL: &str = "https://updates.trustanc.dev/neural-linker/latest.
 cargo test --workspace && cargo clippy --workspace --all-targets
 ```
 
-`CHANGELOG` 는 아직 없다. 릴리스 노트는 CI 가 `NOTES="<버전> 릴리스"` 로 채우므로, 바꾸려면
+### ② CHANGELOG 갱신
+
+[`CHANGELOG.md`](../CHANGELOG.md) 의 `[미출시]` 항목을 새 버전 제목으로 옮기고 날짜를 적는다.
+그 위에 빈 `[미출시]` 를 새로 만든다.
+
+```markdown
+## [미출시]
+
+## [0.2.0] — 2026-10-01
+```
+
+항목은 추가·변경·보안·수정으로 나눈다. **"알려진 제한" 표도 함께 손본다** — 고친 것은 지우고
+새로 알게 된 것은 더한다. 이 표가 릴리스 노트에서 사용자가 가장 먼저 보는 부분이다.
+
+매니페스트의 `notes` 는 CI 가 `NOTES="<버전> 릴리스"` 로 채운다. 바꾸려면
 `packaging/make-manifest.sh` 를 부르는 워크플로 단계의 `NOTES` 를 고친다.
 
-### ② 키 확인
+### ③ 키 확인
 
 ```sh
 cargo run -p nl-update --example nl-keygen -- verify <직전 릴리스의 latest.json> \
@@ -75,7 +89,7 @@ cargo run -p nl-update --example nl-keygen -- verify <직전 릴리스의 latest
 직전 매니페스트가 지금 키로 검증되면 키가 바뀌지 않은 것이다. 키를 바꿔야 한다면
 아래 "키를 잃어버렸을 때" 를 먼저 읽는다.
 
-### ③ 로컬 드라이런 (선택)
+### ④ 로컬 드라이런 (선택)
 
 태그를 밀기 전에 CI 가 무엇을 내놓을지 여기서 먼저 본다. `release.yml` 과 같은 함수
 (`packaging/lib.sh`)를 쓰므로 결과가 어긋나지 않는다.
@@ -95,7 +109,7 @@ packaging/release-local.sh --crates nl-runtime,nl-cli --out /tmp/dist-local
 | `--installer` | Inno Setup 이 있으면 Windows setup.exe 도 만든다 (CI 에는 없는 단계) |
 | `--skip-build` | 이미 빌드된 산출물을 그대로 포장한다 |
 
-### ④ 태그
+### ⑤ 태그
 
 ```sh
 git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
@@ -104,7 +118,7 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 태그 없이 시험만 하려면 Actions 에서 `workflow_dispatch` 로 돌린다 — 빌드와 서명은 하고
 릴리스 첨부만 건너뛴다.
 
-### ⑤ CI 산출물 확인
+### ⑥ CI 산출물 확인
 
 릴리스에 아래가 다 붙었는지 본다. 하나라도 빠지면 그 플랫폼 사용자는 업데이트를 받지 못한다.
 
@@ -118,7 +132,7 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 
 `.minisig` 가 없으면 `MINISIGN_KEY` 시크릿이 빠진 것이다. 그대로 올리면 안 된다.
 
-### ⑥ 서명 검증
+### ⑦ 서명 검증
 
 CI 에도 검증 단계가 있지만(`UPDATE_PUBLIC_KEY` 변수가 있을 때), 올리기 전에 손으로 한 번 더 본다.
 
@@ -137,7 +151,7 @@ cargo run -p nl-update --example nl-keygen -- verify runtimes/latest.json --pubk
 - 자산 `url` 이 https 이고 매니페스트와 같은 오리진인가
 - 자산마다 `sha256` 과 `size` 가 있는가
 
-### ⑦ 배포 서버 업로드
+### ⑧ 배포 서버 업로드
 
 자산과 매니페스트를 같은 곳에 올린다. **매니페스트와 서명을 마지막에, 같이 올린다** —
 자산보다 먼저 올리면 그 사이에 확인한 사용자가 404 를 만난다.
@@ -154,7 +168,7 @@ cargo run -p nl-update --example nl-keygen -- verify runtimes/latest.json --pubk
 curl -sSfI <base>/latest.json && curl -sSfI <base>/latest.json.minisig
 ```
 
-### ⑧ 빌더에서 업데이트 확인
+### ⑨ 빌더에서 업데이트 확인
 
 직전 버전 빌더를 실행해 새 버전 배지가 뜨는지, 내려받아 적용되는지, 다시 뜬 앱의 `--version` 이
 새 버전인지 본다.
@@ -166,7 +180,7 @@ curl -sSfI <base>/latest.json && curl -sSfI <base>/latest.json.minisig
 시험 서버로 돌려 보려면 `NL_UPDATE_URL` 과 `NL_UPDATE_INSECURE=1` 을 함께 켠다.
 루프백 http 로 띄웠다면 `NL_ALLOW_HTTP=1` 도 필요하다.
 
-### ⑨ 배포 앱 종단 확인
+### ⑩ 배포 앱 종단 확인
 
 새 빌더로 `.nlapp` 을 하나 만들어(입력 무장은 끄고) 배포 앱까지 돈다.
 
