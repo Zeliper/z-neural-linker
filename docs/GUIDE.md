@@ -673,6 +673,140 @@ curl --cacert certs/server.crt -H 'X-NL-Token: 토큰' -d '[0,1]' https://127.0.
 
 ---
 
+## 서버로 운영하기
+
+배포 앱을 창 없이 상시 띄워 두는 경로입니다. 화면 캡처나 마우스·키보드가 아니라 HTTP 서버 노드로
+들어오는 요청을 받아 추론해 돌려주는 쓰임을 가정합니다.
+
+### 헤드리스로 띄우기
+
+```sh
+./내앱 --headless --device cpu
+```
+
+창을 만들지 않고 파이프라인만 돕니다. `Ctrl+C`(SIGTERM)를 받으면 파이프라인을 정지하고 빠져나갑니다.
+GPU 는 헤드리스 서버에서 드라이버·권한 문제를 일으키기 쉬우니 `--device cpu` 로 시작해 보고,
+필요할 때만 바꾸세요.
+
+### systemd 사용자 서비스
+
+`packaging/linux/neural-linker-app.service` 가 템플릿입니다. 설치 스크립트가 경로를 채워 넣어 줍니다.
+
+```sh
+./install.sh --service ~/apps/내앱
+systemctl --user status neural-linker-app
+journalctl --user -u neural-linker-app -f
+```
+
+로그아웃한 뒤에도 돌게 하려면 한 번만:
+
+```sh
+loginctl enable-linger $USER
+```
+
+`./install.sh --uninstall` 이 서비스도 함께 내리고 지웁니다. **환경 파일은 남깁니다** — 거기에 토큰이
+들어 있어서, 지웠다가는 되살릴 수 없습니다.
+
+시스템 전역 서비스로 돌리려면 유닛을 `/etc/systemd/system/` 에 두고 `User=`·`Group=`·`WorkingDirectory=`
+를 채우세요. 사용자 유닛에서는 `ProtectHome=` 을 켤 수 없습니다 — 홈을 통째로 가리면 앱이 쓸 것이 없습니다.
+
+### 토큰은 환경 파일로
+
+HTTP 서버 노드의 토큰을 유닛 파일에 적지 마세요. 유닛은 0644 로 읽히고 `systemctl cat` 에 그대로 나옵니다.
+
+```sh
+install -m 600 /dev/null ~/.config/neural-linker/app.env
+echo 'NL_HTTP_TOKEN=여기에_토큰' >> ~/.config/neural-linker/app.env
+systemctl --user restart neural-linker-app
+```
+
+유닛이 `EnvironmentFile=-%h/.config/neural-linker/app.env` 로 읽습니다. 앞의 `-` 는 파일이 없어도
+넘어가라는 뜻입니다. 포트마다 다른 토큰을 쓰려면 `NL_HTTP_TOKEN_8799` 처럼 포트를 붙이세요 —
+포트별 값이 먼저입니다.
+
+### 최소 권한
+
+템플릿은 `NoNewPrivileges`·`ProtectSystem=strict`·`PrivateTmp` 등을 켜 둡니다. 한 가지만 기억하세요.
+
+> **`ProtectSystem=strict` 와 `PrivateTmp=yes` 는 함께 켜야 합니다.**
+> `strict` 는 `/tmp` 까지 읽기 전용으로 만드는데 배포 앱은 시작할 때 임시 작업 폴더를 만듭니다.
+> `PrivateTmp` 가 쓰기 가능한 `/tmp` 를 따로 달아 줍니다. `strict` 만 켜면
+> `Read-only file system (os error 30) at path "/tmp/nl-runtime-…"` 로 곧바로 죽습니다.
+
+그리고 `PrivateTmp` 때문에 **호스트의 `/tmp` 는 서비스에서 보이지 않습니다.** 앱 실행 파일과
+데이터를 `/tmp` 아래에 두지 마세요. 홈 아래가 맞습니다.
+
+앱이 파일을 써야 하는 곳은 `ReadWritePaths=` 에 적습니다. 기본은 `~/.local/share/neural-linker` 와
+`~/.cache/neural-linker` 입니다.
+
+### TLS
+
+인증서를 주면 같은 노드가 https 로 열립니다. 자세한 것은 위의 "HTTP 서버 노드" 절에 있습니다.
+서버로 운영할 때 하나만 더 알아 두세요.
+
+`tls` 의 `cert_pem`·`key_pem` 은 **실행기 작업 폴더 기준 상대 경로**이고 그 폴더 밖은 열리지 않습니다.
+빌더에서는 프로젝트 폴더가 기준이지만, **배포 앱에서는 번들이 풀리는 임시 작업 폴더가 기준**입니다.
+그래서 인증서를 번들 에셋으로 담고 경로를 `assets/` 로 시작해야 합니다.
+
+```json
+"tls": { "cert_pem": "assets/certs/server.crt", "key_pem": "assets/certs/server.key" }
+```
+
+인증서가 자주 바뀌는 배포라면 앱에 담지 말고 리버스 프록시에 맡기는 편이 낫습니다.
+
+### 리버스 프록시를 앞에 두기
+
+여러 앱을 한 주소에 모으거나 Let's Encrypt 로 인증서를 자동 갱신하려면 nginx·Caddy 가 편합니다.
+그때는 `tls` 를 비우고 루프백에 묶으세요.
+
+```nginx
+location /infer {
+    proxy_pass http://127.0.0.1:8799/infer;
+    proxy_set_header Authorization $http_authorization;
+}
+```
+
+프록시를 쓰더라도 **토큰은 따로 거세요.** 같은 기계의 다른 프로세스는 프록시를 거치지 않고
+루프백 포트에 바로 말을 걸 수 있습니다.
+
+프록시 뒤에서는 `Origin` 헤더가 붙은 요청이 403 으로 막힙니다. 브라우저에서 직접 부르는 구성이라면
+프록시가 `Origin` 을 떼거나, 브라우저가 아닌 백엔드를 거쳐 부르세요.
+
+### 업데이트는 서버형에서 어떻게 되나
+
+**헤드리스는 확인만 하고 적용하지 않습니다.** 새 버전이 있으면 로그에 한 줄 남기고 그대로 돕니다.
+내려받지도, 실행 파일을 바꿔치우지도 않습니다 — 사람이 보고 있지 않은 서버를 말없이 바꾸지 않기
+위해서입니다. 창 모드와 다른 점입니다.
+
+그래서 `--no-update` 는 **안전을 위해 필요한 것이 아닙니다.** 끄고 싶다면 이유는 둘입니다.
+
+- 서버가 바깥으로 나가지 못하거나 나가면 안 되는 망에 있다
+- 확인 실패 로그가 주기적으로 쌓이는 것이 싫다
+
+그 밖에는 켜 두는 편이 낫습니다. "새 버전 x.y.z 이(가) 있습니다" 한 줄이 로그에 남아, 갱신할 때가
+됐다는 것을 알 수 있습니다. 실제 갱신은 새 배포본을 받아 파일을 바꾸고 서비스를 다시 띄우는 식으로
+하세요.
+
+```sh
+systemctl --user stop neural-linker-app
+install -m 755 새내앱 ~/apps/내앱
+systemctl --user start neural-linker-app
+```
+
+### 확인해 본 것
+
+이 절의 내용은 실제로 돌려 확인했습니다. XOR 샘플을 학습해 추론 API 파이프라인을 진입점으로 빌드하고,
+systemd 사용자 서비스로 띄워 `curl` 로 불렀습니다.
+
+```
+POST /infer  [1,0] → 200  [0.434, -0.200]
+POST /infer  [1,1] → 200  [4.833, -3.780]
+```
+
+본문은 **필드 값 그대로**입니다. 입력 필드가 `x`(길이 2 벡터) 하나면 `[1,0]` 을 보냅니다 —
+`{"x":[1,0]}` 처럼 감싸면 그 객체 전체를 `x` 의 값으로 읽어 인코딩에 실패합니다.
+`SIGTERM` 을 받으면 "파이프라인 정지" 를 남기고 깨끗이 끝납니다.
+
 ## 명령줄 `nl`
 
 GUI 없이 프로젝트를 다룹니다. 스크립트와 CI 용입니다.
