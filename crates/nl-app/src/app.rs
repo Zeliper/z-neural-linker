@@ -1305,7 +1305,9 @@ impl NlApp {
                 self.doc.apply_local(vec![Op::UpsertDataset { dataset: next }]);
             }
             Err(e) => {
-                let msg = e.to_string();
+                // `{e:#}` 는 원인 체인까지 붙인다. 상한에 걸렸을 때 "어느 파일의 무엇이 얼마나 큰지" 가
+                // 그 안에 있어, 최상위 줄만 보이면 왜 거절됐는지 알 수 없다.
+                let msg = format!("{e:#}");
                 self.views.data.scan.insert(id, Err(msg.clone()));
                 self.log(format!("스캔 실패({}): {msg}", spec.name));
                 self.toast(format!("스캔 실패: {msg}"), now);
@@ -1450,7 +1452,11 @@ impl NlApp {
             payload: m.payload,
             weights: Some(weights),
         }]);
-        let which = if best.is_some() { "최적 체크포인트" } else { "마지막 체크포인트" };
+        let which = if best.is_some() {
+            "최적 체크포인트"
+        } else {
+            "마지막 체크포인트"
+        };
         self.toast(format!("{which} 가중치를 모델에 적용했습니다"), now);
     }
 

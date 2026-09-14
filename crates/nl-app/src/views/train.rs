@@ -607,12 +607,15 @@ fn runs_table(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut TrainViewState, acti
                     }
                 }
                 ui.horizontal(|ui| {
-                    ui.add_enabled_ui(r.checkpoint.is_some(), |ui| {
-                        if ui
-                            .small_button("가중치 적용")
-                            .on_hover_text("이 실행의 체크포인트를 모델 가중치로")
-                            .clicked()
-                        {
+                    let has = r.checkpoint.is_some() || r.best_checkpoint.is_some();
+                    // 조기 종료로 남은 "가장 좋았던" 가중치가 있으면 그쪽을 쓴다.
+                    let tip = if r.best_checkpoint.is_some() {
+                        "검증 손실이 가장 낮았던 에포크의 가중치를 모델에 적용합니다"
+                    } else {
+                        "이 실행의 마지막 체크포인트를 모델 가중치로"
+                    };
+                    ui.add_enabled_ui(has, |ui| {
+                        if ui.small_button("가중치 적용").on_hover_text(tip).clicked() {
                             actions.push(ViewAction::ApplyRunWeights(*id));
                         }
                     });
