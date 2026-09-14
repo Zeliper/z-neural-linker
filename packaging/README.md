@@ -108,7 +108,7 @@ chmod +x ~/.local/bin/lld-link
 Windows 빌드 기계가 따로 있거나 이 경로가 막히면 GitHub Actions 의 `windows-latest` 러너에서 빌드해
 `runtimes/` 에 내려받는 방법도 있다 — 다만 지금은 크로스 빌드가 되므로 필요하지 않다.
 
-### Inno Setup 설치 프로그램 만들기 (일부 미확인)
+### Inno Setup 설치 프로그램 만들기
 `nl_bundle::windows_installer()` 가 만드는 `.iss` 를 실제로 컴파일하려면 Inno Setup 6 이 필요하다.
 `install_inno_setup_plan()` 이 그 설치본을 받아 오는 계획을 돌려준다.
 
@@ -135,60 +135,36 @@ Windows 빌드 기계가 따로 있거나 이 경로가 막히면 GitHub Actions
 놓이는 자리이자 크로스 빌드 내내 `PATH` 맨 앞에 오는 자리라, 공용 `/tmp` 로 떨어지지 않게
 `ProjectDirs` → `$XDG_RUNTIME_DIR` → `$HOME/.cache` 순으로만 물러선다.
 
-아직 확인하지 못한 것(이 개발 환경에 Inno Setup 이 없다):
+아직 확인하지 못한 것에서 **전부 확인됨**으로 (2026-09-14, wine 11.0 Staging · Inno Setup 6.7.3):
 
-1. `run_tool_plan` 이 실제로 설치까지 마치는지 (Linux 는 `wine innosetup-6.exe /VERYSILENT`).
-2. `find_inno_setup()` 이 wine 접두사 안의 `ISCC.exe` 를 찾는지.
-3. `windows_installer()` 가 실제 `setup.exe` 를 만들고, 그것을 `/VERYSILENT /NORESTART` 로 돌리면
-   `%LOCALAPPDATA%\Programs\<이름>\` 에 exe 가 놓이는지.
-
-## 배포 앱을 API 로 여는 경우
-
-파이프라인에 `HTTP 서버` 소스가 있으면 배포 앱이 그 주소에서 요청을 받는다. 배포 전에 확인할 것들이다.
-
-### 토큰
-
-`127.0.0.1` 같은 루프백 주소에 묶으면 토큰 없이도 열린다(그 컴퓨터에서만 닿는다). 바깥에서 닿는 주소
-(`0.0.0.0`, LAN IP)에 토큰 없이 열려고 하면 **실행기가 거부한다** — 그 주소에 닿는 누구나 파이프라인을
-구동할 수 있기 때문이다. `마우스/키보드` 싱크가 붙어 있다면 그것은 원격 조작이다.
-
-번들에 박힌 토큰은 앱을 받은 사람이 모두 볼 수 있다. 서버로 돌릴 때는 실행 환경에서 새로 준다.
-
-```sh
-NL_HTTP_TOKEN=$(head -c24 /dev/urandom | base64 | tr '+/' '-_') ./내앱 --headless
-NL_HTTP_TOKEN_8787=포트별토큰 ./내앱 --headless      # 포트별이 우선
-```
-
-요청에는 `X-NL-Token: <토큰>` 이나 `Authorization: Bearer <토큰>` 중 하나를 붙인다.
-
-### 리버스 프록시
-
-**HTTPS 를 직접 받지 않는다.** 바깥에 열어야 한다면 nginx·Caddy 같은 프록시 뒤에 두고 TLS 를 프록시가
-맡게 한다. 앱은 루프백에 묶고 프록시만 그 포트로 보낸다.
-
-```nginx
-location /infer {
-    proxy_pass http://127.0.0.1:8787/infer;
-    proxy_set_header Host 127.0.0.1:8787;   # 앱이 Host 를 검사한다
-    client_max_body_size 8m;                # 앱 상한과 맞춘다
-}
-```
-
-`Host` 를 그대로 넘기면 앱이 400 으로 막는다(DNS rebinding 방어). 위처럼 바인드 주소로 바꿔 준다.
-프록시는 누가 부르는지 가리지 않으므로 **토큰은 프록시를 써도 따로 걸어야 한다.**
-
-### 한계
-
-| 항목 | 값 |
+| 단계 | 결과 |
 | --- | --- |
-| 본문 | 8 MiB (초과 413) |
-| 헤더 | 16 KiB · 64개 (초과 431) |
-| 동시 연결 | 64 (초과 503) |
-| 머리 받기 / 본문 받기 / 응답 | 5초 / 30초 / 10초 (초과 408·504) |
-| keep-alive | 없음 — 요청마다 연결을 새로 연다 |
-| 처리량 | 파이프라인 `틱` 속도 (기본 30 Hz = 초당 30건) |
+| `run_tool_plan` 내려받기 + sha256 검증 | 통과 (10,592,232 바이트, 해시 일치) |
+| `wine … /VERYSILENT` 조용한 설치 | 성공 |
+| `find_inno_setup()` | `<접두사>/drive_c/Program Files (x86)/Inno Setup 6/ISCC.exe`, `via_wine = true` |
+| `windows_installer()` 실컴파일 | `app-setup-0.2.0.exe` 2,156,743 바이트 (PE32) |
+| 만든 setup.exe `/VERYSILENT /NORESTART` | 성공. `%LOCALAPPDATA%\Programs\데모 앱\app.exe` 에 원본과 동일한 바이트, 시작 메뉴 바로가기 생성, UAC 없음 |
 
-`--headless` 로 띄우면 창 없이 API 만 돈다. 서버형 배포에는 이쪽이 맞다.
+시험은 저장소 밖 스크래치 크레이트에서 `WINEPREFIX` 를 따로 잡아 돌렸다 — 사용자의 `~/.wine` 은 건드리지 않았다.
+
+#### 실컴파일이 드러낸 것 두 가지
+
+단위 시험으로는 잡을 수 없던 문제를 실제 컴파일·설치가 드러냈다.
+
+**① `[Icons]` 의 `Name:` 은 이중화한 따옴표조차 받지 않는다.** `"` → `""` 로 적으면 ISCC 가
+`Parameter "Name" cannot include quotes (")` 로 컴파일을 거절한다. 주입은 막히지만(컴파일이 실패하니
+fail-closed) 따옴표가 든 **정상** 이름도 빌드가 깨졌다. 그래서 `iss_quoted` 가 따옴표를 이중화하지 않고
+**지운다**. 언제나 컴파일되고 결과도 분명하다.
+
+**② 경로가 되는 자리를 정화하지 않으면 최종 사용자 기계에서 터진다.** `DefaultGroupName`(시작 메뉴 폴더)과
+`[Icons]` 의 바로가기 이름은 `DefaultDirName` 과 똑같이 **경로**인데 정화되지 않은 앱 이름을 쓰고 있었다.
+이름에 `/` 나 `:` 가 있으면 컴파일은 통과하고 설치할 때 `The folder name is not valid.` 로 중단된다.
+템플릿을 표시용(`@APP_NAME@`·`@APP_NAME_Q@`)과 경로용(`@APP_DIR@`·`@APP_FILE@`)으로 나눠 고쳤다.
+
+두 수정 뒤 `데모"; Parameters: "/c calc"; Flags: runhidden` 이라는 이름으로 다시 컴파일·설치해
+확인했다. 설치는 성공하고, 주입하려던 글자는 폴더·바로가기 이름 안에 **리터럴 텍스트**로만 남으며
+`[Run]`·`[Icons]` 에 항목이 늘지 않는다. `calc` 는 실행되지 않는다.
+
 
 ## 업데이트
 
