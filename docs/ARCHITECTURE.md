@@ -214,8 +214,7 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 ### ONNX 내보내기 (`onnx/`)
 
 - `onnx::export(&ModelDef, weights, out, ExportOptions { opset, batch }) -> ExportReport { nodes, initializers, unsupported }`.
-  학습한 모델을 **opset 17** ONNX 파일로 쓴다. 읽기(가져오기)는 없다 — 넣으려면 `tract-onnx` 가 필요하고
-  배포 바이너리가 **+34 MiB** 라, 하게 되더라도 기본 꺼진 카고 feature 로 둔다(`docs/research/onnx-2026-09-14.md`).
+  학습한 모델을 **opset 17** ONNX 파일로 쓴다. 읽기는 기본 꺼진 feature 다(아래 "가져오기").
 - **opset 17 인 이유**: `LayerNormalization` 이 17 에서 들어왔고 `Softmax` 가 축을 실제 축으로 읽는 것이 13 부터다.
   위로는 검증에 쓰는 tract 의 보장 범위가 18 까지다. 그래서 opset 20 의 `Gelu` 와 opset 23 의 `Attention` 은
   쓰지 않고 각각 `Erf` 전개와 분해로 간다.
@@ -254,6 +253,29 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   이해한 경우를 못 잡으니 바깥 구현이어야 의미가 있다. 순환 레이어는 단방향·양방향 × `return_sequence` 네 경우를
   모두 돌고, 어텐션과 `templates` 의 트랜스포머 블록 전체도 함께 본다. 배치는 2 로 잡는다 — 1 이면 배치 축이
   뒤섞이는 실수를 놓친다.
+### ONNX 가져오기 (`onnx_import.rs`) — 선택 feature
+
+```sh
+cargo build -p nl-engine --features onnx-import
+cargo test  -p nl-engine --features onnx-import      # 왕복 테스트 둘이 이때만 돈다
+```
+
+- **기본이 꺼져 있다.** 실행은 `tract-onnx` 가 하는데 배포 바이너리가 **34 MiB** 늘어난다
+  (현재 `nl-runtime` 74 MiB 대비 +46%). 기능 플래그로도 못 줄인다 — `tract-onnx` 0.23.7 에는
+  `optional` 의존성이 하나도 없다. 끈 상태에서는 의존성 트리에 tract 가 **아예 나타나지 않는다**.
+  **CI 에 feature 켠 잡을 두지 않는다**(빌드가 14분 늘어난다).
+- `OnnxSession::load(path)` → `run(&[HostTensor]) -> Vec<HostTensor>`. 입출력 순서는 **파일에 적힌 순서**다.
+  우리 `Session` 이 `Graph::input_nodes()` 순서를 쓰는 자리와 같으므로, 우리가 내보낸 파일은 그대로 맞는다.
+- **추론 전용이다.** 학습도, `ModelDef` 로 되돌리는 변환도, 캔버스 표시도 없다.
+  `PNodeKind::OnnxModel` 변형은 **아직 `nl-core` 에 넣지 않았다** — `PNodeKind` 를 전수 match 하는 앱 코드가
+  함께 고쳐져야 해서다. 지금은 이 모듈을 직접 부르는 것만 된다.
+- **실행 계획은 첫 `run` 때 만든다.** 동적 배치로 내보낸 모델은 배치가 기호로 남아 그대로는 최적화할 수 없다.
+  실측 결과 **tract 는 기호 배치가 남은 LSTM 을 최적화하려다 패닉한다**(`UndeterminedSymbol("B")`).
+  그래서 입력 형상을 아는 순간에 계획을 만들고 `catch_unwind` 로 감싼다 — 남의 파일 하나 때문에 앱이 죽으면
+  안 된다. 같은 형상이 다시 오면 만들어 둔 계획을 그대로 쓴다.
+- 파일 크기는 가중치와 같은 상한(`MAX_WEIGHTS_BYTES`)을 건다. protobuf 는 중첩 깊이·크기 공격이 가능한 포맷이다.
+  입력 형상은 우리가 먼저 검사해서 tract 내부 오류 대신 읽을 수 있는 메시지를 낸다(기호 차원은 무엇이든 받는다).
+
 - protobuf 메시지 정의(`onnx/pb.rs`)는 **생성 결과를 커밋**해 둔다 — 빌드에 `protoc` 도 코드 생성도 필요 없다
   (tract 가 쓰는 방식과 같다). 재생성 절차는 `scripts/onnxgen/README.md` 에 있고 순수 Rust(`protox` + `prost-build`)다.
 

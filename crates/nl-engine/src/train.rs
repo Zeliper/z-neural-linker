@@ -295,10 +295,10 @@ pub fn checkpoint_summary(path: &std::path::Path) -> anyhow::Result<Vec<(String,
 }
 
 fn write_run_json(run_dir: &Path, run: &RunRecord) -> Result<()> {
-    std::fs::create_dir_all(run_dir).with_context(|| format!("폴더 생성 실패: {}", run_dir.display()))?;
+    std::fs::create_dir_all(run_dir).with_context(|| format!("폴더 생성 실패: {}", crate::paths::short(run_dir)))?;
     let json = serde_json::to_string_pretty(run).context("RunRecord 직렬화 실패")?;
     let tmp = run_dir.join("run.json.tmp");
-    std::fs::write(&tmp, json).with_context(|| format!("run.json 쓰기 실패: {}", tmp.display()))?;
+    std::fs::write(&tmp, json).with_context(|| format!("run.json 쓰기 실패: {}", crate::paths::short(&tmp)))?;
     std::fs::rename(&tmp, run_dir.join("run.json")).context("run.json 이동 실패")?;
     Ok(())
 }
@@ -371,10 +371,10 @@ fn train_on<B: AutodiffBackend>(
         let loaded = weights::load_for(p, Some(req.model.id))?;
         model
             .load_host_params(&loaded)
-            .with_context(|| format!("체크포인트 적용 실패: {}", p.display()))?;
+            .with_context(|| format!("체크포인트 적용 실패: {}", crate::paths::short(p)))?;
         emit.log(format!(
             "체크포인트에서 이어서 학습: {} (가중치만 복원 — 옵티마이저 상태와 워밍업은 처음부터입니다)",
-            p.display()
+            crate::paths::short(p)
         ));
     }
     model.require_grad_all();

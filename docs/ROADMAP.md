@@ -131,9 +131,12 @@
       **GRU 는 `linear_before_reset=1` 이 필수** — 빠뜨리면 오류 없이 값만 틀린다.
       검증은 `tract-onnx`(dev-dependency)로 왕복 비교 15개 — 학습 → 내보내기 → 다시 읽기 → 1e-4 이내 일치.
       순환은 단방향/양방향 × `return_sequence` 네 경우를 모두 돌고 트랜스포머 템플릿 블록 전체도 본다
-- [ ] ONNX **가져오기**(tract 로 추론 전용). **미착수 · 선택 기능으로 둔다** —
-      tract 를 넣으면 배포 바이너리가 **+34 MiB(+46%)** 라 기본 꺼진 카고 feature(`onnx-import`)로만 넣는다.
-      실측과 매핑 근거는 `docs/research/onnx-2026-09-14.md`
+- [~] ONNX **가져오기**(추론 전용) — 기본 꺼진 feature `onnx-import` 로 뼈대가 들어왔다.
+      `nl_engine::onnx_import::OnnxSession::{load, run}`. 켜면 배포 바이너리가 **+34 MiB(+46%)** 라
+      기본 배포판에는 들어가지 않고 **CI 잡도 두지 않는다**(빌드 14분). 끈 상태에서는 의존성 트리에
+      tract 가 나타나지 않는 것을 확인했다. 실측 근거는 `docs/research/onnx-2026-09-14.md`
+- [ ] 가져온 ONNX 를 파이프라인에 꽂기 — `PNodeKind::OnnxModel { path, payload }`. **미착수**
+      (`PNodeKind` 를 전수 match 하는 앱 코드와 함께 가야 해서 미뤘다)
 - [ ] 학습 상황 프리셋: 분류·회귀·화면 상태 분류·행동 복제 템플릿. **미착수**
 
 ## M4 — 협업·서버형 배포 · **절반**

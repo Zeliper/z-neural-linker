@@ -4,6 +4,7 @@ use crate::limits::{
     check_file_size, checked_elems, decode_image_file, MAX_CSV_BYTES, MAX_CSV_COLS, MAX_CSV_ROWS, MAX_DATASET_ELEMS,
     MAX_LABELS_BYTES,
 };
+use crate::paths::show;
 use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
 use nl_core::dataset::{DataSource, DatasetInfo, SyntheticKind};
@@ -265,28 +266,6 @@ fn csv_prefix_bytes(path: &Path, header: bool, rows: usize, base: Option<&Path>)
         }
     }
     Ok(rdr.position().byte())
-}
-
-/// 오류·로그에 넣을 짧은 경로.
-///
-/// 사용자 홈 전체 경로가 그대로 찍히면 로그를 공유할 때 계정 이름과 폴더 구조가 함께 나간다.
-/// 세 단계로 줄인다: `base` 아래면 상대 경로, 아니면 홈 아래는 `~/…`, 그것도 아니면 파일 이름만.
-fn show(path: &Path, base: Option<&Path>) -> String {
-    if let Some(b) = base {
-        if let Ok(rel) = path.strip_prefix(b) {
-            let s = rel.to_string_lossy();
-            if !s.is_empty() {
-                return s.into_owned();
-            }
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        if let Ok(rel) = path.strip_prefix(&home) {
-            return format!("~/{}", rel.to_string_lossy());
-        }
-    }
-    path.file_name()
-        .map_or_else(|| "(이름 없는 경로)".to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 fn resolve(base_dir: &Path, path: &str) -> PathBuf {

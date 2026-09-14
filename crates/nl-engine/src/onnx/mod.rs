@@ -114,23 +114,23 @@ pub fn export(model: &ModelDef, weights: &Path, out: &Path, opts: ExportOptions)
         );
     }
 
-    // 없는 파일은 여기서 먼저 잡는다. `weights::load_for` 의 오류에는 절대 경로가 들어가는데,
-    // 그 메시지가 로그·화면에 그대로 나가면 사용자 폴더 구조가 새어 나간다.
+    // 없는 파일은 여기서 먼저 잡는다 — mmap 실패가 연쇄된 메시지보다 "파일이 없습니다" 가 읽기 좋다.
+    // 경로 축약은 `weights::load_for` 도 하므로(`paths::short`) 이건 순전히 메시지 품질 때문이다.
     if !weights.is_file() {
         bail!(
             "가중치 파일이 없습니다: {} — 먼저 학습하거나 다른 체크포인트를 지정하세요",
-            shown(weights)
+            crate::paths::short(weights)
         );
     }
     let params = weights::load_for(weights, Some(model.id))
-        .with_context(|| format!("가중치를 읽을 수 없습니다: {}", shown(weights)))?;
+        .with_context(|| format!("가중치를 읽을 수 없습니다: {}", crate::paths::short(weights)))?;
 
     let mut b = Builder::new(model, &rep, &params, opts);
     b.build()?;
     let proto = b.finish()?;
 
     let bytes = proto.encode_to_vec();
-    write_atomic(out, &bytes).with_context(|| format!("ONNX 파일을 쓸 수 없습니다: {}", shown(out)))?;
+    write_atomic(out, &bytes).with_context(|| format!("ONNX 파일을 쓸 수 없습니다: {}", crate::paths::short(out)))?;
 
     Ok(ExportReport {
         nodes: proto.graph.as_ref().map_or(0, |g| g.node.len()),
@@ -204,13 +204,6 @@ fn label(model: &ModelDef, id: NodeId) -> String {
         .get(&id)
         .map(|n| n.display_name())
         .unwrap_or_else(|| id.short())
-}
-
-/// 경로를 파일 이름만으로 줄인다 — 오류 메시지에 사용자 절대 경로를 흘리지 않는다.
-fn shown(p: &Path) -> String {
-    p.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "<경로>".into())
 }
 
 fn write_atomic(out: &Path, bytes: &[u8]) -> Result<()> {
@@ -1177,6 +1170,19 @@ mod tests {
         assert!(e.contains("없음.safetensors"), "파일 이름은 알려 줘야 한다: {e}");
         assert!(!e.contains(&dir.display().to_string()), "절대 경로가 새어 나왔다: {e}");
         assert!(!dir.join("out.onnx").exists(), "실패했는데 파일을 남겼다");
+
+        // 파일이 **있는데 깨진** 경우도 같다 — 이쪽은 `weights::load_for` 의 메시지를 탄다.
+        let broken = dir.join("깨짐.safetensors");
+        std::fs::write(&broken, "safetensors 가 아닌 내용").unwrap();
+        let e = format!(
+            "{:#}",
+            export(&def, &broken, &dir.join("out2.onnx"), ExportOptions::default()).unwrap_err()
+        );
+        assert!(e.contains("깨짐.safetensors"), "파일 이름은 알려 줘야 한다: {e}");
+        assert!(
+            !e.contains(&dir.display().to_string()),
+            "깨진 파일에서 절대 경로가 새어 나왔다: {e}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

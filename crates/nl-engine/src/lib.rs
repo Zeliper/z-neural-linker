@@ -9,6 +9,10 @@ pub mod exec;
 pub mod infer;
 pub mod limits;
 pub mod onnx;
+/// ONNX 가져오기 (추론 전용). `--features onnx-import` 로만 들어온다.
+#[cfg(feature = "onnx-import")]
+pub mod onnx_import;
+pub mod paths;
 pub mod tensor;
 pub mod train;
 pub mod weights;

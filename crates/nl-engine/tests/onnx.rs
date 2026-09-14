@@ -634,3 +634,91 @@ fn recurrent_export_no_longer_reports_unsupported() {
     );
     assert!(onnx::check(&def).unsupported.is_empty());
 }
+
+// ───────────────────────────── 가져오기 (선택 feature) ─────────────────────────────
+
+/// 내보낸 파일을 우리 **가져오기 경로**로 다시 읽어 `Session` 과 맞는지 본다.
+///
+/// 위쪽 왕복 테스트들이 `tract_onnx` 를 직접 부르는 것과 달리, 이건 `onnx_import::OnnxSession`
+/// 이라는 **우리 API** 를 탄다 — 형상 검사·오류 메시지·출력 변환까지 함께 확인된다.
+///
+/// `cargo test -p nl-engine --features onnx-import` 로만 돈다. 기본 빌드에서는 이 테스트 자체가
+/// 컴파일되지 않는다(배포 바이너리를 34 MiB 불리지 않기 위해).
+#[cfg(feature = "onnx-import")]
+#[test]
+fn exported_file_loads_back_through_our_import_api() {
+    use nl_engine::onnx_import::OnnxSession;
+
+    let dir = temp_dir("import");
+    let mut def = chain(vec![
+        LayerKind::Input { shape: vec![2] },
+        linear(12),
+        LayerKind::Activation { act: Act::Gelu },
+        linear(2),
+    ]);
+    def.train.loss = Loss::CrossEntropy;
+    let (def, ckpt) = train_and_checkpoint(def, synthetic(SyntheticKind::Xor, 128), &dir, 3);
+    let out = dir.join("model.onnx");
+    onnx::export(&def, &ckpt, &out, ExportOptions::default()).expect("내보내기");
+
+    let mut imported = OnnxSession::load(&out).expect("가져오기");
+    // 배치 축은 기호로 남아야 한다 (동적 배치로 내보냈다).
+    assert_eq!(imported.input_shapes().len(), 1);
+    assert_eq!(imported.input_shapes()[0].len(), 2);
+    assert_eq!(imported.input_shapes()[0][0], None, "배치가 고정으로 굳었다");
+    assert_eq!(imported.input_shapes()[0][1], Some(2));
+
+    let mut ours = Session::load(&def, Some(&ckpt), DevicePref::Cpu).expect("세션");
+    for batch in [1usize, 3] {
+        let data: Vec<f32> = (0..batch * 2).map(|i| i as f32 * 0.4 - 0.6).collect();
+        let x = HostTensor::new(vec![batch, 2], data);
+        let a = ours.run(std::slice::from_ref(&x)).expect("우리 추론");
+        let b = imported.run(std::slice::from_ref(&x)).expect("가져온 모델 추론");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].shape, vec![batch, 2]);
+        assert_same(&format!("가져오기 배치 {batch}"), &a[0].data, &b[0].data, 1e-4);
+    }
+
+    // 형상이 안 맞으면 tract 오류가 아니라 우리 메시지로 막아야 한다.
+    let wrong = HostTensor::new(vec![2, 5], vec![0.0; 10]);
+    let e = format!("{:#}", imported.run(std::slice::from_ref(&wrong)).unwrap_err());
+    assert!(e.contains("1 번 축"), "{e}");
+    // 입력 개수가 다른 경우도.
+    let e = format!("{:#}", imported.run(&[]).unwrap_err());
+    assert!(e.contains("1 개인데 0 개"), "{e}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 순환 레이어가 든 모델도 가져오기 경로를 탄다 (LSTM 노드가 tract 계획으로 바뀌는지).
+#[cfg(feature = "onnx-import")]
+#[test]
+fn an_exported_lstm_loads_back_through_our_import_api() {
+    use nl_engine::onnx_import::OnnxSession;
+
+    let dir = temp_dir("import-lstm");
+    let (len, vocab) = (6usize, 10usize);
+    let ds = memory_sequence_csv(&dir, 96, len, vocab);
+    let def = seq_model(
+        len,
+        vocab,
+        8,
+        LayerKind::Lstm {
+            hidden: 5,
+            bidirectional: true,
+            return_sequence: false,
+        },
+    );
+    let (def, ckpt) = train_and_checkpoint(def, ds, &dir, 2);
+    let out = dir.join("lstm.onnx");
+    onnx::export(&def, &ckpt, &out, ExportOptions::default()).expect("내보내기");
+
+    let mut imported = OnnxSession::load(&out).expect("가져오기");
+    let data: Vec<f32> = (0..2 * len).map(|i| ((i * 5) % vocab) as f32).collect();
+    let x = HostTensor::new(vec![2, len], data);
+    let mut ours = Session::load(&def, Some(&ckpt), DevicePref::Cpu).expect("세션");
+    let a = ours.run(std::slice::from_ref(&x)).expect("우리 추론");
+    let b = imported.run(std::slice::from_ref(&x)).expect("가져온 모델 추론");
+    assert_same("양방향 LSTM 가져오기", &a[0].data, &b[0].data, 1e-4);
+    std::fs::remove_dir_all(&dir).ok();
+}
