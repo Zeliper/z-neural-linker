@@ -26,6 +26,7 @@
 | `run.rs` | 파이프라인을 헤드리스로 돌리고 이벤트를 찍는다 |
 | `record.rs` | 화면을 찍어 학습용 폴더로. 라벨은 표준 입력 한 줄(숫자) |
 | `build.rs` | 프로젝트 → `.nlapp` 번들 → 런타임 첨부 → 배포 아카이브 |
+| `export.rs` | 학습한 모델을 ONNX 파일로 (다른 도구로 가져가기 위한 추론용 그래프) |
 | `tlscert.rs` | `HttpServer` 노드용 자체 서명 인증서 만들기 |
 
 `tests/e2e.rs` 는 종단 시나리오 넷을 담는다 (아래 참조).
@@ -40,6 +41,7 @@ nl infer <프로젝트> --model <이름>     --input / --image / --csv
 nl run <프로젝트>                      파이프라인을 헤드리스로
 nl record <출력 폴더>                  화면 녹화
 nl build <프로젝트>                    배포판
+nl export-onnx <프로젝트> --model <이름>   ONNX 로 내보내기
 nl tls-cert <폴더>                     자체 서명 인증서
 nl sample <출력> [--kind xor|cnn]      샘플 프로젝트
 ```
@@ -75,6 +77,8 @@ nl sample <출력> [--kind xor|cnn]      샘플 프로젝트
   순서로 맞춘다. 이름을 비워 두면 필드가 뒤바뀔 수 있다. `nl inspect` 가 그 순서를 표로 보여 주고,
   이름이 없거나 개수가 어긋나면 색으로 짚는다.
 - **학습은 첫 Output 만 손실·지표에 쓴다.** 나머지는 추론에서만 쓰인다. `nl inspect` 가 알린다.
+- **ONNX 내보내기는 학습된 가중치가 있어야 한다.** 없으면 파일을 만들지 않고 종료 코드 2 로 끝난다.
+  형상 추론이 통과하지 못하는 그래프도 내보낼 수 없다. `nl inspect` 의 `ONNX` 칸이 미리 알려 준다.
 - **다입력 모델의 CSV** 는 `input_cols` 를 Input 노드 순서대로 앞에서부터 잘라 넣는다.
   샘플당 원소 수가 Input 원소 수의 합과 같아야 한다.
 - `nl record` 는 화면 세션이 있어야 한다. 헤드리스에서는 캡처기를 열지 못한다.
@@ -91,6 +95,7 @@ nl sample <출력> [--kind xor|cnn]      샘플 프로젝트
 | CNN 이미지 | 이진 이미지 본문과 라벨 디코드 체인. PNG 를 POST 해서 분류 결과 |
 | TLS | `tls-cert → run --tls-cert` → `curl -k` 로 https 200, 평문 요청은 거부 |
 | 다입력·다출력 | Input 2개·Output 2개 모델을 학습·빌드 → 객체와 배열 두 형식으로 POST → 같은 객체 응답 |
+| ONNX 내보내기 | XOR·CNN 샘플을 학습해 내보내고 파일이 진짜 ONNX protobuf 인지. 고정 배치와 오류 경로도 |
 
 TLS 와 다입출력 시나리오는 빈 포트를 받아 쓴다. 고정 포트를 쓰면 나란히 돌 때 서로 뺏는다.
 
