@@ -63,17 +63,54 @@ fn run(opts: Options) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::from(2));
     };
     let device = opts.device.unwrap_or(bundle.manifest.default_device);
+    let work = open_work_dir(opts.work_dir.as_deref(), &bundle)?;
     if opts.headless {
         run_headless(
             bundle,
             device,
             opts.run_for.map(Duration::from_secs_f64),
             !opts.no_update,
+            work,
         )?;
     } else {
-        run_gui(bundle, device, !opts.no_update)?;
+        run_gui(bundle, device, !opts.no_update, work)?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// 작업 폴더를 열고 번들을 푼다.
+///
+/// `--work-dir` 을 주면 그 폴더를 쓰고 **그대로 남긴다**. 같은 번들이 이미 풀려 있으면 다시 풀지 않아
+/// 서비스 재시작이 빠르고, `local/` 에 둔 인증서 같은 파일이 그대로 있다.
+/// 주지 않으면 끝나면 지워지는 임시 폴더다.
+fn open_work_dir(fixed: Option<&Path>, bundle: &Bundle) -> anyhow::Result<WorkDir> {
+    let Some(path) = fixed else {
+        let work = WorkDir::create()?;
+        app::prepare_workspace(bundle, work.path())?;
+        return Ok(work);
+    };
+    let work =
+        WorkDir::fixed(path).map_err(|e| anyhow::anyhow!("작업 폴더를 열지 못했습니다 ({}): {e}", path.display()))?;
+    let fingerprint = app::bundle_fingerprint(bundle);
+    let extracted = app::sync_workspace(bundle, &fingerprint, work.path())?;
+    println!(
+        "작업 폴더 {} ({})",
+        work.path().display(),
+        if extracted {
+            "번들을 풀었습니다"
+        } else {
+            "이미 풀려 있어 그대로 씁니다"
+        }
+    );
+    // 처음 풀 때 한 번만 알린다. 인증서를 어디 둬야 하는지가 가장 자주 막히는 지점이다.
+    if extracted && work.is_persistent() {
+        println!(
+            "  인증서 같은 파일은 {}/ 에 두세요 — 번들을 갱신해도 남습니다 (예: cert_pem \"{}/server.crt\")",
+            work.path().join(app::LOCAL_DIR).display(),
+            app::LOCAL_DIR
+        );
+    }
+    Ok(work)
 }
 
 /// `.nlapp` 파일 크기 상한. 압축된 상태로 메모리에 통째로 올라가므로 여기서 한 번 막는다.
@@ -108,9 +145,7 @@ fn load_bundle(path: Option<&Path>) -> anyhow::Result<Option<Bundle>> {
     }
 }
 
-fn run_gui(bundle: Bundle, device: DevicePref, updates: bool) -> anyhow::Result<()> {
-    let work = WorkDir::create()?;
-    app::prepare_workspace(&bundle, work.path())?;
+fn run_gui(bundle: Bundle, device: DevicePref, updates: bool, work: WorkDir) -> anyhow::Result<()> {
     let base_dir = work.path().to_path_buf();
     let window = bundle.project.gui.window.clone();
 
@@ -143,9 +178,13 @@ fn run_gui(bundle: Bundle, device: DevicePref, updates: bool) -> anyhow::Result<
     result.map_err(|e| anyhow::anyhow!("창을 열지 못했습니다: {e}"))
 }
 
-fn run_headless(bundle: Bundle, device: DevicePref, run_for: Option<Duration>, updates: bool) -> anyhow::Result<()> {
-    let work = WorkDir::create()?;
-    app::prepare_workspace(&bundle, work.path())?;
+fn run_headless(
+    bundle: Bundle,
+    device: DevicePref,
+    run_for: Option<Duration>,
+    updates: bool,
+    work: WorkDir,
+) -> anyhow::Result<()> {
     let Some(pipeline) = app::entry_pipeline(&bundle.project, &bundle.manifest) else {
         anyhow::bail!("실행할 파이프라인이 없습니다 (매니페스트의 entry_pipeline 확인)");
     };

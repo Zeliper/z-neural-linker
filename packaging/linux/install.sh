@@ -85,12 +85,18 @@ if [[ "$MODE" == service ]]; then
   command -v systemctl >/dev/null || { echo "systemctl 이 없어 서비스를 등록할 수 없습니다"; exit 1; }
 
   APP_ABS="$(cd "$(dirname "$SERVICE_APP")" && pwd)/$(basename "$SERVICE_APP")"
+  APP_NAME="$(basename "$SERVICE_APP")"
+  # 번들을 풀어 둘 고정 작업 폴더. 앱마다 나눠 두 앱이 서로의 폴더를 덮지 않게 한다.
+  WORK_DIR="$HOME/.local/share/neural-linker/$APP_NAME"
   mkdir -p "$UNIT_DIR" "$ENV_DIR"
   # 유닛의 ReadWritePaths 가 가리키는 곳. 없어도 뜨긴 하지만(`-` 접두사) 앱이 쓸 자리는 있어야 한다.
-  mkdir -p "$HOME/.local/share/neural-linker" "$HOME/.cache/neural-linker"
+  mkdir -p "$WORK_DIR" "$HOME/.cache/neural-linker"
+  chmod 700 "$WORK_DIR"
+  # 사용자가 인증서 같은 것을 두는 자리. 번들을 갱신해도 앱이 건드리지 않는다.
+  mkdir -p "$WORK_DIR/local"
 
   # 유닛의 자리표시자를 실제 경로로 바꾼다. %h 는 systemd 가 풀어 주므로 그대로 둔다.
-  sed "s|^ExecStart=.*|ExecStart=$APP_ABS --headless --device cpu|" \
+  sed "s|^ExecStart=.*|ExecStart=$APP_ABS --headless --device cpu --work-dir $WORK_DIR|" \
       "$HERE/neural-linker-app.service" > "$UNIT_DIR/$UNIT_NAME"
   chmod 644 "$UNIT_DIR/$UNIT_NAME"
 
@@ -109,5 +115,7 @@ if [[ "$MODE" == service ]]; then
   echo "  상태  systemctl --user status ${UNIT_NAME%.service}"
   echo "  로그  journalctl --user -u ${UNIT_NAME%.service} -f"
   echo "  토큰  $ENV_DIR/app.env 에 NL_HTTP_TOKEN=... 을 적고 systemctl --user restart ${UNIT_NAME%.service}"
+  echo "  작업  $WORK_DIR (번들이 풀리는 곳)"
+  echo "  파일  $WORK_DIR/local (인증서 등 — 번들을 갱신해도 남습니다. 예: cert_pem \"local/server.crt\")"
   echo "로그아웃 뒤에도 돌게 하려면: loginctl enable-linger $USER"
 fi

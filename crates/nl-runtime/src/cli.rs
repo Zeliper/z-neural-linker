@@ -14,14 +14,21 @@ pub const USAGE: &str = "\
   --device <장치>       cpu | gpu:<번호> | auto (기본값은 번들 설정).
   --no-update           시작할 때 새 버전을 확인하지 않습니다.
                         (매니페스트 주소는 NL_UPDATE_URL 환경 변수로 덮어쓸 수 있습니다.)
+  --work-dir <경로>     번들을 이 폴더에 풀고 그대로 둡니다 (기본은 끝나면 지워지는 임시 폴더).
+                        서비스로 상시 운영할 때 씁니다 — 경로가 매번 바뀌지 않아 인증서 같은
+                        파일을 <경로>/local/ 에 두고 참조할 수 있습니다.
   --version, -V         버전을 출력합니다.
   --help, -h            이 도움말을 출력합니다.
 
 환경 변수
+  NL_WORK_DIR           --work-dir 과 같습니다 (명령줄 인자가 우선).
   NL_HTTP_TOKEN         파이프라인의 HTTP 서버 노드가 요구할 토큰을 덮어씁니다.
   NL_HTTP_TOKEN_<포트>  그 포트의 서버에만 적용합니다 (NL_HTTP_TOKEN 보다 우선).
                         번들에 박힌 토큰은 받은 사람이 모두 볼 수 있으므로, 서버로 돌릴 때는
                         실행 환경에서 새 토큰을 주는 편이 안전합니다.";
+
+/// 작업 폴더를 정하는 환경 변수. `--work-dir` 이 우선한다.
+pub const WORK_DIR_ENV: &str = "NL_WORK_DIR";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
@@ -34,6 +41,8 @@ pub struct Options {
     pub device: Option<DevicePref>,
     /// 시작할 때 업데이트를 확인하지 않는다.
     pub no_update: bool,
+    /// 번들을 풀 폴더. 없으면 끝나면 지워지는 임시 폴더를 쓴다.
+    pub work_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +63,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Command {
             "--help" | "-h" => return Command::Help,
             "--headless" => opts.headless = true,
             "--no-update" => opts.no_update = true,
+            "--work-dir" => {
+                let Some(v) = it.next() else {
+                    return Command::Error("--work-dir 뒤에 폴더 경로가 없습니다".into());
+                };
+                if v.is_empty() {
+                    return Command::Error("--work-dir 경로가 비어 있습니다".into());
+                }
+                opts.work_dir = Some(PathBuf::from(v));
+            }
             "--run-for" => {
                 let Some(v) = it.next() else {
                     return Command::Error("--run-for 뒤에 초 단위 숫자가 없습니다".into());
@@ -90,6 +108,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Command {
             }
         }
     }
+    // 명령줄이 없을 때만 환경 변수를 본다. 서비스 유닛은 `Environment=` 로 주는 편이 편하다.
+    if opts.work_dir.is_none() {
+        if let Some(v) = std::env::var_os(WORK_DIR_ENV).filter(|v| !v.is_empty()) {
+            opts.work_dir = Some(PathBuf::from(v));
+        }
+    }
     Command::Run(opts)
 }
 
@@ -120,6 +144,46 @@ mod tests {
         assert_eq!(parse_str(&["a.nlapp", "--version"]), Command::Version);
         assert_eq!(parse_str(&["-V"]), Command::Version);
         assert_eq!(parse_str(&["--help"]), Command::Help);
+    }
+
+    /// `--work-dir` 과 `NL_WORK_DIR`. 환경 변수는 프로세스 전역이라 한 시험으로 묶는다.
+    #[test]
+    fn work_dir_comes_from_the_flag_or_the_env() {
+        let Command::Run(o) = parse_str(&["--work-dir", "/srv/앱"]) else {
+            panic!("Run 이어야 합니다")
+        };
+        assert_eq!(o.work_dir, Some(PathBuf::from("/srv/앱")));
+
+        // 값이 없거나 비면 오류다 — 조용히 임시 폴더로 돌아가면 서비스가 엉뚱한 곳을 쓴다.
+        assert!(matches!(parse_str(&["--work-dir"]), Command::Error(_)));
+        assert!(matches!(parse_str(&["--work-dir", ""]), Command::Error(_)));
+
+        // 주지 않으면 비어 있다(= 임시 폴더).
+        let Command::Run(o) = parse_str(&["--headless"]) else {
+            panic!("Run 이어야 합니다")
+        };
+        assert!(o.work_dir.is_none());
+
+        // 환경 변수로도 정해진다.
+        std::env::set_var(WORK_DIR_ENV, "/var/lib/앱");
+        let Command::Run(o) = parse_str(&[]) else {
+            panic!("Run 이어야 합니다")
+        };
+        assert_eq!(o.work_dir, Some(PathBuf::from("/var/lib/앱")));
+
+        // 명령줄이 이긴다.
+        let Command::Run(o) = parse_str(&["--work-dir", "/from/flag"]) else {
+            panic!("Run 이어야 합니다")
+        };
+        assert_eq!(o.work_dir, Some(PathBuf::from("/from/flag")));
+
+        // 빈 환경 변수는 없는 것으로 본다.
+        std::env::set_var(WORK_DIR_ENV, "");
+        let Command::Run(o) = parse_str(&[]) else {
+            panic!("Run 이어야 합니다")
+        };
+        assert!(o.work_dir.is_none());
+        std::env::remove_var(WORK_DIR_ENV);
     }
 
     #[test]
