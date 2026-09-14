@@ -49,7 +49,9 @@ pub fn png_bytes_to_ico(png: &[u8]) -> anyhow::Result<Vec<u8>> {
     }
 
     let mut out = Vec::new();
-    IcoEncoder::new(&mut out).encode_images(&frames).context("ico 로 묶지 못했습니다")?;
+    IcoEncoder::new(&mut out)
+        .encode_images(&frames)
+        .context("ico 로 묶지 못했습니다")?;
     Ok(out)
 }
 
@@ -97,7 +99,9 @@ pub(crate) fn sample_png(w: u32, h: u32) -> Vec<u8> {
         *px = image::Rgba([(x * 7 % 256) as u8, (y * 11 % 256) as u8, 200, 255]);
     }
     let mut out = Vec::new();
-    PngEncoder::new(&mut out).write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8).expect("png 인코딩");
+    PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8)
+        .expect("png 인코딩");
     out
 }
 

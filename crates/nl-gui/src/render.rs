@@ -61,12 +61,14 @@ impl GuiState {
 pub fn render_layout(ui: &mut egui::Ui, layout: &GuiLayout, state: &mut GuiState, mode: RenderMode) -> Vec<GuiEvent> {
     let full = ui.max_rect();
     let order = draw_order(layout);
-    let rects: BTreeMap<WidgetId, Rect> =
-        order.iter().map(|w| (w.id, window_rect(layout, w).translate(full.min.to_vec2()))).collect();
+    let rects: BTreeMap<WidgetId, Rect> = order
+        .iter()
+        .map(|w| (w.id, window_rect(layout, w).translate(full.min.to_vec2())))
+        .collect();
 
     // Design 모드: 빈 곳 클릭을 잡을 바닥 레이어를 위젯보다 먼저 등록한다 (나중에 등록한 쪽이 위에 온다).
-    let background = (mode == RenderMode::Design)
-        .then(|| ui.interact(full, ui.id().with("nl_gui_design_bg"), Sense::click()));
+    let background =
+        (mode == RenderMode::Design).then(|| ui.interact(full, ui.id().with("nl_gui_design_bg"), Sense::click()));
 
     // 위젯 그리기. Design 모드에서는 위젯 자체 상호작용을 끈다.
     let mut builder = UiBuilder::new().max_rect(full).id_salt("nl_gui_widgets");
@@ -76,7 +78,9 @@ pub fn render_layout(ui: &mut egui::Ui, layout: &GuiLayout, state: &mut GuiState
     let drawn = ui.scope_builder(builder, |ui| {
         let mut evs = Vec::new();
         for w in &order {
-            let Some(rect) = rects.get(&w.id).copied() else { continue };
+            let Some(rect) = rects.get(&w.id).copied() else {
+                continue;
+            };
             draw_widget(ui, w, rect, state, &mut evs);
         }
         evs
@@ -93,7 +97,12 @@ pub fn render_layout(ui: &mut egui::Ui, layout: &GuiLayout, state: &mut GuiState
 /// 그리기 순서: 중첩 깊이 → z → id. 깊이를 먼저 보므로 그룹 배경이 항상 자식보다 아래에 깔린다.
 fn draw_order(layout: &GuiLayout) -> Vec<&Widget> {
     let mut v = layout.ordered();
-    v.sort_by(|a, b| depth(layout, a).cmp(&depth(layout, b)).then(a.z.cmp(&b.z)).then(a.id.cmp(&b.id)));
+    v.sort_by(|a, b| {
+        depth(layout, a)
+            .cmp(&depth(layout, b))
+            .then(a.z.cmp(&b.z))
+            .then(a.id.cmp(&b.id))
+    });
     v
 }
 
@@ -171,7 +180,10 @@ fn draw_widget(ui: &mut egui::Ui, w: &Widget, rect: Rect, state: &mut GuiState, 
         WidgetKind::Plot { max_points } => draw_plot(ui, w.id, rect, state, *max_points),
         WidgetKind::Value { prefix } => {
             let text = format!("{prefix}{}", format_value(state.values.get(&w.id)));
-            ui.put(rect, egui::Label::new(egui::RichText::new(text).size(20.0).strong()).selectable(false));
+            ui.put(
+                rect,
+                egui::Label::new(egui::RichText::new(text).size(20.0).strong()).selectable(false),
+            );
         }
         WidgetKind::Group { title } => {
             let visuals = ui.visuals().clone();
@@ -210,7 +222,8 @@ fn draw_image(ui: &mut egui::Ui, id: WidgetId, rect: Rect, state: &mut GuiState)
                     tex.set(img, egui::TextureOptions::LINEAR);
                 } else {
                     let tex =
-                        ui.ctx().load_texture(format!("nl-gui-{}", id.short()), img, egui::TextureOptions::LINEAR);
+                        ui.ctx()
+                            .load_texture(format!("nl-gui-{}", id.short()), img, egui::TextureOptions::LINEAR);
                     state.textures.insert(id, tex);
                 }
                 ui.ctx().data_mut(|d| d.insert_temp(fp_id, fp));
@@ -278,7 +291,13 @@ fn placeholder(ui: &egui::Ui, rect: Rect, text: &str) {
         Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
         StrokeKind::Inside,
     );
-    painter.text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(12.0), visuals.weak_text_color());
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        FontId::proportional(12.0),
+        visuals.weak_text_color(),
+    );
 }
 
 /// `Value` 를 위젯에 보여 줄 짧은 문자열로. 숫자는 소수 3자리, 벡터는 앞 8개.
@@ -332,7 +351,9 @@ fn design_overlay(
     let mut hit_widget = false;
 
     for w in order {
-        let Some(rect) = rects.get(&w.id).copied() else { continue };
+        let Some(rect) = rects.get(&w.id).copied() else {
+            continue;
+        };
         let resp = ui.interact(rect, ui.id().with(("nl_gui_design", w.id)), Sense::click_and_drag());
 
         if resp.hovered() {
@@ -348,7 +369,12 @@ fn design_overlay(
             hit_widget = true;
             let press = resp.interact_pointer_pos().unwrap_or(rect.center());
             state.selected = Some(w.id);
-            drag = Some(Drag { widget: w.id, zone: zone_at(rect, press), orig: w.rect, accum: Vec2::ZERO });
+            drag = Some(Drag {
+                widget: w.id,
+                zone: zone_at(rect, press),
+                orig: w.rect,
+                accum: Vec2::ZERO,
+            });
         }
         let dragging_this = drag.is_some_and(|d| d.widget == w.id);
         if dragging_this && resp.dragged() {
@@ -385,9 +411,20 @@ fn design_overlay(
         if let Some(rect) = rects.get(&sel).copied() {
             let accent = ui.visuals().selection.bg_fill;
             let painter = ui.painter();
-            painter.rect_stroke(rect, CornerRadius::same(2), Stroke::new(2.0, accent), StrokeKind::Outside);
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(2),
+                Stroke::new(2.0, accent),
+                StrokeKind::Outside,
+            );
             for corner in handle_rects(rect) {
-                painter.rect(corner, CornerRadius::ZERO, Color32::WHITE, Stroke::new(1.0, accent), StrokeKind::Inside);
+                painter.rect(
+                    corner,
+                    CornerRadius::ZERO,
+                    Color32::WHITE,
+                    Stroke::new(1.0, accent),
+                    StrokeKind::Inside,
+                );
             }
         }
     }
@@ -490,7 +527,10 @@ mod tests {
 
     fn layout_with_group() -> GuiLayout {
         let mut l = GuiLayout::default();
-        let g = l.add(Widget::new(WidgetKind::Group { title: "그룹".into() }, [10.0, 20.0, 200.0, 100.0]));
+        let g = l.add(Widget::new(
+            WidgetKind::Group { title: "그룹".into() },
+            [10.0, 20.0, 200.0, 100.0],
+        ));
         let mut child = Widget::new(WidgetKind::Label { text: "안".into() }, [5.0, 6.0, 50.0, 20.0]);
         child.parent = Some(g);
         l.add(child);
@@ -510,7 +550,10 @@ mod tests {
     fn groups_are_drawn_before_their_children() {
         let l = layout_with_group();
         let order = draw_order(&l);
-        let gi = order.iter().position(|w| matches!(w.kind, WidgetKind::Group { .. })).unwrap();
+        let gi = order
+            .iter()
+            .position(|w| matches!(w.kind, WidgetKind::Group { .. }))
+            .unwrap();
         let ci = order.iter().position(|w| w.parent.is_some()).unwrap();
         assert!(gi < ci, "그룹이 자식보다 먼저 그려져야 합니다");
     }

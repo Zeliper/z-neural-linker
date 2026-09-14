@@ -26,7 +26,10 @@ fn demo_zip_with(arm_input: bool) -> Vec<u8> {
 
     let mut gui = GuiLayout::default();
     gui.window.title = "스모크 앱".into();
-    gui.add(Widget::new(WidgetKind::Label { text: "안녕".into() }, [10.0, 10.0, 100.0, 20.0]));
+    gui.add(Widget::new(
+        WidgetKind::Label { text: "안녕".into() },
+        [10.0, 10.0, 100.0, 20.0],
+    ));
     project.gui = gui;
 
     let mut manifest = BundleManifest::new("스모크 앱", "9.9.9");
@@ -66,9 +69,22 @@ fn headless_runs_a_nlapp_file() {
     let file = dir.path().join("스모크.nlapp");
     std::fs::write(&file, demo_zip()).unwrap();
 
-    let out = Command::new(EXE).arg("--headless").arg("--run-for").arg("1").arg("--device").arg("cpu").arg(&file).output().unwrap();
+    let out = Command::new(EXE)
+        .arg("--headless")
+        .arg("--run-for")
+        .arg("1")
+        .arg("--device")
+        .arg("cpu")
+        .arg(&file)
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "종료 코드 {:?}\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "종료 코드 {:?}\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");
     assert!(stdout.contains("스모크 파이프라인"), "{stdout}");
 }
@@ -81,9 +97,19 @@ fn attached_bundle_runs_without_arguments() {
     let out_exe = dir.path().join("스모크앱");
     nl_bundle::attach(std::path::Path::new(EXE), &demo_zip(), &out_exe).unwrap();
 
-    let out = Command::new(&out_exe).arg("--headless").arg("--run-for").arg("1").output().unwrap();
+    let out = Command::new(&out_exe)
+        .arg("--headless")
+        .arg("--run-for")
+        .arg("1")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "종료 코드 {:?}\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "종료 코드 {:?}\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");
 }
 
@@ -103,7 +129,10 @@ fn a_bundle_without_arm_input_never_says_it_is_armed() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("스모크 앱 9.9.9"), "{stdout}");
-    assert!(!stdout.contains("무장"), "무장하지 않았는데 무장 문구가 있다:\n{stdout}");
+    assert!(
+        !stdout.contains("무장"),
+        "무장하지 않았는데 무장 문구가 있다:\n{stdout}"
+    );
     assert!(!stdout.contains(ARM_NOTICE_PHRASE), "{stdout}");
 }
 

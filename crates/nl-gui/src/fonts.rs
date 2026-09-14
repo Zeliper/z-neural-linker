@@ -19,7 +19,8 @@ pub fn font_definitions() -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     for path in CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
-            defs.font_data.insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
+            defs.font_data
+                .insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
             for fam in [FontFamily::Proportional, FontFamily::Monospace] {
                 defs.families.entry(fam).or_default().push("cjk".into());
             }

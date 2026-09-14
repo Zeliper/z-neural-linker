@@ -16,13 +16,31 @@ fn full_layout() -> (GuiLayout, WidgetId) {
     }
 
     let mut l = GuiLayout::default();
-    let group = l.add(w(1, WidgetKind::Group { title: "설정".into() }, [10.0, 10.0, 260.0, 120.0]));
+    let group = l.add(w(
+        1,
+        WidgetKind::Group { title: "설정".into() },
+        [10.0, 10.0, 260.0, 120.0],
+    ));
 
-    let mut label = w(2, WidgetKind::Label { text: "라벨 텍스트".into() }, [10.0, 24.0, 120.0, 20.0]);
+    let mut label = w(
+        2,
+        WidgetKind::Label {
+            text: "라벨 텍스트".into(),
+        },
+        [10.0, 24.0, 120.0, 20.0],
+    );
     label.parent = Some(group);
     l.add(label);
 
-    let mut slider = w(3, WidgetKind::Slider { min: 0.0, max: 10.0, value: 3.0 }, [10.0, 52.0, 220.0, 22.0]);
+    let mut slider = w(
+        3,
+        WidgetKind::Slider {
+            min: 0.0,
+            max: 10.0,
+            value: 3.0,
+        },
+        [10.0, 52.0, 220.0, 22.0],
+    );
     slider.parent = Some(group);
     l.add(slider);
 
@@ -30,14 +48,30 @@ fn full_layout() -> (GuiLayout, WidgetId) {
     toggle.parent = Some(group);
     l.add(toggle);
 
-    let mut button = w(5, WidgetKind::Button { text: "시작".into() }, [300.0, 10.0, 100.0, 30.0]);
-    button.binding = Some(Binding::Action { action: BuiltinAction::StartPipeline });
+    let mut button = w(
+        5,
+        WidgetKind::Button { text: "시작".into() },
+        [300.0, 10.0, 100.0, 30.0],
+    );
+    button.binding = Some(Binding::Action {
+        action: BuiltinAction::StartPipeline,
+    });
     let button_id = l.add(button);
 
-    l.add(w(6, WidgetKind::TextInput { hint: "이름".into() }, [300.0, 50.0, 160.0, 24.0]));
+    l.add(w(
+        6,
+        WidgetKind::TextInput { hint: "이름".into() },
+        [300.0, 50.0, 160.0, 24.0],
+    ));
     l.add(w(7, WidgetKind::Image, [10.0, 150.0, 120.0, 90.0]));
     l.add(w(8, WidgetKind::Plot { max_points: 50 }, [150.0, 150.0, 200.0, 90.0]));
-    l.add(w(9, WidgetKind::Value { prefix: "결과: ".into() }, [370.0, 150.0, 180.0, 30.0]));
+    l.add(w(
+        9,
+        WidgetKind::Value {
+            prefix: "결과: ".into(),
+        },
+        [370.0, 150.0, 180.0, 30.0],
+    ));
 
     (l, button_id)
 }
@@ -58,7 +92,14 @@ impl Fixture {
         for w in layout.widgets.values() {
             match w.kind {
                 WidgetKind::Image => {
-                    state.values.insert(w.id, Value::Image { width: 4, height: 3, rgba: vec![128; 4 * 3 * 4] });
+                    state.values.insert(
+                        w.id,
+                        Value::Image {
+                            width: 4,
+                            height: 3,
+                            rgba: vec![128; 4 * 3 * 4],
+                        },
+                    );
                 }
                 WidgetKind::Plot { .. } => {
                     for i in 0..20 {
@@ -71,7 +112,13 @@ impl Fixture {
                 _ => {}
             }
         }
-        Self { layout, state, mode, events: Vec::new(), origin: egui::Pos2::ZERO }
+        Self {
+            layout,
+            state,
+            mode,
+            events: Vec::new(),
+            origin: egui::Pos2::ZERO,
+        }
     }
 }
 
@@ -102,7 +149,11 @@ fn all_widget_kinds_render_in_both_modes() {
         assert_eq!(f.layout.widgets.len(), 9, "위젯 9개가 모두 있어야 합니다");
         // Run 모드에서는 상호작용 없이 이벤트가 나오지 않아야 한다.
         if mode == RenderMode::Run {
-            assert!(f.events.iter().all(|e| matches!(e, GuiEvent::Changed(..))), "예상 밖 이벤트: {:?}", f.events);
+            assert!(
+                f.events.iter().all(|e| matches!(e, GuiEvent::Changed(..))),
+                "예상 밖 이벤트: {:?}",
+                f.events
+            );
         }
     }
 }
@@ -115,7 +166,11 @@ fn design_click_selects_widget() {
     let mut h = harness(RenderMode::Design);
     h.run_steps(2);
     let origin = h.state().origin;
-    let pos = origin + egui::vec2(button_rect[0] + button_rect[2] / 2.0, button_rect[1] + button_rect[3] / 2.0);
+    let pos = origin
+        + egui::vec2(
+            button_rect[0] + button_rect[2] / 2.0,
+            button_rect[1] + button_rect[3] / 2.0,
+        );
 
     h.event(egui::Event::PointerMoved(pos));
     h.step();
@@ -165,7 +220,11 @@ fn design_click_on_empty_space_clears_selection() {
     }
 
     let f = h.state();
-    assert!(f.events.contains(&GuiEvent::Selected(None)), "빈 곳 클릭 이벤트가 없습니다: {:?}", f.events);
+    assert!(
+        f.events.contains(&GuiEvent::Selected(None)),
+        "빈 곳 클릭 이벤트가 없습니다: {:?}",
+        f.events
+    );
     assert_eq!(f.state.selected, None);
 }
 
@@ -177,7 +236,11 @@ fn run_mode_button_click_emits_clicked() {
     let mut h = harness(RenderMode::Run);
     h.run_steps(2);
     let origin = h.state().origin;
-    let pos = origin + egui::vec2(button_rect[0] + button_rect[2] / 2.0, button_rect[1] + button_rect[3] / 2.0);
+    let pos = origin
+        + egui::vec2(
+            button_rect[0] + button_rect[2] / 2.0,
+            button_rect[1] + button_rect[3] / 2.0,
+        );
 
     h.event(egui::Event::PointerMoved(pos));
     h.step();
@@ -192,5 +255,9 @@ fn run_mode_button_click_emits_clicked() {
     }
 
     let f = h.state();
-    assert!(f.events.contains(&GuiEvent::Clicked(button_id)), "버튼 클릭 이벤트가 없습니다: {:?}", f.events);
+    assert!(
+        f.events.contains(&GuiEvent::Clicked(button_id)),
+        "버튼 클릭 이벤트가 없습니다: {:?}",
+        f.events
+    );
 }

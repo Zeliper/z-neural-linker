@@ -12,18 +12,20 @@ use std::path::{Path, PathBuf};
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 5 {
-        eprintln!(
-            "사용법: nl-installer <app.exe> <앱 이름> <버전> <배포자> <출력 폴더> [아이콘.png]"
-        );
+        eprintln!("사용법: nl-installer <app.exe> <앱 이름> <버전> <배포자> <출력 폴더> [아이콘.png]");
         return std::process::ExitCode::from(2);
     }
-    let (exe, name, version, publisher, out) =
-        (Path::new(&args[0]), &args[1], &args[2], &args[3], Path::new(&args[4]));
+    let (exe, name, version, publisher, out) = (Path::new(&args[0]), &args[1], &args[2], &args[3], Path::new(&args[4]));
     let icon = args.get(5).map(PathBuf::from);
 
     match nl_bundle::windows_installer(exe, name, version, publisher, out, icon.as_deref()) {
         Ok(Some(a)) => {
-            println!("설치 프로그램: {} ({} 바이트, sha256 {})", a.path.display(), a.size, a.sha256);
+            println!(
+                "설치 프로그램: {} ({} 바이트, sha256 {})",
+                a.path.display(),
+                a.size,
+                a.sha256
+            );
             std::process::ExitCode::SUCCESS
         }
         Ok(None) => {

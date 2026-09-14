@@ -68,25 +68,63 @@ fn layout() -> GuiLayout {
     }
 
     let mut l = GuiLayout::default();
-    let group = l.add(w(1, WidgetKind::Group { title: "Settings".into() }, [12.0, 12.0, 260.0, 122.0]));
+    let group = l.add(w(
+        1,
+        WidgetKind::Group {
+            title: "Settings".into(),
+        },
+        [12.0, 12.0, 260.0, 122.0],
+    ));
 
-    let mut label = w(2, WidgetKind::Label { text: "Threshold".into() }, [12.0, 26.0, 120.0, 20.0]);
+    let mut label = w(
+        2,
+        WidgetKind::Label {
+            text: "Threshold".into(),
+        },
+        [12.0, 26.0, 120.0, 20.0],
+    );
     label.parent = Some(group);
     l.add(label);
 
-    let mut slider = w(3, WidgetKind::Slider { min: 0.0, max: 10.0, value: 3.0 }, [12.0, 54.0, 220.0, 22.0]);
+    let mut slider = w(
+        3,
+        WidgetKind::Slider {
+            min: 0.0,
+            max: 10.0,
+            value: 3.0,
+        },
+        [12.0, 54.0, 220.0, 22.0],
+    );
     slider.parent = Some(group);
     l.add(slider);
 
-    let mut toggle = w(4, WidgetKind::Toggle { text: "Enabled".into() }, [12.0, 86.0, 120.0, 22.0]);
+    let mut toggle = w(
+        4,
+        WidgetKind::Toggle { text: "Enabled".into() },
+        [12.0, 86.0, 120.0, 22.0],
+    );
     toggle.parent = Some(group);
     l.add(toggle);
 
-    l.add(w(5, WidgetKind::Button { text: "Start".into() }, [300.0, 14.0, 110.0, 32.0]));
-    l.add(w(6, WidgetKind::TextInput { hint: "name".into() }, [300.0, 56.0, 180.0, 24.0]));
+    l.add(w(
+        5,
+        WidgetKind::Button { text: "Start".into() },
+        [300.0, 14.0, 110.0, 32.0],
+    ));
+    l.add(w(
+        6,
+        WidgetKind::TextInput { hint: "name".into() },
+        [300.0, 56.0, 180.0, 24.0],
+    ));
     l.add(w(7, WidgetKind::Image, [12.0, 152.0, 130.0, 100.0]));
     l.add(w(8, WidgetKind::Plot { max_points: 60 }, [160.0, 152.0, 230.0, 100.0]));
-    l.add(w(9, WidgetKind::Value { prefix: "Result: ".into() }, [410.0, 152.0, 190.0, 34.0]));
+    l.add(w(
+        9,
+        WidgetKind::Value {
+            prefix: "Result: ".into(),
+        },
+        [410.0, 152.0, 190.0, 34.0],
+    ));
     l
 }
 
@@ -119,7 +157,11 @@ fn checkerboard(side: u32) -> Value {
             rgba.extend_from_slice(&[c, c, u8::try_from(x * 16).unwrap_or(255), 255]);
         }
     }
-    Value::Image { width: side, height: side, rgba }
+    Value::Image {
+        width: side,
+        height: side,
+        rgba,
+    }
 }
 
 struct Fixture {
@@ -137,7 +179,11 @@ fn harness(mode: RenderMode, state: GuiState) -> Harness<'static, Fixture> {
             |ui, f: &mut Fixture| {
                 render_layout(ui, &f.layout, &mut f.state, f.mode);
             },
-            Fixture { layout: layout(), state, mode },
+            Fixture {
+                layout: layout(),
+                state,
+                mode,
+            },
         )
 }
 

@@ -131,7 +131,9 @@ mod tests {
         assert_eq!(o.device, Some(DevicePref::Gpu { index: 2 }));
         assert_eq!(o.bundle_path, Some(PathBuf::from("앱.nlapp")));
 
-        let Command::Run(o) = parse_str(&["--device=cpu"]) else { panic!("Run 이어야 합니다") };
+        let Command::Run(o) = parse_str(&["--device=cpu"]) else {
+            panic!("Run 이어야 합니다")
+        };
         assert_eq!(o.device, Some(DevicePref::Cpu));
         assert!(o.bundle_path.is_none());
         assert!(!o.headless);
@@ -139,7 +141,9 @@ mod tests {
 
     #[test]
     fn no_update_turns_off_the_check() {
-        let Command::Run(o) = parse_str(&["--no-update"]) else { panic!("Run 이어야 합니다") };
+        let Command::Run(o) = parse_str(&["--no-update"]) else {
+            panic!("Run 이어야 합니다")
+        };
         assert!(o.no_update);
         assert!(!o.headless, "다른 옵션과 섞이지 않는다");
 
@@ -150,7 +154,9 @@ mod tests {
         assert!(o.headless);
         assert_eq!(o.bundle_path, Some(PathBuf::from("앱.nlapp")));
 
-        let Command::Run(o) = parse_str(&[]) else { panic!("Run 이어야 합니다") };
+        let Command::Run(o) = parse_str(&[]) else {
+            panic!("Run 이어야 합니다")
+        };
         assert!(!o.no_update, "기본은 확인한다");
     }
 
