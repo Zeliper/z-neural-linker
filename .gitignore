@@ -1,5 +1,7 @@
 /target
 /dist
+# release-local.sh 의 기본 출력 폴더
+/dist-local
 *.nlproj
 *.nlapp
 # OMC 세션 상태·계획 기록 (운영 산출물)

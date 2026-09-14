@@ -207,7 +207,10 @@ pub fn find_attached(exe: &[u8]) -> Option<std::ops::Range<usize>> {
         return None;
     }
     let len_bytes: [u8; 8] = exe[exe.len() - 14..exe.len() - 6].try_into().ok()?;
-    let len = u64::from_le_bytes(len_bytes) as usize;
+    // 꼬리표의 길이는 공격자가 적는 u64 다. `as usize` 로 자르면 32비트에서 값이 접혀
+    // 터무니없이 큰 길이가 작은 값으로 둔갑한다 — `nl_bundle` 쪽 u64 구현과도 어긋난다.
+    // 들어가지 않으면 첨부가 없는 것으로 본다.
+    let len = usize::try_from(u64::from_le_bytes(len_bytes)).ok()?;
     let end = exe.len() - 14;
     if len > end {
         return None;
@@ -218,6 +221,34 @@ pub fn find_attached(exe: &[u8]) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L14: 꼬리표의 u64 길이가 `usize` 에 들어가지 않으면 잘라 쓰지 않고 거절한다.
+    #[test]
+    fn an_oversized_trailer_length_is_refused_not_truncated() {
+        let body = b"bundle bytes";
+        let mut exe = b"MZ fake exe".to_vec();
+        exe.extend_from_slice(body);
+        exe.extend_from_slice(&trailer(body.len() as u64));
+        let found = find_attached(&exe).expect("정상 꼬리표는 찾아야 합니다");
+        assert_eq!(&exe[found], body);
+
+        // 길이만 u64::MAX 로 바꾼다. 하위 32비트가 0xFFFF_FFFF 라 절단하면 여전히 거대하지만,
+        // 값에 따라서는 작은 수로 접혀 엉뚱한 범위를 내줄 수 있다.
+        let mut forged = exe.clone();
+        let n = forged.len();
+        forged[n - 14..n - 6].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(find_attached(&forged).is_none(), "말도 안 되는 길이는 거절해야 합니다");
+
+        // 2^32 는 32비트에서 `as usize` 로 자르면 정확히 0 이 된다 — 빈 번들로 둔갑하던 값이다.
+        let mut folded = exe.clone();
+        folded[n - 14..n - 6].copy_from_slice(&(1u64 << 32).to_le_bytes());
+        assert!(find_attached(&folded).is_none(), "파일보다 긴 길이는 거절해야 합니다");
+
+        // 파일 길이를 넘는 평범한 값도 거절한다.
+        let mut too_long = exe.clone();
+        too_long[n - 14..n - 6].copy_from_slice(&(n as u64).to_le_bytes());
+        assert!(find_attached(&too_long).is_none());
+    }
 
     #[test]
     fn arm_input_defaults_to_off_and_round_trips() {
