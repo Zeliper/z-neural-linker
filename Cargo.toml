@@ -117,6 +117,10 @@ overflow-checks = true
 [profile.release.package.nl-cli]
 overflow-checks = true
 
+# 디버그 빌드에서 순환 레이어 시각 루프가 opt-level 0 이면 19배 느리다 — 로컬 크레이트도 최적화
+[profile.dev.package.nl-engine]
+opt-level = 2
+
 # 디버그 빌드에서도 텐서 연산은 최적화 (학습 루프가 못 참을 만큼 느려지지 않게)
 [profile.dev.package."*"]
 opt-level = 2
