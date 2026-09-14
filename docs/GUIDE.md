@@ -504,6 +504,8 @@ curl -d '"data:image/png;base64,iVBORw0KGgo…"' http://127.0.0.1:8787/infer
 
 프로젝트 파일의 `HTTP 서버` 소스에 `tls` 를 적습니다. 두 값 모두 **PEM 파일의 경로**이고,
 프로젝트 폴더 기준 상대 경로입니다. 그 폴더 밖은 실행기가 열어 주지 않습니다.
+명령줄에서는 파일을 고치지 않고 `nl run --tls-cert/--tls-key` 로 붙일 수도 있습니다
+(아래 [명령줄 `nl`](#명령줄-nl) 참고). 인증서는 `nl tls-cert` 로 만듭니다.
 
 ```json
 "tls": { "cert_pem": "certs/server.crt", "key_pem": "certs/server.key" }
@@ -523,6 +525,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
 - **토큰 규칙은 그대로입니다.** TLS 는 도청과 중간자를 막을 뿐, 누가 부를 수 있는지는 정하지
   않습니다. 바깥 주소에 토큰 없이 여는 것은 TLS 가 있어도 거부합니다.
 - 인증서나 키가 잘못되면 **포트를 열기 전에** 오류를 냅니다. 반쯤 열린 서버가 생기지 않습니다.
+- 찾는 자리는 둘입니다. 프로젝트 폴더(배포판에서는 번들을 푼 작업 폴더), 그다음 **실행 파일이 있는
+  폴더**입니다. 번들에는 인증서를 담지 않으므로 배포판은 실행 파일 옆에서 찾습니다.
 - TLS 포트에 평문으로 말을 걸면 응답 없이 끊깁니다. `curl` 은 `https://` 로 부르세요.
 
 ```sh
@@ -694,6 +698,7 @@ nl infer p.nlproj --model XOR --csv rows.csv            # 행마다 한 번씩
 nl run p.nlproj                              # 파이프라인을 헤드리스로
 nl run p.nlproj --pipeline "XOR 시험" --for 10 --device cpu
 nl run p.nlproj --arm-input                  # 마우스·키보드 싱크를 무장 (실제 입력이 나간다)
+nl run p.nlproj --tls-cert certs/server.crt --tls-key certs/server.key   # HTTP 서버 노드를 https 로
 
 nl record out/ --monitor 0 --fps 4 --for 30            # 화면을 찍어 학습용 폴더로
 nl record out/ --x 100 --y 100 --width 800 --height 600 --label-keys "0,1,2"
@@ -702,6 +707,10 @@ nl build p.nlproj --target host --out dist              # linux | windows | all 
 nl build p.nlproj --target all --name "내 앱" --version 1.0.0 \
    --pipeline "XOR 시험" --icon icon.png --publisher "Trust A&C"
 nl build p.nlproj --arm-input                # 배포 앱이 마우스·키보드를 실제로 조작하도록 허용 (기본 금지)
+nl build p.nlproj --tls-cert certs/server.crt --tls-key certs/server.key # 경로만 담는다 (인증서 파일은 번들에 안 들어간다)
+
+nl tls-cert .                                # certs/ 에 자체 서명 인증서·키 (키는 0600)
+nl tls-cert . --hosts "localhost,127.0.0.1,api.example.com" --days 30
 
 nl sample --list                             # 만들 수 있는 샘플 목록
 nl sample new.nlproj                         # XOR 샘플 (기본)
@@ -711,6 +720,39 @@ nl sample cnn.nlproj --kind cnn              # 사분면 CNN 샘플 (이미지 �
 샘플은 빌더의 `샘플 열기` 메뉴와 **같은 프로젝트**입니다. 만들자마자 학습·빌드까지 이어집니다.
 
 모델·데이터셋·파이프라인은 **이름으로도 id 앞부분으로도** 지목할 수 있습니다.
+
+### HTTP 서버를 https 로 (`--tls-cert`)
+
+`nl tls-cert <폴더>` 가 그 폴더 아래 `certs/server.crt` 와 `certs/server.key` 를 만듭니다. 개인키는
+소유자만 읽게(0600) 씁니다. Windows 에는 이 권한 비트가 없으니 사용자 폴더 밖에 두지 마세요.
+
+```sh
+nl tls-cert .                                        # 프로젝트 폴더에 certs/ 를 만든다
+echo 'certs/' >> .gitignore                          # 개인키를 커밋하지 않는다
+nl run p.nlproj --tls-cert certs/server.crt --tls-key certs/server.key
+curl --cacert certs/server.crt -d '[0,1]' https://127.0.0.1:8799/infer
+```
+
+`--tls-cert/--tls-key` 는 **프로젝트 파일을 바꾸지 않습니다.** 이번 실행에만 붙으므로 인증서 경로가
+실수로 저장소에 들어가지 않습니다. 두 옵션은 함께 주어야 하고, 경로는 프로젝트 폴더 기준 상대
+경로여야 합니다. 기본은 모든 `HTTP 서버` 노드에 붙고, `--http-node <이름>` 으로 하나만 고를 수 있습니다.
+
+`nl tls-cert` 가 만드는 것은 **자체 서명** 인증서입니다. 브라우저와 `curl` 은 기본으로 거부하므로
+`--cacert` 로 인증서를 직접 알려 주어야 합니다. 공개 서비스라면 제대로 발급받은 인증서를 같은 자리에
+놓으면 됩니다 — `--tls-cert` 는 어느 쪽이든 똑같이 받습니다.
+
+#### 배포판에서는 인증서를 어디에 두나
+
+`nl build --tls-cert ...` 는 **경로만** 번들에 적습니다. 인증서 파일은 담지 않습니다. 개인키가 들어간
+`.nlapp` 은 그 자체가 유출이기 때문입니다.
+
+배포 앱은 인증서를 두 곳에서 찾습니다.
+
+1. 작업 폴더 (번들을 푼 임시 폴더)
+2. **실행 파일이 있는 폴더**
+
+번들에 인증서가 없으므로 실제로 찾는 자리는 2번입니다. 설치한 기계에서 실행 파일 옆에 `certs/` 를
+그대로 두세요. 배포 앱은 켜질 때 인증서를 읽고, 없거나 잘못됐으면 **포트를 열기 전에** 오류를 냅니다.
 
 ---
 

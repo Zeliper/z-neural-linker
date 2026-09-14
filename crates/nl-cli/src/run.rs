@@ -12,11 +12,16 @@ pub struct Args<'a> {
     pub seconds: Option<f64>,
     pub arm_input: bool,
     pub device: Option<&'a str>,
+    /// `--tls-cert/--tls-key/--http-node`. 프로젝트 파일은 바뀌지 않는다.
+    pub tls: TlsInject<'a>,
 }
 
 pub fn run(args: Args<'_>) -> Result<i32> {
     install_signal_handler();
-    let l = load_project(args.project)?;
+    let mut l = load_project(args.project)?;
+
+    // 파이프라인을 고르기 **전에** 주입한다 — 아래에서 프로젝트의 사본을 뜨기 때문이다.
+    let tls_nodes = apply_tls(&mut l.project, &args.tls, &l.base_dir)?;
 
     let pipeline = match args.pipeline {
         Some(key) => find_pipeline(&l.project, key)?.clone(),
@@ -41,6 +46,9 @@ pub fn run(args: Args<'_>) -> Result<i32> {
     );
     if args.arm_input {
         println!("{}", yellow("  마우스·키보드 싱크가 무장됐다 — 실제 입력이 나간다"));
+    }
+    if tls_nodes > 0 {
+        println!("  {} HTTP 서버 노드 {tls_nodes}개를 https 로 연다", dim("TLS"));
     }
     match args.seconds {
         Some(s) => println!("  {} {s}초 뒤 자동 정지", dim("기간")),

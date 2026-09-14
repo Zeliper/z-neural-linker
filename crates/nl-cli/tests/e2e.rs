@@ -267,6 +267,167 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// TLS 시나리오: `nl tls-cert` 로 인증서를 만들고 `nl run --tls-cert/--tls-key` 로 띄워
+/// **진짜 https** 로 한 바퀴 돈다. 배포판이 아니라 `nl run` 을 쓰는 이유는, 여기서 보려는 것이
+/// "인증서 만들기 → 주입 → 핸드셰이크" 사슬이지 번들 경로가 아니기 때문이다.
+#[test]
+fn tls_cert_then_run_serves_https() {
+    if !enabled() {
+        eprintln!("NL_E2E 가 없어 TLS 종단 테스트를 건너뛴다 (켜려면 NL_E2E=1)");
+        return;
+    }
+    if which_curl().is_none() {
+        panic!("curl 이 없어 https 왕복을 확인할 수 없다 — curl 을 설치하라");
+    }
+
+    let dir = temp_dir("tls");
+    let proj = dir.join("xor.nlproj");
+
+    // ── 1. 샘플 + 짧은 학습 (모델이 있어야 답한다) ──
+    run("nl sample", Command::new(NL).arg("sample").arg(&proj));
+
+    // 샘플의 고정 포트(8799)를 그대로 쓰면 다른 종단 시험과 **동시에** 돌 때 서로 포트를 뺏는다.
+    // 실제로 그렇게 깨졌다 — 여기서만 빈 포트로 바꿔 둔다.
+    let addr = rebind_http_server(&proj);
+    eprintln!("이 시험의 https 주소: {addr}");
+    run(
+        "nl train",
+        Command::new(NL)
+            .args(["train"])
+            .arg(&proj)
+            .args(["--model", "XOR MLP", "--device", "cpu", "--epochs", "3"]),
+    );
+
+    // ── 2. 인증서 만들기 ──
+    let out = run(
+        "nl tls-cert",
+        Command::new(NL)
+            .arg("tls-cert")
+            .arg(&dir)
+            .args(["--hosts", "localhost,127.0.0.1", "--days", "30"]),
+    );
+    let text = stdout(&out);
+    assert!(text.contains("certs/server.crt"), "인증서 경로 안내가 없다:\n{text}");
+    assert!(text.contains(".gitignore"), ".gitignore 안내가 없다:\n{text}");
+    assert!(text.contains("배포물"), "배포물 경고가 없다:\n{text}");
+    let cert = dir.join("certs/server.crt");
+    let key = dir.join("certs/server.key");
+    assert!(cert.is_file() && key.is_file(), "인증서 파일이 없다");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "개인키 권한이 {mode:o} 다");
+    }
+
+    // ── 3. https 로 띄운다 ──
+    let mut child = Command::new(NL)
+        .args(["run"])
+        .arg(&proj)
+        .args([
+            "--pipeline",
+            "추론 API",
+            "--for",
+            "25",
+            "--device",
+            "cpu",
+            "--tls-cert",
+            "certs/server.crt",
+            "--tls-key",
+            "certs/server.key",
+        ])
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("nl run 을 띄우지 못했다");
+
+    let served = wait_until_serving(&addr, Duration::from_secs(20));
+
+    // ── 4. curl -k 로 https 요청 ──
+    let result = if served {
+        let url = format!("https://{addr}{}", nl_core::sample::API_PATH);
+        let mut last: Option<(String, String)> = None;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
+            let out = Command::new("curl")
+                .args(["-sS", "-k", "-o", "-", "-w", "\n%{http_code}", "-X", "POST"])
+                .args(["-H", "Content-Type: application/json", "-d", "[0.8,-0.8]"])
+                .arg(&url)
+                .output();
+            if let Ok(o) = out {
+                let text = String::from_utf8_lossy(&o.stdout).into_owned();
+                let (body, code) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
+                last = Some((body.to_string(), code.trim().to_string()));
+                if code.trim() == "200" {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        last
+    } else {
+        None
+    };
+
+    // ── 5. 평문으로 같은 포트를 두드리면 답하지 않는다 ──
+    let plaintext = if served {
+        Command::new("curl")
+            .args(["-sS", "--max-time", "5", "-o", "-", "-w", "%{http_code}", "-d", "[0,1]"])
+            .arg(format!("http://{addr}{}", nl_core::sample::API_PATH))
+            .output()
+            .ok()
+    } else {
+        None
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(served, "nl run 이 {addr} 에서 듣지 않았다");
+    let (body, code) = result.expect("https 요청에 답하지 않았다");
+    assert_eq!(code, "200", "본문: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("응답이 JSON 이 아니다");
+    let logits = json.as_array().expect("2 클래스 로짓 배열이어야 한다");
+    assert_eq!(logits.len(), 2, "응답이 2개가 아니다: {json}");
+    eprintln!("https 추론 결과: {json}");
+
+    if let Some(o) = plaintext {
+        let text = String::from_utf8_lossy(&o.stdout);
+        assert!(
+            !text.trim().ends_with("200"),
+            "평문 요청이 200 을 받았다 — TLS 포트가 평문에도 답한다: {text}"
+        );
+        eprintln!("평문 요청은 거부됐다 (curl 종료 {:?})", o.status.code());
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 샘플의 고정 포트를 빈 포트로 바꾸고 새 주소를 돌려준다.
+///
+/// 고정 포트는 시험을 나란히 돌릴 때 서로를 막는다. 운영체제에 빈 포트를 물어본 뒤 곧바로 놓아
+/// 주므로 그 사이에 남이 채 갈 틈이 이론상 있지만, 높은 임의 포트라 실제로 부딪히지 않는다.
+fn rebind_http_server(proj: &Path) -> String {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("빈 포트");
+        l.local_addr().expect("주소").port()
+    };
+    let addr = format!("127.0.0.1:{port}");
+    let text = std::fs::read_to_string(proj).expect("프로젝트 파일");
+    let replaced = text.replace(nl_core::sample::API_BIND, &addr);
+    assert_ne!(replaced, text, "샘플에 {} 가 없다", nl_core::sample::API_BIND);
+    std::fs::write(proj, replaced).expect("프로젝트 파일 쓰기");
+    addr
+}
+
+fn which_curl() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join("curl"))
+        .find(|p| p.is_file())
+}
+
 /// 이미지 모델 시나리오: 샘플 → 학습 → 빌드 → 배포판에 PNG 를 POST 해서 분류 결과를 받는다.
 ///
 /// XOR 쪽이 숫자 벡터를 다룬다면 이쪽은 **이진 이미지 본문**과 `MapLabel` 디코드 체인을 확인한다.
