@@ -8,7 +8,7 @@ use crate::canvas::Selection;
 use eframe::egui::{self, DragValue, RichText, UiBuilder};
 use nl_core::gui::{Binding, BuiltinAction};
 use nl_core::pipeline::{PNode, PNodeKind, Sink, Source};
-use nl_core::{Op, PNodeId, Pipeline, Widget, WidgetId, WidgetKind};
+use nl_core::{ModelId, Op, PNodeId, PayloadId, Pipeline, Widget, WidgetId, WidgetKind};
 use nl_gui::{GuiEvent, GuiState, RenderMode};
 
 /// 이동·크기 조절이 걸리는 격자 (논리 px).
@@ -418,6 +418,7 @@ fn binding_editor(ui: &mut egui::Ui, w: &mut Widget, ctx: &ViewCtx, actions: &mu
                 BindingTag::None,
                 BindingTag::Input,
                 BindingTag::Output,
+                BindingTag::ModelOutput,
                 BindingTag::Action,
             ] {
                 if ui.selectable_label(current == tag, binding_tag_label(tag)).clicked() && current != tag {
@@ -458,15 +459,97 @@ fn binding_editor(ui: &mut egui::Ui, w: &mut Widget, ctx: &ViewCtx, actions: &mu
         Some(Binding::PipelineOutput { node }) => {
             changed |= node_picker(ui, node, ctx, NodeRole::GuiWidgetSink, w.id, actions, "bind-out");
         }
-        Some(Binding::ModelOutput { .. }) => {
-            ui.label(
-                RichText::new("모델 출력 바인딩은 파이프라인 노드로 대신하세요.")
-                    .color(COL_WARN)
-                    .size(11.0),
-            );
+        Some(Binding::ModelOutput { model, field }) => {
+            changed |= model_output_picker(ui, model, field, ctx);
         }
     }
     changed
+}
+
+/// `Binding::ModelOutput` 편집기: 모델 콤보 + 그 모델 페이로드의 출력 필드 콤보.
+///
+/// 파이프라인을 거치지 않고 모델의 마지막 추론 결과를 위젯에 바로 꽂는 바인딩이다. 값이 어디서
+/// 오는지는 배포 앱이 정하므로, 여기서는 **가리키는 대상이 실제로 있는지**만 책임진다.
+fn model_output_picker(ui: &mut egui::Ui, model: &mut ModelId, field: &mut String, ctx: &ViewCtx) -> bool {
+    let mut changed = false;
+
+    ui.label(RichText::new("모델").color(COL_WEAK).size(11.0));
+    let current = ctx.project.models.get(model);
+    let label = current
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "(없는 모델)".to_string());
+    egui::ComboBox::from_id_salt("bind-model")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for (id, m) in &ctx.project.models {
+                if ui.selectable_label(*model == *id, &m.name).clicked() && *model != *id {
+                    *model = *id;
+                    // 모델이 바뀌면 옛 필드 이름은 대개 없는 이름이 된다 — 새 모델의 첫 출력으로 옮긴다.
+                    *field = first_output_field(ctx, *id).unwrap_or_default();
+                    changed = true;
+                }
+            }
+        });
+    let Some(m) = ctx.project.models.get(model) else {
+        ui.label(
+            RichText::new("✖ 이 모델이 프로젝트에 없습니다")
+                .color(COL_ERROR)
+                .size(11.0),
+        );
+        return changed;
+    };
+
+    ui.label(RichText::new("출력 필드").color(COL_WEAK).size(11.0));
+    let fields = output_fields(ctx, m.payload);
+    if fields.is_empty() {
+        ui.label(
+            RichText::new("이 모델의 페이로드에 출력 필드가 없습니다 — 페이로드를 먼저 정하세요")
+                .color(COL_WARN)
+                .size(11.0),
+        );
+        return changed;
+    }
+    let shown = if field.is_empty() {
+        "(고르세요)".to_string()
+    } else {
+        field.clone()
+    };
+    egui::ComboBox::from_id_salt("bind-model-field")
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for name in &fields {
+                if ui.selectable_label(field == name, name).clicked() && field != name {
+                    *field = name.clone();
+                    changed = true;
+                }
+            }
+        });
+    if !field.is_empty() && !fields.iter().any(|f| f == field) {
+        ui.label(
+            RichText::new(format!("✖ '{field}' 은 이 페이로드에 없는 출력입니다"))
+                .color(COL_ERROR)
+                .size(11.0),
+        );
+    }
+    ui.label(
+        RichText::new("모델의 마지막 추론 값을 이 위젯에 보여 줍니다.")
+            .color(COL_WEAK)
+            .size(11.0),
+    );
+    changed
+}
+
+/// 모델 페이로드의 출력 필드 이름들.
+fn output_fields(ctx: &ViewCtx, payload: Option<PayloadId>) -> Vec<String> {
+    payload
+        .and_then(|id| ctx.project.payloads.get(&id))
+        .map(|p| p.outputs.iter().map(|f| f.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+fn first_output_field(ctx: &ViewCtx, model: ModelId) -> Option<String> {
+    let payload = ctx.project.models.get(&model)?.payload;
+    output_fields(ctx, payload).into_iter().next()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -474,6 +557,7 @@ enum BindingTag {
     None,
     Input,
     Output,
+    ModelOutput,
     Action,
 }
 
@@ -481,7 +565,8 @@ fn binding_tag(b: &Option<Binding>) -> BindingTag {
     match b {
         None => BindingTag::None,
         Some(Binding::PipelineInput { .. }) => BindingTag::Input,
-        Some(Binding::PipelineOutput { .. }) | Some(Binding::ModelOutput { .. }) => BindingTag::Output,
+        Some(Binding::PipelineOutput { .. }) => BindingTag::Output,
+        Some(Binding::ModelOutput { .. }) => BindingTag::ModelOutput,
         Some(Binding::Action { .. }) => BindingTag::Action,
     }
 }
@@ -491,6 +576,7 @@ fn binding_tag_label(t: BindingTag) -> &'static str {
         BindingTag::None => "없음",
         BindingTag::Input => "파이프라인 입력 (위젯 → 파이프라인)",
         BindingTag::Output => "파이프라인 출력 (파이프라인 → 위젯)",
+        BindingTag::ModelOutput => "모델 출력 (마지막 추론 값 → 위젯)",
         BindingTag::Action => "내장 동작",
     }
 }
@@ -508,6 +594,13 @@ fn default_binding(tag: BindingTag, ctx: &ViewCtx, widget: WidgetId) -> Option<B
         BindingTag::Output => {
             let node = find_node(ctx, NodeRole::GuiWidgetSink, widget).unwrap_or_default();
             Some(Binding::PipelineOutput { node })
+        }
+        BindingTag::ModelOutput => {
+            // 첫 모델과 그 페이로드의 첫 출력으로 시작한다 — 고를 것이 없으면 빈 값이라도 둬야
+            // 편집기가 열리고 사용자가 바꿀 수 있다.
+            let model = ctx.project.models.keys().next().copied().unwrap_or_default();
+            let field = first_output_field(ctx, model).unwrap_or_default();
+            Some(Binding::ModelOutput { model, field })
         }
     }
 }
@@ -686,6 +779,49 @@ mod tests {
             })),
             BindingTag::Action
         );
+        // 모델 출력은 파이프라인 출력과 다른 종류다 — 같은 칸에 묶으면 콤보에서 고를 수 없다.
+        assert_eq!(
+            binding_tag(&Some(Binding::ModelOutput {
+                model: ModelId::from_u128(1),
+                field: "out".into()
+            })),
+            BindingTag::ModelOutput
+        );
+    }
+
+    /// 모델 출력 바인딩을 고르면 실제로 있는 모델과 출력 필드로 시작해야 한다.
+    #[test]
+    fn a_new_model_output_binding_points_at_something_real() {
+        let project = nl_core::sample::xor_project();
+        let devices: Vec<nl_engine::DeviceInfo> = Vec::new();
+        let monitors: Vec<nl_io::MonitorInfo> = Vec::new();
+        let shot = crate::record::ShotPreview::default();
+        let dir = std::path::PathBuf::from("/tmp");
+        let ctx = ViewCtx {
+            project: &project,
+            selection: Selection::None,
+            devices: &devices,
+            base_dir: None,
+            training: None,
+            monitors: &monitors,
+            monitors_error: None,
+            recording: None,
+            shot: &shot,
+            update_check: false,
+            update_state: None,
+            autosave_file: false,
+            recovery_dir: &dir,
+            now: 0.0,
+        };
+
+        let b = default_binding(BindingTag::ModelOutput, &ctx, WidgetId::from_u128(1));
+        let Some(Binding::ModelOutput { model, field }) = b else {
+            panic!("모델 출력 바인딩")
+        };
+        assert!(project.models.contains_key(&model), "있는 모델을 가리켜야 한다");
+        // 샘플 모델에는 페이로드가 붙어 있고 그 출력 필드가 기본값이 된다.
+        assert!(!field.is_empty(), "첫 출력 필드가 채워져야 한다");
+        assert!(output_fields(&ctx, project.models[&model].payload).contains(&field));
     }
 
     #[test]

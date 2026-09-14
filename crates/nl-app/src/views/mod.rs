@@ -280,6 +280,26 @@ pub fn short_path(path: &str) -> String {
     }
 }
 
+/// 로그·토스트에 쓸 경로. 홈 아래면 `~` 로 줄인다 (보안 리뷰 L5).
+///
+/// 빌드 로그나 스크린샷을 남에게 보내는 일이 흔한데, 전체 경로에는 사용자 이름이 들어 있다.
+/// `~/projects/a.nlproj` 면 어느 파일인지는 그대로 알아볼 수 있으면서 계정 이름은 드러나지 않는다.
+/// 홈 밖 경로는 그대로 둔다 — `/etc` 나 `/mnt` 는 줄이면 오히려 어디인지 알 수 없다.
+pub fn tilde(path: &Path) -> String {
+    let text = path.display().to_string();
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return text;
+    };
+    if home.as_os_str().is_empty() {
+        return text;
+    }
+    match path.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => text,
+    }
+}
+
 /// 표 한 줄의 라벨 + 값.
 pub fn kv(ui: &mut egui::Ui, key: &str, value: impl Into<String>) {
     ui.horizontal(|ui| {
@@ -290,6 +310,24 @@ pub fn kv(ui: &mut egui::Ui, key: &str, value: impl Into<String>) {
 
 #[cfg(test)]
 mod tests {
+    /// 홈 아래 경로만 줄인다. 로그를 남에게 보낼 때 계정 이름이 드러나지 않게 하는 것이 목적이라,
+    /// 홈 밖 경로까지 줄이면 어디인지 알 수 없어져 오히려 손해다.
+    #[test]
+    fn tilde_shortens_only_inside_home() {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let Some(home) = home.filter(|h| !h.as_os_str().is_empty()) else {
+            eprintln!("HOME 이 없어 건너뜀");
+            return;
+        };
+        assert_eq!(tilde(&home.join("projects/a.nlproj")), "~/projects/a.nlproj");
+        assert_eq!(tilde(&home), "~");
+        // 홈 밖은 그대로.
+        assert_eq!(tilde(Path::new("/etc/hosts")), "/etc/hosts");
+        // 홈 이름이 앞부분만 겹치는 경로를 홈으로 착각하면 안 된다.
+        let sibling = std::path::PathBuf::from(format!("{}-backup/x", home.display()));
+        assert_eq!(tilde(&sibling), sibling.display().to_string());
+    }
+
     use super::*;
 
     #[test]

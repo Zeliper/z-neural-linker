@@ -119,7 +119,7 @@ fn check_inno() -> ToolState {
         };
     }
     let note = match which("wine") {
-        Some(w) => format!("wine 은 있음({}) — Inno Setup 컴파일러는 없음", w.display()),
+        Some(w) => format!("wine 은 있음({}) — Inno Setup 컴파일러는 없음", crate::views::tilde(&w)),
         None => "Inno Setup 도 wine 도 찾지 못함".into(),
     };
     ToolState {
@@ -384,7 +384,7 @@ pub fn plan_runtime(target: BuildTarget, manifest_url: &str) -> Result<Plan, Str
                     steps: vec![
                         format!("매니페스트가 알려 준 자산을 내려받습니다 ({}).", fmt_bytes(a.size)),
                         "내려받은 파일의 sha256 을 매니페스트 값과 맞춰 봅니다.".to_string(),
-                        format!("맞으면 {} 에 실행 권한을 주고 놓습니다.", to.display()),
+                        format!("맞으면 {} 에 실행 권한을 주고 놓습니다.", crate::views::tilde(&to)),
                     ],
                     from: a.url.clone(),
                     to,
@@ -549,7 +549,7 @@ fn download(
     }
     crate::project::write_atomic(dest, &buf)?;
     make_executable(dest);
-    let _ = tx.send(ToolEvent::Log(format!("저장: {}", dest.display())));
+    let _ = tx.send(ToolEvent::Log(format!("저장: {}", crate::views::tilde(dest))));
     Ok(dest.to_path_buf())
 }
 
@@ -599,7 +599,10 @@ fn cargo_build_runtime(
         return Err(format!("cargo 빌드 실패 ({status}): {tail}"));
     }
     if !dest.is_file() {
-        return Err(format!("빌드는 끝났지만 산출물이 없습니다: {}", dest.display()));
+        return Err(format!(
+            "빌드는 끝났지만 산출물이 없습니다: {}",
+            crate::views::tilde(dest)
+        ));
     }
     Ok(dest.to_path_buf())
 }
@@ -619,7 +622,9 @@ fn run_bundle_tool(plan: &nl_bundle::ToolPlan, tx: &std::sync::mpsc::Sender<Tool
                     Some(t) if t > 0 => ToolEvent::Progress((received as f32 / t as f32).clamp(0.0, 1.0)),
                     _ => ToolEvent::Log(format!("내려받는 중… {received} 바이트")),
                 },
-                ToolProgress::Downloaded { path } => ToolEvent::Log(format!("내려받음: {}", path.display())),
+                ToolProgress::Downloaded { path } => {
+                    ToolEvent::Log(format!("내려받음: {}", crate::views::tilde(&path)))
+                }
                 ToolProgress::Running { command } => ToolEvent::Log(format!("실행: {command}")),
                 // 설치 프로그램이 뱉는 줄. wine 이 왜 실패했는지는 여기에만 나온다.
                 ToolProgress::Output(line) => ToolEvent::Log(format!("  {}", line.trim_end())),

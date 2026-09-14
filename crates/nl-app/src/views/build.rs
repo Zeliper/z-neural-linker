@@ -231,7 +231,7 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         .collect();
     match nl_bundle::write_manifest(&spec.app_version, "", &entries, &base_url, &out_dir) {
         Ok(p) => {
-            send(BuildEvent::Log(format!("매니페스트 {}", p.display())));
+            send(BuildEvent::Log(format!("매니페스트 {}", super::tilde(&p))));
             if base_url.trim().is_empty() {
                 send(BuildEvent::Log(
                     "자산 기본 주소가 비어 있어 latest.json 의 URL 이 파일 이름뿐입니다 — 올릴 때 앞에 주소를 붙이세요"
@@ -483,6 +483,14 @@ fn spec_editor(
                                 }
                             }
                         });
+                    // 파이프라인이 없으면 콤보에 고를 것이 없다. 왜 비었는지 알려 준다.
+                    if ctx.project.pipelines.is_empty() {
+                        ui.label(
+                            RichText::new("파이프라인이 없습니다 — 파이프라인 뷰에서 먼저 만드세요")
+                                .color(COL_WARN)
+                                .size(11.0),
+                        );
+                    }
                     ui.end_row();
 
                     ui.label(RichText::new("시작 동작").color(COL_WEAK));
@@ -829,7 +837,7 @@ fn run_section(
             }
             if let Some(dir) = out_dir_display(ctx, spec) {
                 ui.label(
-                    RichText::new(format!("산출물 폴더: {}", dir.display()))
+                    RichText::new(format!("산출물 폴더: {}", super::tilde(&dir)))
                         .color(COL_WEAK)
                         .size(11.0),
                 );

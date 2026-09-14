@@ -6,7 +6,11 @@
 use crate::pcanvas::{LiveView, NodePreview};
 use eframe::egui;
 use nl_core::gui::Binding;
-use nl_core::{DevicePref, GuiLayout, PNodeId, Pipeline, PipelineId, Project, WidgetId, WidgetKind};
+use nl_core::pipeline::PNodeKind;
+use nl_core::{
+    DevicePref, GuiLayout, ModelId, PNodeId, Pipeline, PipelineId, Project, WidgetId, WidgetKind,
+};
+use std::collections::BTreeMap;
 use nl_engine::Value;
 use nl_gui::GuiState;
 use nl_io::runner::RunnerInput;
@@ -32,6 +36,8 @@ pub struct RunnerSession {
     pub errors: usize,
     /// 실행기가 초당 한 번 보고하는 틱 속도. 아직 한 번도 안 왔으면 `None`.
     pub stats: Option<RunnerStats>,
+    /// 파이프라인의 모델 노드 → 그 노드가 돌리는 모델. `Binding::ModelOutput` 위젯에 값을 넘길 때 쓴다.
+    model_nodes: BTreeMap<PNodeId, ModelId>,
 }
 
 /// 틱 루프의 실제 속도 (`RunnerEvent::Stats`).
@@ -88,6 +94,14 @@ impl RunnerSession {
             temp_dir,
             errors: 0,
             stats: None,
+            model_nodes: pipeline
+                .nodes
+                .values()
+                .filter_map(|n| match &n.kind {
+                    PNodeKind::Model { model, .. } => Some((n.id, *model)),
+                    _ => None,
+                })
+                .collect(),
         })
     }
 
@@ -139,7 +153,7 @@ impl RunnerSession {
                 RunnerEvent::Value { node, value } => {
                     self.live.values.insert(node, nl_gui::format_value(Some(&value)));
                     self.live.errors.remove(&node);
-                    push_to_bound_widgets(gui, layout, node, &value);
+                    push_to_bound_widgets(gui, layout, node, self.model_nodes.get(&node).copied(), &value);
                 }
                 RunnerEvent::Widget { widget, value } => {
                     let points = max_points(layout, widget);
@@ -191,11 +205,26 @@ impl Drop for RunnerSession {
 }
 
 /// `Binding::PipelineOutput{node}` 로 묶인 위젯에도 노드 값을 반영한다 (런타임과 같은 규칙).
-fn push_to_bound_widgets(gui: &mut GuiState, layout: &GuiLayout, node: PNodeId, value: &Value) {
+/// 이 노드의 값을 받을 위젯들에 넘긴다.
+///
+/// `PipelineOutput` 은 노드를 직접 가리키고, `ModelOutput` 은 모델을 가리킨다. 뒤쪽은 그 모델을
+/// 돌리는 노드가 값을 낼 때가 곧 "마지막 추론 값" 이라 여기서 함께 채운다. 배포 런타임은 아직
+/// `ModelOutput` 을 처리하지 않으므로 지금은 빌더 미리보기에서만 보인다.
+fn push_to_bound_widgets(
+    gui: &mut GuiState,
+    layout: &GuiLayout,
+    node: PNodeId,
+    model: Option<ModelId>,
+    value: &Value,
+) {
     let targets: Vec<WidgetId> = layout
         .widgets
         .values()
-        .filter(|w| matches!(&w.binding, Some(Binding::PipelineOutput { node: n }) if *n == node))
+        .filter(|w| match &w.binding {
+            Some(Binding::PipelineOutput { node: n }) => *n == node,
+            Some(Binding::ModelOutput { model: m, .. }) => model == Some(*m),
+            _ => false,
+        })
         .map(|w| w.id)
         .collect();
     for id in targets {
@@ -308,11 +337,34 @@ mod tests {
             WidgetKind::Value { prefix: String::new() },
         );
         let mut gui = GuiState::default();
-        push_to_bound_widgets(&mut gui, &l, node, &Value::Number(1.5));
+        push_to_bound_widgets(&mut gui, &l, node, None, &Value::Number(1.5));
         assert!(matches!(gui.values.get(&id), Some(Value::Number(n)) if (*n - 1.5).abs() < 1e-9));
         // 다른 노드의 값은 오지 않는다.
-        push_to_bound_widgets(&mut gui, &l, PNodeId::from_u128(4), &Value::Number(9.0));
+        push_to_bound_widgets(&mut gui, &l, PNodeId::from_u128(4), None, &Value::Number(9.0));
         assert!(matches!(gui.values.get(&id), Some(Value::Number(n)) if (*n - 1.5).abs() < 1e-9));
+    }
+
+    /// `ModelOutput` 은 노드가 아니라 모델을 가리킨다 — 그 모델을 돌리는 노드의 값이 와야 한다.
+    #[test]
+    fn model_output_widgets_follow_the_model_not_the_node() {
+        let model = ModelId::from_u128(7);
+        let (l, id) = layout_with(
+            Some(Binding::ModelOutput { model, field: "out".into() }),
+            WidgetKind::Value { prefix: String::new() },
+        );
+        let mut gui = GuiState::default();
+        let node = PNodeId::from_u128(3);
+
+        // 어느 노드가 냈든 그 노드가 이 모델을 돌린다면 값이 간다.
+        push_to_bound_widgets(&mut gui, &l, node, Some(model), &Value::Number(2.5));
+        assert!(matches!(gui.values.get(&id), Some(Value::Number(n)) if (*n - 2.5).abs() < 1e-9));
+
+        // 다른 모델의 값은 오지 않는다.
+        push_to_bound_widgets(&mut gui, &l, node, Some(ModelId::from_u128(8)), &Value::Number(9.0));
+        assert!(matches!(gui.values.get(&id), Some(Value::Number(n)) if (*n - 2.5).abs() < 1e-9));
+        // 모델 노드가 아닌 곳(소스·싱크)의 값도 오지 않는다.
+        push_to_bound_widgets(&mut gui, &l, node, None, &Value::Number(9.0));
+        assert!(matches!(gui.values.get(&id), Some(Value::Number(n)) if (*n - 2.5).abs() < 1e-9));
     }
 
     #[test]
@@ -324,7 +376,7 @@ mod tests {
         );
         let mut gui = GuiState::default();
         for v in [1.0, 2.0, 3.0] {
-            push_to_bound_widgets(&mut gui, &l, node, &Value::Number(v));
+            push_to_bound_widgets(&mut gui, &l, node, None, &Value::Number(v));
         }
         assert_eq!(gui.history.get(&id).map(Vec::len), Some(2), "max_points 만큼만 남는다");
     }

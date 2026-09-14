@@ -842,11 +842,11 @@ impl NlApp {
                 self.doc.modified = false;
                 self.after_document_swap();
                 self.recent.push(path);
-                self.toast(format!("열었습니다: {}", path.display()), now);
+                self.toast(format!("열었습니다: {}", views::tilde(path)), now);
             }
             Err(e) => {
                 self.recent.remove(&path.display().to_string());
-                self.toast(format!("열 수 없습니다: {} — {e}", path.display()), now);
+                self.toast(format!("열 수 없습니다: {} — {e}", views::tilde(path)), now);
             }
         }
     }
@@ -1727,7 +1727,7 @@ impl NlApp {
                     Ok(ToolEvent::Log(l)) => self.views.build.log(l),
                     Ok(ToolEvent::Progress(p)) => self.tool_progress = Some(p),
                     Ok(ToolEvent::Done(path)) => {
-                        self.views.build.log(format!("준비됨: {}", path.display()));
+                        self.views.build.log(format!("준비됨: {}", views::tilde(&path)));
                         finished = true;
                         break;
                     }
@@ -2093,7 +2093,7 @@ impl NlApp {
             .map(|rel| views::build::resolve_path(Some(&base_dir), rel));
         if let Some(p) = &icon {
             if !p.is_file() {
-                self.toast(format!("아이콘 파일이 없습니다: {}", p.display()), now);
+                self.toast(format!("아이콘 파일이 없습니다: {}", views::tilde(p)), now);
                 return;
             }
         }
@@ -2170,7 +2170,7 @@ impl NlApp {
     /// 만든 tar.gz 를 임시 폴더에 풀어 실행한다 (Linux 호스트).
     fn run_artifact(&mut self, archive: &Path, now: f64) {
         match extract_and_run(archive) {
-            Ok(exe) => self.toast(format!("실행: {}", exe.display()), now),
+            Ok(exe) => self.toast(format!("실행: {}", views::tilde(&exe)), now),
             Err(e) => self.toast(format!("실행하지 못했습니다: {e}"), now),
         }
     }
@@ -2186,7 +2186,7 @@ impl NlApp {
             Ok(s) => {
                 self.recording = Some(s);
                 self.set_view(View::Data);
-                self.toast(format!("녹화 시작: {}", dir.display()), now);
+                self.toast(format!("녹화 시작: {}", views::tilde(&dir)), now);
             }
             Err(e) => self.toast(format!("녹화를 시작할 수 없습니다: {e}"), now),
         }
@@ -2204,7 +2204,7 @@ impl NlApp {
         if frames == 0 {
             let why = rec.error().unwrap_or_else(|| "프레임을 한 장도 얻지 못했습니다".into());
             self.toast(format!("녹화 실패: {why}"), now);
-            self.log(format!("녹화 {}: 프레임 0 — {why}", dir.display()));
+            self.log(format!("녹화 {}: 프레임 0 — {why}", views::tilde(&dir)));
             return;
         }
         // 데이터셋 경로는 프로젝트 폴더 기준 상대 경로로 — 폴더째 옮겨도 따라간다.
@@ -2216,7 +2216,10 @@ impl NlApp {
         let id = spec.id;
         self.doc.apply_local(vec![Op::UpsertDataset { dataset: spec }]);
         self.sel.set(Selection::Dataset(id));
-        self.log(format!("녹화 {}: 프레임 {frames}장 (버림 {dropped}장)", dir.display()));
+        self.log(format!(
+            "녹화 {}: 프레임 {frames}장 (버림 {dropped}장)",
+            views::tilde(&dir)
+        ));
         self.toast(format!("데이터셋을 만들었습니다 — 프레임 {frames}장"), now);
     }
 
