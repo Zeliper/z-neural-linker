@@ -256,6 +256,8 @@ fn run_headless(
         device,
         bundle.manifest.arm_input,
     )?;
+    // 로그 줄에 붙일 이름. 짧은 id 는 부딪혀서 어느 노드인지 알 수 없다.
+    let names = nl_io::EventNames::with_gui(&pipeline, &bundle.project.gui);
     let mut asked_to_stop = false;
     loop {
         drain_update(&mut update);
@@ -274,7 +276,7 @@ fn run_headless(
                 // 모양을 정하는 곳은 `nl_io::event_json` 한 군데다 — `nl run` 과 같은 줄이 나와야
                 // 빌더·명령줄·배포판 로그를 한데 모아 볼 수 있다.
                 if log_json {
-                    println!("{}", nl_io::event_json(&ev));
+                    println!("{}", nl_io::event_json(&ev, &names));
                 } else {
                     println!("{}", app::describe_event(&ev));
                 }

@@ -1092,6 +1092,54 @@ mod tests {
         }
     }
 
+    /// 모르는 플래그를 주면 **설치하지 않고** 종료 코드 2 로 끝난다.
+    ///
+    /// 예전에는 `--uninstall` 만 보고 나머지는 무시해서, `./install.sh --headless` 처럼 앱에 줄
+    /// 법한 플래그를 붙이면 조용히 설치가 됐다. 실제로 그렇게 잘못 설치한 적이 있어 시험으로 못 박는다.
+    #[test]
+    fn unknown_flags_are_refused_without_installing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("install.sh");
+        std::fs::write(&path, fill(INSTALL_SH, "app", "시험앱", "1.0.0", Syntax::Shell)).unwrap();
+
+        let run = |args: &[&str]| -> Option<(i32, String)> {
+            match std::process::Command::new("bash").arg(&path).args(args).output() {
+                Ok(o) => Some((
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stderr).into_owned(),
+                )),
+                Err(e) => {
+                    eprintln!("bash 가 없어 실행 시험을 건너뜁니다: {e}");
+                    None
+                }
+            }
+        };
+
+        for bad in ["--headless", "--run-for", "-x", "--uninstall-all"] {
+            let Some((code, err)) = run(&[bad]) else { return };
+            assert_eq!(code, 2, "{bad}: 종료 코드가 2 가 아니다 — {err}");
+            assert!(err.contains("모르는 인자"), "{bad}: 이유를 안 알려 준다 — {err}");
+            assert!(err.contains("사용법"), "{bad}: 사용법을 안 보여 준다 — {err}");
+        }
+
+        // `--help` 는 0 이고 사용법을 표준 출력으로 낸다.
+        let out = std::process::Command::new("bash")
+            .arg(&path)
+            .arg("--help")
+            .output()
+            .expect("bash");
+        assert_eq!(out.status.code(), Some(0));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("사용법"),
+            "--help 가 사용법을 안 냈다"
+        );
+
+        // 아무 인자도 없으면 설치를 시도한다. 실행 파일이 없으니 1 로 끝나야 한다 —
+        // **2 가 아니어야** 인자 거부와 구분된다.
+        let Some((code, _)) = run(&[]) else { return };
+        assert_eq!(code, 1, "인자 없는 호출이 설치를 시도하지 않았다");
+    }
+
     #[test]
     fn a_malicious_name_cannot_add_desktop_keys_or_groups() {
         let evil = "앱\nActions=pwn\n\n[Desktop Action pwn]\nExec=sh -c id";
