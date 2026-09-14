@@ -47,11 +47,7 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      # 아직 전체 포맷을 적용하지 않았다. 다른 에이전트가 작업 중인 크레이트를 건드리지 않으려고
-      # 지금은 보고만 하고 빨간불을 내지 않는다. 포맷이 한 번 정리되면 continue-on-error 를 뺀다.
       - name: 포맷 검사 (아직 강제하지 않음)
-        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: 클리피
