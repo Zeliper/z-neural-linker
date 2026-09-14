@@ -1244,6 +1244,8 @@ fn category_order(c: LayerCategory) -> usize {
         LayerCategory::Regularize => 7,
         LayerCategory::Merge => 8,
         LayerCategory::Embed => 9,
+        LayerCategory::Sequence => 10,
+        LayerCategory::Attention => 11,
     }
 }
 

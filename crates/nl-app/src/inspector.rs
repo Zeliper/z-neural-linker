@@ -539,6 +539,43 @@ impl NlApp {
                     changed |= ui.add(DragValue::new(dim).range(1..=100_000)).changed();
                 });
             }
+            // LSTM·GRU 는 필드가 같다. 은닉 크기와 두 스위치가 형상을 정한다.
+            LayerKind::Lstm {
+                hidden,
+                bidirectional,
+                return_sequence,
+            }
+            | LayerKind::Gru {
+                hidden,
+                bidirectional,
+                return_sequence,
+            } => {
+                ui.horizontal(|ui| {
+                    ui.label("은닉 크기");
+                    changed |= ui.add(DragValue::new(hidden).range(1..=100_000)).changed();
+                });
+                changed |= ui
+                    .checkbox(bidirectional, "양방향")
+                    .on_hover_text("두 방향을 마지막 차원에서 이어 붙입니다 — 출력 폭이 두 배가 됩니다")
+                    .changed();
+                changed |= ui
+                    .checkbox(return_sequence, "시퀀스 전체 출력")
+                    .on_hover_text("끄면 마지막 시점의 상태만 내보냅니다")
+                    .changed();
+            }
+            LayerKind::MultiHeadAttention { heads, dropout } => {
+                ui.horizontal(|ui| {
+                    ui.label("헤드 수");
+                    changed |= ui
+                        .add(DragValue::new(heads).range(1..=1024))
+                        .on_hover_text("입력의 마지막 차원이 이 값으로 나누어떨어져야 합니다")
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("드롭아웃");
+                    changed |= ui.add(DragValue::new(dropout).range(0.0..=0.95).speed(0.01)).changed();
+                });
+            }
             LayerKind::GlobalAvgPool | LayerKind::Flatten | LayerKind::Add | LayerKind::Mul => {
                 ui.label(RichText::new("설정이 없는 레이어입니다.").color(COL_WEAK).size(11.5));
             }
