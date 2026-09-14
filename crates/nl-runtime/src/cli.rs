@@ -14,6 +14,8 @@ pub const USAGE: &str = "\
   --device <장치>       cpu | gpu:<번호> | auto (기본값은 번들 설정).
   --no-update           시작할 때 새 버전을 확인하지 않습니다.
                         (매니페스트 주소는 NL_UPDATE_URL 환경 변수로 덮어쓸 수 있습니다.)
+  --env-file <파일>     KEY=VALUE 줄을 읽어 환경 변수로 넣습니다 (토큰을 명령줄에 적지 않기 위해).
+                        이미 있는 환경 변수는 덮어쓰지 않습니다. 파일은 0600 을 권합니다.
   --work-dir <경로>     번들을 이 폴더에 풀고 그대로 둡니다 (기본은 끝나면 지워지는 임시 폴더).
                         서비스로 상시 운영할 때 씁니다 — 경로가 매번 바뀌지 않아 인증서 같은
                         파일을 <경로>/local/ 에 두고 참조할 수 있습니다.
@@ -43,6 +45,8 @@ pub struct Options {
     pub no_update: bool,
     /// 번들을 풀 폴더. 없으면 끝나면 지워지는 임시 폴더를 쓴다.
     pub work_dir: Option<PathBuf>,
+    /// `KEY=VALUE` 줄을 읽어 환경 변수로 넣을 파일.
+    pub env_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +67,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Command {
             "--help" | "-h" => return Command::Help,
             "--headless" => opts.headless = true,
             "--no-update" => opts.no_update = true,
+            "--env-file" => {
+                let Some(v) = it.next() else {
+                    return Command::Error("--env-file 뒤에 파일 경로가 없습니다".into());
+                };
+                if v.is_empty() {
+                    return Command::Error("--env-file 경로가 비어 있습니다".into());
+                }
+                opts.env_file = Some(PathBuf::from(v));
+            }
             "--work-dir" => {
                 let Some(v) = it.next() else {
                     return Command::Error("--work-dir 뒤에 폴더 경로가 없습니다".into());
