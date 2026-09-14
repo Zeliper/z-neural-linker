@@ -6,7 +6,8 @@
 # 한글 입력 검증용으로 fcitx5 를 전용 D-Bus 세션 안에서 같은 컴포지터에 붙일 수 있다.
 #
 #   uitest.sh start [WxH]            헤드리스 sway 시작(기본 1600x1000)
-#   uitest.sh app [파일.nlproj]         앱 실행(릴리스 빌드, 없으면 빌드). UITEST_FRESH=1 이면 앱 데이터(복구 스냅샷·설정)를
+#   uitest.sh app [파일.nlproj]         앱 실행(릴리스 빌드, 없으면 빌드). 이미 떠 있는 앱은 창이 사라진 것을 확인하고
+#                                    나서 새로 띄운다. UITEST_FRESH=1 이면 앱 데이터(복구 스냅샷·설정)를
 #                                    비우고 시작 — 이전 강제 종료의 복구 모달이 떠서 클릭을 막는 일이 없다.
 #   uitest.sh ime                    fcitx5(한글) 를 이 컴포지터에 붙인다
 #   uitest.sh shot out.png [x,y WxH]  캡처(선택 영역)
@@ -17,7 +18,8 @@
 #   uitest.sh wait-app                앱 창이 뜰 때까지 대기(최대 15초)
 #   uitest.sh wait-log "<정규식>" [초]  앱 로그에 그 줄이 나올 때까지 대기(기본 10초)
 #   uitest.sh expect-shot <이름> [x,y WxH]  골든 이미지와 비교(없으면 만들고 알림)
-#   uitest.sh run <시나리오.uit>       시나리오 실행. 실패한 단계에서 멈추고 종료 코드로 알린다
+#   uitest.sh run <시나리오.uit> [--keep-app]   시나리오 실행. 실패한 단계에서 멈추고 종료 코드로 알린다.
+#                                    시작할 때 남아 있는 앱을 내린다 — `--keep-app` 이면 그대로 둔다.
 #   uitest.sh log [줄수]               앱 로그 꼬리
 #   uitest.sh status | stop
 #
@@ -54,6 +56,92 @@ own_sway_pid() {
         if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- "$DIR/sway.cfg"; then echo "$p"; return; fi
     done
     echo ""
+}
+
+# 살아 있는 프로세스인가. **좀비(Z)는 죽은 것으로 친다** — `kill -0` 은 좀비에도 성공해서,
+# 부모가 거둬 가기 전까지 앱이 안 죽은 것처럼 보인다. 실제로 여기서 하네스가 멈췄었다:
+# 앱을 연속으로 띄우면 앞선 앱이 몇 초씩 좀비로 남아 "내리지 못했습니다" 로 빠졌다.
+app_alive() {
+    local st
+    [[ -n "${1:-}" ]] || return 1
+    st=$(awk '/^State:/{print $2; exit}' "/proc/$1/status" 2>/dev/null || true)
+    [[ -n "$st" && "$st" != "Z" ]]
+}
+
+# sway 트리에 남아 있는 앱 창들의 pid. 창이 살아 있으면 다음 캡처가 그걸 잡는다.
+app_window_pids() {
+    local tree
+    tree=$(swaymsg -t get_tree 2>/dev/null || true)
+    [[ -n "$tree" ]] || return 0
+    printf '%s' "$tree" | python3 -c '
+import json, sys
+found = set()
+def walk(n):
+    if isinstance(n, dict):
+        if n.get("app_id") == "neural-linker" and isinstance(n.get("pid"), int):
+            found.add(n["pid"])
+        for key in ("nodes", "floating_nodes"):
+            for child in n.get(key) or []:
+                walk(child)
+try:
+    walk(json.load(sys.stdin))
+except Exception:
+    pass
+print("\n".join(str(x) for x in sorted(found)))
+' 2>/dev/null || true
+}
+
+# 창이 하나라도 남아 있나. 대기 루프에서 초당 여러 번 부르므로 python 을 태우지 않고
+# 트리 문자열만 본다 (pid 가 필요할 때만 app_window_pids).
+any_app_window() { swaymsg -t get_tree 2>/dev/null | grep -q '"app_id": "neural-linker"'; }
+
+# 살아 있는 앱 프로세스들. 보는 곳은 둘뿐이다 — pid 파일과 sway 트리.
+# `pgrep -f nl-app` 류는 쓰지 않는다: 호출한 셸 자신의 명령줄까지 걸려 엉뚱한 것을 죽인다.
+# 트리까지 보는 이유는 pid 파일이 없거나 어긋난 채 창만 남은 경우가 실제로 있어서다.
+app_pids() {
+    local out="" p
+    if [[ -f "$DIR/app.pid" ]]; then
+        p=$(cat "$DIR/app.pid" 2>/dev/null || true)
+        app_alive "$p" && out="$p"
+    fi
+    for p in $(app_window_pids); do
+        app_alive "$p" && out+=" $p"
+    done
+    # `|| true` 가 꼭 있어야 한다 — 이 스크립트는 `set -euo pipefail` 이라,
+    # 앱이 하나도 없어 grep 이 아무 것도 못 찾으면 파이프가 실패로 잡혀 호출한 쪽이 통째로 죽는다.
+    tr ' ' '\n' <<< "$out" | grep -E '^[0-9]+$' | sort -u || true
+}
+
+# 앱을 확실히 내린다. **창이 사라질 때까지** 기다리는 것이 핵심이다 —
+# 그냥 kill 하고 넘어가면 `wait_app` 이 아직 남아 있는 옛 창을 보고 바로 통과해,
+# 시나리오가 새 앱 대신 엉뚱한 창을 캡처한다.
+kill_app() {
+    local pids p deadline
+    pids=$(app_pids)
+    if [[ -n "$pids" ]]; then
+        for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+        deadline=$(( SECONDS + 5 ))
+        while (( SECONDS < deadline )) && [[ -n "$(app_pids)" ]]; do sleep 0.1; done
+
+        pids=$(app_pids)
+        if [[ -n "$pids" ]]; then                  # 안 죽으면 강제로
+            for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
+            deadline=$(( SECONDS + 5 ))
+            while (( SECONDS < deadline )) && [[ -n "$(app_pids)" ]]; do sleep 0.1; done
+        fi
+    fi
+    rm -f "$DIR/app.pid"
+
+    # 프로세스가 죽어도 컴포지터가 창을 지우는 데 시간이 걸린다. 창이 둘이 되면 sway 가
+    # 타일로 쪼개 좌표가 통째로 어긋나므로 사라질 때까지 기다린다.
+    # 넉넉히 잡는 이유: 이 값은 기계 부하를 탄다 — 부하 32 에서 0.9~2.9초가 측정됐다.
+    deadline=$(( SECONDS + 20 ))
+    while (( SECONDS < deadline )) && any_app_window; do sleep 0.1; done
+
+    if [[ -n "$(app_pids)" ]] || any_app_window; then
+        echo "앞선 앱을 내리지 못했습니다 (프로세스 [$(tr '\n' ' ' <<< "$(app_pids)")] 창 [$(tr '\n' ' ' <<< "$(app_window_pids)")]) — 'uitest.sh stop' 으로 하네스를 내렸다가 다시 시작하세요" >&2
+        exit 1
+    fi
 }
 
 sway_cfg() {
@@ -133,9 +221,8 @@ cmd_app() {
         [[ -n "${UITEST_APP_BIN:-}" ]] && { echo "UITEST_APP_BIN 이 실행 파일이 아닙니다: $bin" >&2; exit 1; }
         (cd "$ROOT" && cargo build --release -p nl-app)
     fi
-    if [[ -f "$DIR/app.pid" ]] && kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null; then
-        kill "$(cat "$DIR/app.pid")" || true; sleep 0.5
-    fi
+    # 이미 떠 있는 앱은 창까지 사라진 것을 확인하고 나서 새로 띄운다.
+    kill_app
     (
         export WINIT_UNIX_BACKEND=wayland XDG_SESSION_TYPE=wayland
         # 앱 설정(last_file 등)과 복구 폴더가 실제 사용자의 것과 섞이지 않게 별도 홈.
@@ -149,16 +236,31 @@ cmd_app() {
     cmd_wait_app
 }
 
+# 앱 창이 뜰 때까지 기다린다. **방금 띄운 그 pid 의 창**을 기다리는 것이 핵심이다 —
+# `app_id` 만 보면 앞선 앱의 창이 아직 안 사라졌을 때 그걸 보고 바로 통과해,
+# 시나리오가 새 앱이 아니라 옛 창을 캡처한다(앱 담당자가 겪은 증상).
 cmd_wait_app() {
     load
-    for _ in $(seq 1 75); do
-        if swaymsg -t get_tree | grep -q '"app_id": "neural-linker"'; then
+    local want deadline
+    want=$(cat "$DIR/app.pid" 2>/dev/null || true)
+    deadline=$(( SECONDS + 20 ))
+    while (( SECONDS < deadline )); do
+        if [[ -n "$want" ]]; then
+            if app_window_pids | grep -qx "$want"; then
+                swaymsg "[pid=$want] focus" > /dev/null
+                sleep 0.5
+                echo "앱 창 준비됨 (pid $want)"; return
+            fi
+            # 좀비도 `kill -0` 을 통과하므로 상태를 직접 본다. 안 그러면 앱이 죽었는데도
+            # 시간이 다 찰 때까지 기다린 뒤에야 알게 된다.
+            if ! app_alive "$want"; then
+                echo "앱이 종료됐습니다:"; tail -20 "$DIR/app.log"; exit 1
+            fi
+        elif swaymsg -t get_tree | grep -q '"app_id": "neural-linker"'; then
+            # pid 파일 없이 부른 경우(손으로 `wait-app`)는 예전처럼 창만 본다.
             swaymsg '[app_id="neural-linker"] focus' > /dev/null
             sleep 0.5
-            echo "앱 창 준비됨 (pid $(cat "$DIR/app.pid"))"; return
-        fi
-        if ! kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null; then
-            echo "앱이 종료됐습니다:"; tail -20 "$DIR/app.log"; exit 1
+            echo "앱 창 준비됨"; return
         fi
         sleep 0.2
     done
@@ -334,9 +436,21 @@ run_step() {
 }
 
 cmd_run() {
+    # `--keep-app` 은 시나리오 인자가 아니라 하네스 옵션이라 먼저 걸러 낸다.
+    local keep_app=0
+    local -a rest=()
+    local a
+    for a in "$@"; do
+        if [[ "$a" == "--keep-app" ]]; then keep_app=1; else rest+=("$a"); fi
+    done
+    set -- ${rest[@]+"${rest[@]}"}
+
     local file="${1:?시나리오 파일}"; shift || true
     [[ -f "$file" ]] || { echo "시나리오가 없습니다: $file" >&2; exit 1; }
     load
+    # 앞선 실행이 남긴 앱을 먼저 치운다. 이걸 안 해서 시나리오가 엉뚱한 창을 캡처한 적이 있다.
+    # 일부러 띄워 둔 앱에 이어 붙이고 싶으면 `--keep-app`.
+    (( keep_app )) || kill_app
     mkdir -p "$DIFF_DIR"
 
     local steps
@@ -371,7 +485,8 @@ cmd_status() {
     if [[ ! -f "$STATE" ]]; then echo "꺼짐"; return; fi
     load
     echo "sway $SWAY_PID ($(kill -0 "$SWAY_PID" 2>/dev/null && echo 살아있음 || echo 죽음)) display=$NESTED_DISPLAY"
-    [[ -f "$DIR/app.pid" ]] && echo "app $(cat "$DIR/app.pid") ($(kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null && echo 살아있음 || echo 죽음))"
+    # 앱은 `app_alive` 로 본다 — 좀비는 `kill -0` 을 통과해서 죽은 것을 살아있다고 보고한다.
+    [[ -f "$DIR/app.pid" ]] && echo "app $(cat "$DIR/app.pid") ($(app_alive "$(cat "$DIR/app.pid")" && echo 살아있음 || echo 죽음))"
     [[ -f "$DIR/vseat.pid" ]] && echo "vseat $(cat "$DIR/vseat.pid") ($(kill -0 "$(cat "$DIR/vseat.pid")" 2>/dev/null && echo 살아있음 || echo 죽음))"
     [[ -f "$DIR/ime.pid" ]] && echo "fcitx5 $(cat "$DIR/ime.pid") ($(kill -0 "$(cat "$DIR/ime.pid")" 2>/dev/null && echo 살아있음 || echo 죽음))"
     swaymsg -t get_tree 2>/dev/null | (grep -o '"app_id": "[^"]*"' || true) | sort -u
