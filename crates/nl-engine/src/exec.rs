@@ -333,6 +333,16 @@ pub const P_GAMMA: &str = "gamma";
 pub const P_BETA: &str = "beta";
 pub const P_RUNNING_MEAN: &str = "running_mean";
 pub const P_RUNNING_VAR: &str = "running_var";
+/// 순환 레이어: 입력→게이트 가중치 `[D, gates·H]`.
+pub const P_WEIGHT_IH: &str = "weight_ih";
+/// 순환 레이어: 은닉→게이트 가중치 `[H, gates·H]`.
+pub const P_WEIGHT_HH: &str = "weight_hh";
+/// 순환 레이어: 입력 쪽 편향 `[gates·H]`.
+pub const P_BIAS_IH: &str = "bias_ih";
+/// 순환 레이어: 은닉 쪽 편향 `[gates·H]`. GRU 의 `n` 게이트가 `r` 과 곱해야 해 따로 둔다.
+pub const P_BIAS_HH: &str = "bias_hh";
+/// 양방향의 역방향 파라미터에 붙는 꼬리표 (`weight_ih_reverse` 처럼).
+pub const P_REVERSE_SUFFIX: &str = "_reverse";
 
 /// `"{node_id}.{part}"`.
 pub fn param_name(node: NodeId, part: &str) -> String {
@@ -555,6 +565,48 @@ impl<B: Backend> Model<B> {
                     self.insert_trainable(param_name(id, P_GAMMA), ones1::<B>(n, &dev));
                     self.insert_trainable(param_name(id, P_BETA), zeros1::<B>(n, &dev));
                 }
+                LayerKind::Lstm {
+                    hidden, bidirectional, ..
+                }
+                | LayerKind::Gru {
+                    hidden, bidirectional, ..
+                } => {
+                    let sm = self.in_shape(id, 0)?;
+                    if sm.len() != 2 {
+                        bail!("순환 레이어 입력은 [L, D] 여야 합니다 (지금 {sm:?})");
+                    }
+                    let (d, h) = (sm[1], *hidden);
+                    let gates = if matches!(kind, LayerKind::Lstm { .. }) { 4 } else { 3 };
+                    // PyTorch 와 같은 초기화: 모든 가중치·편향이 U(-1/√H, 1/√H).
+                    let bound = 1.0 / (h as f64).sqrt();
+                    for dir in directions(*bidirectional) {
+                        let w_ih = self.uniform(vec![d, gates * h], bound)?;
+                        let w_hh = self.uniform(vec![h, gates * h], bound)?;
+                        let b_ih = self.uniform(vec![gates * h], bound)?;
+                        let b_hh = self.uniform(vec![gates * h], bound)?;
+                        self.insert_trainable(rnn_name(id, P_WEIGHT_IH, dir), w_ih);
+                        self.insert_trainable(rnn_name(id, P_WEIGHT_HH, dir), w_hh);
+                        self.insert_trainable(rnn_name(id, P_BIAS_IH, dir), b_ih);
+                        self.insert_trainable(rnn_name(id, P_BIAS_HH, dir), b_hh);
+                    }
+                }
+                LayerKind::MultiHeadAttention { heads, .. } => {
+                    let sm = self.in_shape(id, 0)?;
+                    if sm.len() != 2 {
+                        bail!("어텐션 입력은 [L, D] 여야 합니다 (지금 {sm:?})");
+                    }
+                    let d = sm[1];
+                    if *heads == 0 || d % *heads != 0 {
+                        bail!("특징 차원 {d} 가 헤드 수 {heads} 로 나누어떨어지지 않습니다");
+                    }
+                    let bound = 1.0 / (d as f64).sqrt();
+                    for part in ["q", "k", "v", "out"] {
+                        let w = self.uniform(vec![d, d], bound)?;
+                        let b = self.uniform(vec![d], bound)?;
+                        self.insert_trainable(param_name(id, &format!("{part}_weight")), w);
+                        self.insert_trainable(param_name(id, &format!("{part}_bias")), b);
+                    }
+                }
                 LayerKind::Embedding { vocab, dim } => {
                     let w = random_dyn::<B>(&[*vocab, *dim], Distribution::Normal(0.0, 1.0), &self.device)?;
                     self.insert_trainable(param_name(id, P_WEIGHT), w);
@@ -776,8 +828,215 @@ impl<B: Backend> Model<B> {
                 target.push(*dim);
                 DynTensor::R3(out).reshape(&target)
             }
+
+            LayerKind::Lstm {
+                hidden,
+                bidirectional,
+                return_sequence,
+            } => {
+                let x3 = to_rank3(x()?, "LSTM")?;
+                let w = self.rnn_params(id, *bidirectional)?;
+                Ok(recurrent(x3, &w, *hidden, *return_sequence, Cell::Lstm))
+            }
+            LayerKind::Gru {
+                hidden,
+                bidirectional,
+                return_sequence,
+            } => {
+                let x3 = to_rank3(x()?, "GRU")?;
+                let w = self.rnn_params(id, *bidirectional)?;
+                Ok(recurrent(x3, &w, *hidden, *return_sequence, Cell::Gru))
+            }
+            LayerKind::MultiHeadAttention { heads, dropout } => {
+                let x3 = to_rank3(x()?, "어텐션")?;
+                let mut proj = Vec::with_capacity(4);
+                for part in ["q", "k", "v", "out"] {
+                    proj.push((
+                        self.p(id, &format!("{part}_weight"))?.into_r2()?,
+                        self.p(id, &format!("{part}_bias"))?.into_r1()?,
+                    ));
+                }
+                Ok(DynTensor::R3(self_attention(x3, *heads, *dropout, train, &proj)?))
+            }
         }
     }
+
+    /// 순환 레이어의 방향별 파라미터를 꺼낸다 (정방향 먼저).
+    fn rnn_params(&self, id: NodeId, bidirectional: bool) -> Result<Vec<RnnWeights<B>>> {
+        directions(bidirectional)
+            .into_iter()
+            .map(|dir| {
+                Ok(RnnWeights {
+                    w_ih: self.p(id, &rnn_part(P_WEIGHT_IH, dir))?.into_r2()?,
+                    w_hh: self.p(id, &rnn_part(P_WEIGHT_HH, dir))?.into_r2()?,
+                    b_ih: self.p(id, &rnn_part(P_BIAS_IH, dir))?.into_r1()?,
+                    b_hh: self.p(id, &rnn_part(P_BIAS_HH, dir))?.into_r1()?,
+                })
+            })
+            .collect()
+    }
+}
+
+// ───────────────────────────── 순환 · 어텐션 ─────────────────────────────
+
+/// 방향 표식. `false` = 정방향, `true` = 역방향.
+type Direction = bool;
+
+/// 이 레이어가 쓰는 방향 목록 (정방향 먼저).
+fn directions(bidirectional: bool) -> Vec<Direction> {
+    if bidirectional {
+        vec![false, true]
+    } else {
+        vec![false]
+    }
+}
+
+/// `weight_ih` → `weight_ih_reverse` 처럼 방향 꼬리표를 붙인다.
+fn rnn_part(base: &str, dir: Direction) -> String {
+    if dir {
+        format!("{base}{P_REVERSE_SUFFIX}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// `"{node_id}.{part}[_reverse]"`.
+pub fn rnn_name(node: NodeId, base: &str, dir: Direction) -> String {
+    param_name(node, &rnn_part(base, dir))
+}
+
+/// 순환 셀 종류.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cell {
+    Lstm,
+    Gru,
+}
+
+/// 한 방향의 파라미터.
+struct RnnWeights<B: Backend> {
+    w_ih: Tensor<B, 2>,
+    w_hh: Tensor<B, 2>,
+    b_ih: Tensor<B, 1>,
+    b_hh: Tensor<B, 1>,
+}
+
+fn to_rank3<B: Backend>(t: DynTensor<B>, what: &str) -> Result<Tensor<B, 3>> {
+    match t {
+        DynTensor::R3(t) => Ok(t),
+        o => bail!("{what} 은 [B, L, D] 입력이 필요합니다 (지금 랭크 {})", o.rank()),
+    }
+}
+
+/// LSTM/GRU 를 게이트 수식 그대로 편다.
+///
+/// 그래프가 런타임에 정해지므로 burn 의 `nn::Lstm` 모듈(정적 `Module` 파생)을 쓸 수 없다.
+/// 대신 파라미터 텐서를 직접 들고 시간축을 한 스텝씩 도는데, 이는 `Linear`·`Conv2d` 와 같은 방식이다.
+///
+/// 게이트 배치는 PyTorch 와 같다. LSTM 은 `[i, f, g, o]`, GRU 는 `[r, z, n]` 순서로
+/// `[D, gates·H]` 안에 이어 붙는다.
+fn recurrent<B: Backend>(
+    x: Tensor<B, 3>,
+    weights: &[RnnWeights<B>],
+    hidden: usize,
+    return_sequence: bool,
+    cell: Cell,
+) -> DynTensor<B> {
+    let [batch, len, _] = x.dims();
+    let device = x.device();
+    let mut per_direction: Vec<Vec<Tensor<B, 2>>> = Vec::with_capacity(weights.len());
+
+    for (dir, w) in weights.iter().enumerate() {
+        let reverse = dir == 1;
+        let mut h = Tensor::<B, 2>::zeros([batch, hidden], &device);
+        let mut c = Tensor::<B, 2>::zeros([batch, hidden], &device);
+        let mut outs: Vec<Tensor<B, 2>> = Vec::with_capacity(len);
+
+        for step in 0..len {
+            let t = if reverse { len - 1 - step } else { step };
+            let xt = x.clone().narrow(1, t, 1).squeeze_dim::<2>(1);
+            let gi = module::linear(xt, w.w_ih.clone(), Some(w.b_ih.clone()));
+            let gh = module::linear(h.clone(), w.w_hh.clone(), Some(w.b_hh.clone()));
+            let take = |t: &Tensor<B, 2>, k: usize| t.clone().narrow(1, k * hidden, hidden);
+
+            match cell {
+                Cell::Lstm => {
+                    let g = gi + gh;
+                    let i = activation::sigmoid(take(&g, 0));
+                    let f = activation::sigmoid(take(&g, 1));
+                    let gg = activation::tanh(take(&g, 2));
+                    let o = activation::sigmoid(take(&g, 3));
+                    c = f * c + i * gg;
+                    h = o * activation::tanh(c.clone());
+                }
+                Cell::Gru => {
+                    // n 게이트는 `r` 이 은닉 쪽 편향까지 곱해야 해서 gi/gh 를 따로 둔다.
+                    let r = activation::sigmoid(take(&gi, 0) + take(&gh, 0));
+                    let z = activation::sigmoid(take(&gi, 1) + take(&gh, 1));
+                    let n = activation::tanh(take(&gi, 2) + r * take(&gh, 2));
+                    h = (z.clone().neg().add_scalar(1.0)) * n + z * h;
+                }
+            }
+            outs.push(h.clone());
+        }
+        if reverse {
+            outs.reverse(); // 시간 순서로 되돌린다
+        }
+        per_direction.push(outs);
+    }
+
+    if return_sequence {
+        // 시각마다 방향을 이어 붙인 뒤 [B, L, H'] 로 쌓는다.
+        let steps: Vec<Tensor<B, 3>> = (0..len)
+            .map(|t| {
+                let parts: Vec<Tensor<B, 2>> = per_direction.iter().map(|d| d[t].clone()).collect();
+                Tensor::cat(parts, 1).unsqueeze_dim(1)
+            })
+            .collect();
+        DynTensor::R3(Tensor::cat(steps, 1))
+    } else {
+        // 각 방향의 마지막 상태: 정방향은 t=L-1, 역방향은 t=0 에서 계산된 것.
+        let parts: Vec<Tensor<B, 2>> = per_direction
+            .iter()
+            .enumerate()
+            .map(|(dir, d)| if dir == 1 { d[0].clone() } else { d[len - 1].clone() })
+            .collect();
+        DynTensor::R2(Tensor::cat(parts, 1))
+    }
+}
+
+/// 멀티헤드 셀프 어텐션. `proj` 는 q·k·v·out 투영 (가중치, 편향).
+fn self_attention<B: Backend>(
+    x: Tensor<B, 3>,
+    heads: usize,
+    dropout: f32,
+    train: bool,
+    proj: &[(Tensor<B, 2>, Tensor<B, 1>)],
+) -> Result<Tensor<B, 3>> {
+    let [batch, len, d] = x.dims();
+    if heads == 0 || d % heads != 0 {
+        bail!("특징 차원 {d} 가 헤드 수 {heads} 로 나누어떨어지지 않습니다");
+    }
+    let head_dim = d / heads;
+    let split = |t: Tensor<B, 3>| t.reshape([batch, len, heads, head_dim]).swap_dims(1, 2);
+
+    let q = split(module::linear(x.clone(), proj[0].0.clone(), Some(proj[0].1.clone())));
+    let k = split(module::linear(x.clone(), proj[1].0.clone(), Some(proj[1].1.clone())));
+    let v = split(module::linear(x, proj[2].0.clone(), Some(proj[2].1.clone())));
+
+    // [B, heads, L, L]
+    let scores = q.matmul(k.swap_dims(2, 3)).div_scalar((head_dim as f64).sqrt());
+    let mut attn = activation::softmax(scores, 3);
+    if train && dropout > 0.0 {
+        if dropout >= 1.0 {
+            bail!("어텐션 dropout 은 1 보다 작아야 합니다 (지금 {dropout})");
+        }
+        let keep = 1.0 - dropout as f64;
+        let mask = attn.random_like(Distribution::Bernoulli(keep));
+        attn = attn * mask * (1.0 / keep);
+    }
+
+    let ctx = attn.matmul(v).swap_dims(1, 2).reshape([batch, len, d]);
+    Ok(module::linear(ctx, proj[3].0.clone(), Some(proj[3].1.clone())))
 }
 
 // ───────────────────────────── 레이어 연산 ─────────────────────────────

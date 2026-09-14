@@ -1544,6 +1544,298 @@ fn b2_one_hot_target_width_is_checked_before_training() {
     std::fs::remove_dir_all(&dir2).ok();
 }
 
+// ───────────────────────────── 순환 · 어텐션 (M3) ─────────────────────────────
+
+/// 토큰 `L` 개짜리 시퀀스 CSV. 라벨 = **첫 토큰**(0/1), 나머지는 2..vocab 의 잡음.
+///
+/// 마지막까지 첫 원소를 기억해야 풀리므로 순환·어텐션이 실제로 동작하는지 본다.
+fn memory_sequence_csv(dir: &Path, rows: usize, len: usize, vocab: usize) -> DatasetSpec {
+    use std::fmt::Write as _;
+    let cols: Vec<String> = (0..len).map(|i| format!("t{i}")).collect();
+    let mut text = cols.join(",");
+    let _ = writeln!(text, ",y");
+    for i in 0..rows {
+        let label = i % 2;
+        let mut row = vec![label.to_string()];
+        for k in 1..len {
+            row.push((2 + (i * 7 + k * 13) % (vocab - 2)).to_string());
+        }
+        let _ = writeln!(text, "{},{label}", row.join(","));
+    }
+    std::fs::write(dir.join("seq.csv"), text).unwrap();
+    DatasetSpec::new(
+        "시퀀스",
+        DataSource::Csv {
+            path: "seq.csv".into(),
+            input_cols: cols,
+            target_cols: vec!["y".into()],
+            header: true,
+        },
+    )
+}
+
+/// `Input[L] → Embedding → (순환/어텐션) → … → Linear(2)` 모델.
+fn sequence_model(len: usize, vocab: usize, dim: usize, middle: Vec<LayerKind>) -> ModelDef {
+    let mut kinds = vec![
+        LayerKind::Input { shape: vec![len] },
+        LayerKind::Embedding { vocab, dim },
+    ];
+    kinds.extend(middle);
+    kinds.push(LayerKind::Linear {
+        out_features: 2,
+        bias: true,
+    });
+    chain(kinds)
+}
+
+#[test]
+fn recurrent_and_attention_output_shapes_match_shape_infer() {
+    let (len, vocab, dim) = (5usize, 8usize, 6usize);
+    let cases: Vec<(&str, Vec<LayerKind>, Vec<usize>)> = vec![
+        (
+            "LSTM 마지막만",
+            vec![LayerKind::Lstm {
+                hidden: 4,
+                bidirectional: false,
+                return_sequence: false,
+            }],
+            vec![1, 2],
+        ),
+        (
+            "LSTM 시퀀스 → Flatten",
+            vec![
+                LayerKind::Lstm {
+                    hidden: 4,
+                    bidirectional: false,
+                    return_sequence: true,
+                },
+                LayerKind::Flatten,
+            ],
+            vec![1, 2],
+        ),
+        (
+            "양방향 GRU 마지막만",
+            vec![LayerKind::Gru {
+                hidden: 3,
+                bidirectional: true,
+                return_sequence: false,
+            }],
+            vec![1, 2],
+        ),
+        (
+            "양방향 LSTM 시퀀스 → Flatten",
+            vec![
+                LayerKind::Lstm {
+                    hidden: 3,
+                    bidirectional: true,
+                    return_sequence: true,
+                },
+                LayerKind::Flatten,
+            ],
+            vec![1, 2],
+        ),
+        (
+            "어텐션 → Flatten",
+            vec![
+                LayerKind::MultiHeadAttention { heads: 3, dropout: 0.0 },
+                LayerKind::Flatten,
+            ],
+            vec![1, 2],
+        ),
+    ];
+
+    for (name, middle, want) in cases {
+        let def = sequence_model(len, vocab, dim, middle);
+        assert_eq!(inferred_output_shape(&def), vec![2], "{name}");
+        let idx = HostTensor::new(vec![1, len], (0..len).map(|i| (i % vocab) as f32).collect());
+        let out = run_once(&def, idx);
+        assert_eq!(out[0].shape, want, "{name}");
+        assert!(out[0].data.iter().all(|v| v.is_finite()), "{name} 에 NaN/Inf");
+    }
+}
+
+#[test]
+fn recurrent_middle_shapes_are_what_shape_infer_says() {
+    // 중간 레이어 출력 형상을 직접 확인한다 (Flatten 뒤로 숨지 않게).
+    let mut def = ModelDef::new("중간");
+    let g = &mut def.graph;
+    let i = add(g, LayerKind::Input { shape: vec![5, 6] });
+    let seq = add(
+        g,
+        LayerKind::Lstm {
+            hidden: 4,
+            bidirectional: true,
+            return_sequence: true,
+        },
+    );
+    let o = add(g, LayerKind::Output);
+    link(g, i, seq);
+    link(g, seq, o);
+    assert_eq!(inferred_output_shape(&def), vec![5, 8], "양방향이면 hidden 이 두 배");
+
+    let mut s = Session::load(&def, None, test_device()).unwrap();
+    let out = s.run(&[HostTensor::new(vec![2, 5, 6], vec![0.1; 60])]).unwrap();
+    assert_eq!(out[0].shape, vec![2, 5, 8]);
+
+    // 어텐션은 형상을 그대로 둔다.
+    let att = chain(vec![
+        LayerKind::Input { shape: vec![5, 6] },
+        LayerKind::MultiHeadAttention { heads: 2, dropout: 0.0 },
+    ]);
+    assert_eq!(inferred_output_shape(&att), vec![5, 6]);
+    let mut s = Session::load(&att, None, test_device()).unwrap();
+    assert_eq!(
+        s.run(&[HostTensor::new(vec![2, 5, 6], vec![0.1; 60])]).unwrap()[0].shape,
+        vec![2, 5, 6]
+    );
+}
+
+#[test]
+fn lstm_learns_to_remember_the_first_token() {
+    let dir = temp_dir("lstm-train");
+    let (len, vocab) = (6usize, 8usize);
+    let ds = memory_sequence_csv(&dir, 600, len, vocab);
+    let mut def = sequence_model(
+        len,
+        vocab,
+        8,
+        vec![LayerKind::Lstm {
+            hidden: 16,
+            bidirectional: false,
+            return_sequence: false,
+        }],
+    );
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = Optimizer::Adam {
+        lr: 1e-2,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    };
+    def.train.epochs = 25;
+    def.train.batch_size = 32;
+    def.train.device = test_device();
+    def.train.seed = 7;
+
+    let run = train_to_end(def, ds, &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    let last = run.last().unwrap();
+    let acc = last.val_metric.expect("정확도");
+    assert!(
+        acc > 0.9,
+        "LSTM 이 첫 토큰을 기억하지 못했습니다: {acc} (손실 {})",
+        last.train_loss
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn gru_and_attention_also_learn_the_task() {
+    for (name, middle) in [
+        (
+            "GRU",
+            vec![LayerKind::Gru {
+                hidden: 16,
+                bidirectional: false,
+                return_sequence: false,
+            }],
+        ),
+        (
+            "어텐션",
+            vec![
+                LayerKind::MultiHeadAttention { heads: 2, dropout: 0.0 },
+                LayerKind::Flatten,
+            ],
+        ),
+    ] {
+        let dir = temp_dir("seq-train");
+        let (len, vocab) = (6usize, 8usize);
+        let ds = memory_sequence_csv(&dir, 600, len, vocab);
+        let mut def = sequence_model(len, vocab, 8, middle);
+        def.train.loss = Loss::CrossEntropy;
+        def.train.metric = Metric::Accuracy;
+        def.train.optimizer = Optimizer::Adam {
+            lr: 1e-2,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        };
+        def.train.epochs = 25;
+        def.train.batch_size = 32;
+        def.train.device = test_device();
+        def.train.seed = 7;
+
+        let run = train_to_end(def, ds, &dir);
+        let acc = run.last().unwrap().val_metric.expect("정확도");
+        assert!(acc > 0.9, "{name} 이 과제를 풀지 못했습니다: {acc}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[test]
+fn sequence_layer_weights_survive_a_safetensors_round_trip() {
+    let dir = temp_dir("seq-ckpt");
+    let (len, vocab) = (4usize, 6usize);
+    let ds = memory_sequence_csv(&dir, 128, len, vocab);
+    let mut def = sequence_model(
+        len,
+        vocab,
+        6,
+        vec![
+            LayerKind::Lstm {
+                hidden: 5,
+                bidirectional: true,
+                return_sequence: true,
+            },
+            LayerKind::MultiHeadAttention { heads: 2, dropout: 0.0 },
+            LayerKind::Flatten,
+        ],
+    );
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 2;
+    def.train.batch_size = 32;
+    def.train.device = test_device();
+
+    let run = train_to_end(def.clone(), ds, &dir);
+    let ckpt = dir.join(run.checkpoint.as_ref().unwrap());
+
+    // 순환·어텐션 파라미터가 빠짐없이 들어 있어야 한다.
+    let names: Vec<String> = nl_engine::checkpoint_summary(&ckpt)
+        .unwrap()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    for part in [
+        "weight_ih",
+        "weight_hh",
+        "bias_ih",
+        "bias_hh",
+        "weight_ih_reverse",
+        "weight_hh_reverse",
+        "q_weight",
+        "k_bias",
+        "out_weight",
+    ] {
+        assert!(
+            names.iter().any(|n| n.ends_with(part)),
+            "{part} 가 체크포인트에 없습니다: {names:?}"
+        );
+    }
+
+    // 시드를 달리해도 같은 가중치를 얹으면 결과가 같아야 한다.
+    let mut a = def.clone();
+    a.train.seed = 1;
+    let mut b = def;
+    b.train.seed = 999;
+    let x = HostTensor::new(vec![2, len], vec![0.0, 3.0, 1.0, 5.0, 2.0, 4.0, 0.0, 1.0]);
+    let mut sa = Session::load(&a, Some(&ckpt), test_device()).unwrap();
+    let mut sb = Session::load(&b, Some(&ckpt), test_device()).unwrap();
+    let inputs = [x];
+    assert_eq!(sa.run(&inputs).unwrap(), sb.run(&inputs).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ───────────────────────────── 성능 측정 (NL_BENCH=1) ─────────────────────────────
 
 /// XOR 1000 샘플 × 200 에포크 CPU 소요 시간. 배치 업로드 경로를 바꿀 때 전후 비교용.
