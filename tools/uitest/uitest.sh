@@ -18,6 +18,12 @@
 #   uitest.sh type "문자열"            글자 그대로 입력(가상 키보드, 입력기 거치지 않음)
 #   uitest.sh wait-app                앱 창이 뜰 때까지 대기(최대 15초)
 #   uitest.sh wait-log "<정규식>" [초]  앱 로그에 그 줄이 나올 때까지 대기(기본 10초)
+#   uitest.sh write-sample <경로> [xor|cnn|new]  샘플 프로젝트를 파일로 (앱의 --write-sample)
+#   uitest.sh expect-port-free <포트>  그 포트를 아무도 안 쓰는지 확인(쓰고 있으면 실패)
+#   uitest.sh wait-port <포트> [초]    그 포트가 열릴 때까지 대기(서버가 떴다는 신호)
+#   uitest.sh wait-port-free <포트> [초]  그 포트가 닫힐 때까지 대기(파이프라인이 멈췄다는 신호)
+#   uitest.sh http <메서드> <URL> [본문]  curl 로 한 번 부르고 상태·본문을 적어 둔다
+#   uitest.sh expect-http <코드> [본문 정규식]  마지막 http 결과를 확인
 #   uitest.sh expect-shot <이름> [x,y WxH]  골든 이미지와 비교(없으면 만들고 알림)
 #   uitest.sh run <시나리오.uit> [--keep-app]   시나리오 실행. 실패한 단계에서 멈추고 종료 코드로 알린다.
 #                                    시작할 때 남아 있는 앱을 내린다 — `--keep-app` 이면 그대로 둔다.
@@ -376,6 +382,110 @@ cmd_wait_log() {
     return 1
 }
 
+# 샘플 프로젝트를 파일로 써 둔다. 앱의 `--write-sample` 을 부르는 것이라 파일 대화상자를 피한다.
+#
+# 시나리오가 스스로 입력을 갖추게 하려는 것이다 — 바깥에서 미리 만들어 두게 하면 시나리오 하나를
+# 돌리는 데 두 단계가 필요해지고, 러너(`verify-all.sh`)마다 그 준비를 베껴 적게 된다.
+cmd_write_sample() {
+    local out="${1:?출력 경로}" kind="${2:-xor}"
+    local bin="${UITEST_APP_BIN:-$ROOT/target/release/nl-app}"
+    if [[ ! -x "$bin" ]]; then
+        [[ -n "${UITEST_APP_BIN:-}" ]] && { echo "UITEST_APP_BIN 이 실행 파일이 아닙니다: $bin" >&2; return 1; }
+        (cd "$ROOT" && cargo build --release -p nl-app) || return 1
+    fi
+    "$bin" --write-sample "$out" "$kind" > /dev/null || { echo "샘플을 쓰지 못했습니다: $out" >&2; return 1; }
+    echo "샘플 $kind → $out"
+}
+
+# ── 포트·HTTP ───────────────────────────────────────────────────────────────
+#
+# 빌더의 "시험 실행" 은 파이프라인 로그를 **앱 안 로그 패널**에만 쌓고 표준 오류로 내보내지 않는다.
+# 그래서 `wait-log "HTTP 서버 … 열림"` 으로는 서버가 떴는지 알 수 없다. 대신 포트를 직접 본다 —
+# 어차피 시험이 확인하려는 것이 "정말 듣고 있는가" 이므로 로그보다 곧은 신호다.
+
+# 그 포트에서 누가 듣고 있는가.
+port_listening() {
+    local port="${1:?포트}"
+    ss -ltn 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"
+}
+
+# 시나리오 시작 전에 포트가 비어 있는지 본다. 남의 서버에 대고 시험하면 통과해도 의미가 없다.
+cmd_expect_port_free() {
+    local port="${1:?포트}"
+    if port_listening "$port"; then
+        echo "포트 $port 를 이미 누가 쓰고 있습니다 — 시나리오를 시작할 수 없습니다" >&2
+        ss -ltnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" >&2 || true
+        return 1
+    fi
+    echo "포트 $port 비어 있음"
+}
+
+# 포트가 열릴 때까지 기다린다 (서버가 떴다는 신호).
+cmd_wait_port() {
+    local port="${1:?포트}" secs="${2:-15}"
+    local deadline=$(( $(date +%s) + ${secs%.*} ))
+    while (( $(date +%s) <= deadline )); do
+        if port_listening "$port"; then echo "포트 $port 열림"; return 0; fi
+        sleep 0.2
+    done
+    echo "포트 $port 가 ${secs}초 안에 열리지 않았습니다" >&2
+    return 1
+}
+
+# 포트가 닫힐 때까지 기다린다 (파이프라인이 멈췄다는 신호).
+cmd_wait_port_free() {
+    local port="${1:?포트}" secs="${2:-15}"
+    local deadline=$(( $(date +%s) + ${secs%.*} ))
+    while (( $(date +%s) <= deadline )); do
+        if ! port_listening "$port"; then echo "포트 $port 닫힘"; return 0; fi
+        sleep 0.2
+    done
+    echo "포트 $port 가 ${secs}초 안에 닫히지 않았습니다" >&2
+    return 1
+}
+
+# `http <메서드> <URL> [본문]` — curl 로 한 번 부르고 상태 코드와 본문을 적어 둔다.
+#
+# 결과는 `$DIR/http.status` 와 `$DIR/http.body` 에 남고 `expect-http` 가 그것을 본다.
+# 두 단계로 나눈 이유는 시나리오에서 "부르기" 와 "확인" 을 따로 읽히게 하려는 것이다.
+cmd_http() {
+    load
+    local method="${1:?메서드}" url="${2:?URL}" body="${3:-}"
+    local args=(-sS --max-time 15 -o "$DIR/http.body" -w '%{http_code}' -X "$method")
+    if [[ -n "$body" ]]; then
+        args+=(-H 'Content-Type: application/json' -d "$body")
+    fi
+    local code
+    if ! code=$(curl "${args[@]}" "$url" 2>"$DIR/http.err"); then
+        echo "(요청 실패)" > "$DIR/http.status"
+        echo "요청이 실패했습니다: $method $url" >&2
+        cat "$DIR/http.err" >&2 || true
+        return 1
+    fi
+    printf '%s' "$code" > "$DIR/http.status"
+    echo "$method $url → $code $(head -c 200 "$DIR/http.body" 2>/dev/null)"
+}
+
+# `expect-http <상태코드> [본문 정규식]` — 마지막 `http` 결과를 확인한다.
+cmd_expect_http() {
+    local want="${1:?상태코드}" pattern="${2:-}"
+    local got
+    got=$(cat "$DIR/http.status" 2>/dev/null || echo "(없음)")
+    if [[ "$got" != "$want" ]]; then
+        echo "상태 코드가 다릅니다: 기대 $want, 실제 $got" >&2
+        head -c 400 "$DIR/http.body" 2>/dev/null >&2 || true
+        echo >&2
+        return 1
+    fi
+    if [[ -n "$pattern" ]] && ! grep -Eq -- "$pattern" "$DIR/http.body"; then
+        echo "본문이 정규식과 맞지 않습니다: $pattern" >&2
+        head -c 400 "$DIR/http.body" 2>/dev/null >&2 || true
+        echo >&2
+        return 1
+    fi
+    echo "응답 확인: $want${pattern:+ / $pattern}"
+}
+
 # 로그에 정규식이 나타났는가 (기다리되 아무것도 찍지 않는다). `key-until` 이 쓴다.
 log_has() {
     local pattern="$1" secs="$2"
@@ -465,6 +575,12 @@ run_step() {
         app)         cmd_app "$@";;
         wait-app)    cmd_wait_app;;
         wait-log)    cmd_wait_log "$@";;
+        write-sample)     cmd_write_sample "$@";;
+        expect-port-free) cmd_expect_port_free "$@";;
+        wait-port)        cmd_wait_port "$@";;
+        wait-port-free)   cmd_wait_port_free "$@";;
+        http)             cmd_http "$@";;
+        expect-http)      cmd_expect_http "$@";;
         key-until)   cmd_key_until "$@";;
         ime)         cmd_ime;;
         shot)        cmd_shot "$@";;
@@ -561,6 +677,12 @@ case "${1:-}" in
     app) shift; cmd_app "$@";;
     wait-app) cmd_wait_app;;
     wait-log) shift; cmd_wait_log "$@";;
+    write-sample) shift; cmd_write_sample "$@";;
+    expect-port-free) shift; cmd_expect_port_free "$@";;
+    wait-port) shift; cmd_wait_port "$@";;
+    wait-port-free) shift; cmd_wait_port_free "$@";;
+    http) shift; cmd_http "$@";;
+    expect-http) shift; cmd_expect_http "$@";;
     expect-shot) shift; cmd_expect_shot "$@";;
     run) shift; cmd_run "$@";;
     ime) cmd_ime;;

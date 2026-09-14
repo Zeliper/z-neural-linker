@@ -144,6 +144,7 @@ if [[ $WANT_GUI -eq 1 ]]; then
   if [[ $harness_started -eq 1 ]]; then
     run_step smoke    "시나리오 smoke"   gui_scenario smoke.uit
     run_step startup  "시나리오 startup" gui_scenario startup.uit
+    run_step pipeline "시나리오 pipeline" gui_scenario pipeline.uit
   else
     warn "하네스가 뜨지 않아 시나리오를 건너뜁니다"
   fi

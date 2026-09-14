@@ -27,6 +27,8 @@ $U key -M ctrl -k s -m ctrl   # Ctrl+S      /  key -k Tab  /  key -k Return  /  
 $U type "sync"                # 문자열 입력
 $U ime; $U click 130 77; $U key -M ctrl -k space -m ctrl; $U type "dkssud"   # → 안녕
 $U run scenarios/smoke.uit    # 시나리오 실행(아래 "시나리오 러너")
+$U expect-port-free 8799      # 포트가 비었는지 / wait-port · wait-port-free
+$U http POST http://127.0.0.1:8799/infer '[1,0]'; $U expect-http 200
 $U log; $U status; $U stop
 ```
 좌표는 가상 출력 기준이고 앱 창은 출력 전체를 채우므로 캡처의 픽셀 좌표를 그대로 쓰면 된다.
@@ -45,6 +47,17 @@ $U stop
 실패한 단계에서 즉시 멈추고, 어느 파일 몇 번째 줄인지와 함께 전체 화면을 `$UITEST_DIR/fail-<단계>.ppm`
 으로 남긴다. 종료 코드로 성공(0)·실패(1)를 알리므로 CI 에 그대로 건다.
 
+### 있는 시나리오
+
+| 파일 | 보는 것 |
+| --- | --- |
+| `smoke.uit` | 뷰 일곱 개를 차례로 열어 골든 이미지와 견준다. **화면 모양** |
+| `startup.uit` | 장치 확인을 기다리지 않고 뜨는지, 그 사이에도 단축키가 먹는지. **응답성** |
+| `pipeline.uit` | 시험 실행이 진짜 HTTP 서버를 열고 응답하는지. **동작** |
+
+`pipeline.uit` 는 샘플의 고정 포트(`127.0.0.1:8799`)를 쓰므로 시작하자마자 `expect-port-free` 로
+비어 있는지 본다. 남이 쓰고 있으면 그 서버에 대고 시험하게 되어 통과해도 의미가 없다.
+
 ### 문법
 
 | 쓰기 | 뜻 |
@@ -56,7 +69,21 @@ $U stop
 | `"따옴표"` | 공백이 든 인자를 한 덩어리로 (shlex 규칙) |
 
 명령은 `app`, `wait-app`, `wait-log`, `ime`, `shot`, `expect-shot`, `move`, `click`, `dblclick`,
-`drag`, `hold`, `release`, `key`, `key-until`, `type`, `sleep <초>`, `log`, `stop`.
+`drag`, `hold`, `release`, `key`, `key-until`, `type`, `sleep <초>`, `log`, `stop`,
+그리고 아래 **동작 확인용** 명령들이다.
+
+| 명령 | 뜻 |
+| --- | --- |
+| `write-sample <경로> [xor\|cnn\|new]` | 샘플 프로젝트를 파일로 (앱의 `--write-sample`). 시나리오가 스스로 입력을 갖추게 한다 |
+| `expect-port-free <포트>` | 아무도 그 포트를 안 쓰는지. 쓰고 있으면 실패 |
+| `wait-port <포트> [초]` | 그 포트가 열릴 때까지 (서버가 떴다는 신호) |
+| `wait-port-free <포트> [초]` | 그 포트가 닫힐 때까지 (파이프라인이 멈췄다는 신호) |
+| `http <메서드> <URL> [본문]` | curl 로 한 번 부르고 상태·본문을 적어 둔다 |
+| `expect-http <코드> [본문 정규식]` | 마지막 `http` 결과를 확인 |
+
+포트를 보는 명령이 따로 있는 이유가 있다. 빌더는 파이프라인 로그를 **앱 안 로그 패널**에만 쌓고
+표준 오류로 내보내지 않아서, `wait-log "HTTP 서버 … 열림"` 으로는 서버가 떴는지 알 수 없다.
+포트를 직접 보는 편이 "정말 듣고 있는가" 라는 질문에 곧바로 답한다.
 
 `key-until "<정규식>" <wtype 인자…>` 는 키를 보내고 그 결과가 로그에 보일 때까지 다시 보낸다(기본 5회,
 `UITEST_KEY_TRIES`·`UITEST_KEY_WAIT` 로 조절). 컴포지터가 가상 키보드를 등록하기 전에 보낸 키는 조용히
@@ -180,6 +207,11 @@ PNG 가 필요하면 `magick diff/03-view3.ppm 03-view3.png` 처럼 바꾼다.
 - 앱 로그의 "arboard clipboard: X11 …" 경고는 헤드리스라 X 가 없어서 나는 것으로 무해하다.
 
 ## 검증 이력
+2026-09-14: `scenarios/pipeline.uit` 추가 — 시험 실행 → `POST /infer` → 200 → 정지까지 25단계.
+**6회 연속 통과**(골든 0.000%). 만드는 동안 두 가지를 고쳤다: 캔버스가 로그 패널이 열리는 시점에
+따라 확대율을 달리 잡아 골든이 2.7% 어긋났고(캡처 직전 "전체 보기" 로 고정), Ctrl+4 가 5회 중 1회
+사라져 `key-until` 로 바꿨다. 빌더의 파이프라인 로그는 표준 오류로 나오지 않아 `wait-log` 대신
+포트 상태를 신호로 쓴다.
 2026-09-11: 시나리오 러너와 골든 비교를 `scenarios/smoke.uit` 로 확인. 같은 시나리오를 두 번 돌려
 8장 전부 일치(뷰 7 만 0.004% 잔 떨림, 허용 0.5% 안), 골든 하나를 일부러 바꿔치기하니 그 단계에서
 멈추고 차이 이미지와 `fail-<단계>.ppm` 을 남기며 종료 코드 1. 앱 바이너리는 `UITEST_APP_BIN` 으로
