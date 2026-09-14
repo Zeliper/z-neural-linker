@@ -62,6 +62,61 @@ for pkg in meta["packages"]:
 nl_size()   { stat -c %s "$1"; }
 nl_sha256() { sha256sum "$1" | cut -d' ' -f1; }
 
+# ── 포트 격리 ─────────────────────────────────────────────────────────
+#
+# 샘플 프로젝트의 추론 API 는 **고정 포트**(XOR 8799, CNN 8800)를 쓴다. 사람이 손으로 부를
+# 주소를 문서에 적어 두려면 고정이라야 하기 때문이다. 그런데 검증 스크립트가 그대로 띄우면
+# 같은 기계에서 다른 세션·다른 에이전트가 돌리는 것과 포트를 다툰다. 실제로 그렇게 깨졌다 —
+# 부하 시험이 8799 를 잡고 있는데 검증이 같은 포트를 열려다 실패했고, 포트를 잡은 쪽을
+# 남의 찌꺼기로 오해해 죽이는 일까지 났다.
+#
+# 그래서 **검증은 샘플을 그대로 띄우지 않는다.** 프로젝트를 복사해 포트만 빈 포트로 바꿔 띄운다.
+
+# 지금 비어 있는 TCP 포트 하나를 고른다. 운영체제에 0번을 달라고 해 받은 번호를 돌려준다.
+#
+# 받은 즉시 놓아 주므로 쓰기 전에 남이 채 갈 틈이 이론상 있다. 높은 임의 포트라 실제로는
+# 부딪히지 않으며, 고정 포트를 쓰는 것보다 훨씬 안전하다.
+nl_free_port() {
+  python3 -c '
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+'
+}
+
+# 프로젝트 파일의 HTTP 서버 주소를 다른 포트로 바꾼다. **파일을 제자리에서 고친다** —
+# 원본이 아니라 복사본을 넘겨라.
+#
+#   cp 샘플.nlproj "$TMP/시험.nlproj"
+#   PORT=$(nl_free_port)
+#   nl_rebind_project "$TMP/시험.nlproj" "$PORT"
+#   ./내앱 --headless ... # 이제 $PORT 에서 듣는다
+#
+# 바꿀 주소를 못 찾으면 실패한다. 조용히 넘어가면 고정 포트로 돌아 버리기 때문이다.
+nl_rebind_project() {
+  local proj="$1" port="$2"
+  [[ -f "$proj" ]] || nl_die "프로젝트 파일이 없다: $proj"
+  python3 - "$proj" "$port" <<'PYEOF'
+import json, re, sys
+
+path, port = sys.argv[1], int(sys.argv[2])
+text = open(path, encoding="utf-8").read()
+
+# 샘플이 쓰는 두 고정 주소. 어느 쪽이 들었든 같은 빈 포트로 모은다 — 한 프로젝트가
+# 두 주소를 함께 쓰는 일은 없다.
+found = [m for m in re.findall(r"127\.0\.0\.1:(8799|8800)", text)]
+if not found:
+    sys.exit(f"{path} 에 바꿀 고정 주소(127.0.0.1:8799|8800)가 없다")
+
+new = re.sub(r"127\.0\.0\.1:(?:8799|8800)", f"127.0.0.1:{port}", text)
+json.loads(new)  # 바꾼 결과가 여전히 JSON 인지 본다
+open(path, "w", encoding="utf-8").write(new)
+print(f"127.0.0.1:{port}")
+PYEOF
+}
+
 # ── 아카이브 ──────────────────────────────────────────────────────────
 
 # Linux tar.gz. install.sh 가 기대하는 배치 그대로 담는다.
@@ -69,16 +124,19 @@ nl_sha256() { sha256sum "$1" | cut -d' ' -f1; }
 nl_pack_linux() {
   local out parent
   out="$(nl_abs "$1")"; parent="$(nl_abs "$2")"; shift 2
-  local stage="$parent/neural-linker"
-  rm -rf "$stage"; mkdir -p "$stage"
+  # 아카이브 안의 폴더 이름은 `neural-linker` 로 고정이라 바꿀 수 없다. 대신 **한 겹 위를 pid 로
+  # 가른다** — 두 실행이 같은 부모를 쓰면 서로의 스테이징을 지워 버린다.
+  local work="$parent/.pack-$$-linux"
+  local stage="$work/neural-linker"
+  rm -rf "$work"; mkdir -p "$stage"
   cp "$@" "$stage/"
   cp "$NL_ROOT/packaging/linux/install.sh" \
      "$NL_ROOT/packaging/linux/neural-linker.desktop" \
      "$NL_ROOT/packaging/linux/neural-linker-mime.xml" \
      "$NL_ROOT/packaging/linux/neural-linker.svg" "$stage/"
   # 아이콘 원본(SVG)이 들어가야 install.sh 가 아이콘 테마에 넣는다.
-  tar -czf "$out" -C "$parent" neural-linker
-  rm -rf "$stage"
+  tar -czf "$out" -C "$work" neural-linker
+  rm -rf "$work"
 }
 
 # Windows zip. 설치 프로그램 없이 풀어 쓰는 묶음이다.
@@ -86,7 +144,7 @@ nl_pack_linux() {
 nl_pack_windows() {
   local out parent
   out="$(nl_abs "$1")"; parent="$(nl_abs "$2")"; shift 2
-  local stage="$parent/win"
+  local stage="$parent/.pack-$$-win"
   rm -rf "$stage"; mkdir -p "$stage"
   cp "$@" "$stage/"
   ( cd "$stage" && zip -q -r "$out" . )

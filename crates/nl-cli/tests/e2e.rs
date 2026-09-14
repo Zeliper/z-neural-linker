@@ -145,6 +145,10 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
     let out = run("nl sample", Command::new(NL).arg("sample").arg(&proj));
     assert!(proj.is_file(), "샘플 파일이 만들어지지 않았다: {}", stdout(&out));
 
+    // 샘플의 고정 포트(8799)는 옆에서 도는 다른 시험·다른 세션과 부딪힌다. 빈 포트로 옮긴다.
+    let bind = rebind_http_server(&proj, nl_core::sample::API_BIND);
+    eprintln!("이 시험의 추론 API 주소: {bind}");
+
     // ── 2. 학습 (짧게) ──
     let out = run(
         "nl train",
@@ -225,9 +229,9 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
         .spawn()
         .expect("배포판을 띄우지 못했다");
 
-    let served = wait_until_serving(nl_core::sample::API_BIND, Duration::from_secs(15));
+    let served = wait_until_serving(&bind, Duration::from_secs(15));
     let result = if served {
-        let url = format!("http://{}{}", nl_core::sample::API_BIND, nl_core::sample::API_PATH);
+        let url = format!("http://{bind}{}", nl_core::sample::API_PATH);
         // 모델이 올라올 때까지 503 이 나올 수 있다 — 200 이 될 때까지 잠깐 다시 시도한다.
         let mut last = None;
         let start = Instant::now();
@@ -256,7 +260,7 @@ fn sample_train_infer_build_and_run_the_deployed_app() {
     let _ = child.kill();
     let _ = child.wait();
 
-    assert!(served, "배포판이 {} 에서 듣지 않았다", nl_core::sample::API_BIND);
+    assert!(served, "배포판이 {bind} 에서 듣지 않았다");
     let res = result.expect("배포판이 추론 요청에 답하지 않았다");
     assert_eq!(res.status, 200, "본문: {}", res.body);
     let body: serde_json::Value = serde_json::from_str(&res.body).expect("응답이 JSON 이 아니다");
@@ -288,7 +292,7 @@ fn tls_cert_then_run_serves_https() {
 
     // 샘플의 고정 포트(8799)를 그대로 쓰면 다른 종단 시험과 **동시에** 돌 때 서로 포트를 뺏는다.
     // 실제로 그렇게 깨졌다 — 여기서만 빈 포트로 바꿔 둔다.
-    let addr = rebind_http_server(&proj);
+    let addr = rebind_http_server(&proj, nl_core::sample::API_BIND);
     eprintln!("이 시험의 https 주소: {addr}");
     run(
         "nl train",
@@ -406,17 +410,23 @@ fn tls_cert_then_run_serves_https() {
 
 /// 샘플의 고정 포트를 빈 포트로 바꾸고 새 주소를 돌려준다.
 ///
-/// 고정 포트는 시험을 나란히 돌릴 때 서로를 막는다. 운영체제에 빈 포트를 물어본 뒤 곧바로 놓아
-/// 주므로 그 사이에 남이 채 갈 틈이 이론상 있지만, 높은 임의 포트라 실제로 부딪히지 않는다.
-fn rebind_http_server(proj: &Path) -> String {
+/// 샘플은 문서에 적어 둘 수 있도록 고정 포트를 쓴다(XOR 8799, CNN 8800). 시험은 그 고정 포트를
+/// **절대 그대로 쓰지 않는다.** 같은 기계에서 다른 시험·다른 세션이 같은 포트를 잡으면 서로를
+/// 막기 때문이다. 실제로 그렇게 깨졌다 — 옆 세션의 부하 시험이 8799 를 쥔 채였다.
+///
+/// 운영체제에 빈 포트를 물어본 뒤 곧바로 놓아 주므로 그 사이에 남이 채 갈 틈이 이론상 있지만,
+/// 높은 임의 포트라 실제로 부딪히지 않는다.
+///
+///   let addr = rebind_http_server(&proj, nl_core::sample::API_BIND);
+fn rebind_http_server(proj: &Path, from: &str) -> String {
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("빈 포트");
         l.local_addr().expect("주소").port()
     };
     let addr = format!("127.0.0.1:{port}");
     let text = std::fs::read_to_string(proj).expect("프로젝트 파일");
-    let replaced = text.replace(nl_core::sample::API_BIND, &addr);
-    assert_ne!(replaced, text, "샘플에 {} 가 없다", nl_core::sample::API_BIND);
+    let replaced = text.replace(from, &addr);
+    assert_ne!(replaced, text, "샘플에 {from} 가 없다");
     std::fs::write(proj, replaced).expect("프로젝트 파일 쓰기");
     addr
 }
@@ -453,6 +463,10 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
         "모델 이름이 안 보인다:\n{}",
         stdout(&out)
     );
+
+    // 샘플의 고정 포트(8800)는 옆에서 도는 다른 시험·다른 세션과 부딪힌다. 빈 포트로 옮긴다.
+    let bind = rebind_http_server(&proj, nl_core::sample::API_BIND_CNN);
+    eprintln!("이 시험의 추론 API 주소: {bind}");
 
     // ── 학습 (짧게) ──
     let out = run(
@@ -499,8 +513,7 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
         .spawn()
         .expect("배포판을 띄우지 못했다");
 
-    let bind = nl_core::sample::API_BIND_CNN;
-    let served = wait_until_serving(bind, Duration::from_secs(15));
+    let served = wait_until_serving(&bind, Duration::from_secs(15));
     let url = format!("http://{bind}{}", nl_core::sample::API_PATH);
     let mut headers = std::collections::BTreeMap::new();
     headers.insert("Content-Type".to_string(), "image/png".to_string());

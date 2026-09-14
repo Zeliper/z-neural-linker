@@ -14,6 +14,10 @@
 #     --installer           Inno Setup 이 있으면 Windows setup.exe 도 만든다 (CI 에는 없는 단계)
 #     --skip-build          이미 빌드된 산출물을 그대로 쓴다
 #
+# 다른 것과 나란히 도는 것을 전제한다 — 스테이징 폴더에 pid 를 붙이고, `dist-local/verify/`(검증
+# 로그)는 건드리지 않는다. 파이프라인을 띄우는 단계를 새로 넣는다면 `scripts/README.md` 의
+# 포트 규칙(`nl_free_port`·`nl_rebind_project`)을 따르라.
+#
 # CI 와 다른 점은 셋뿐이다.
 #   · 버전을 태그가 아니라 인자/워크스페이스에서 읽는다
 #   · `--key` 를 주지 않으면 **임시 키**로 서명한다 — 배포용이 아니라 형식 확인용이다
@@ -59,7 +63,10 @@ APP_BASE="$BASE_URL/$VERSION"
 
 nl_log "버전 $VERSION · 크레이트 ${CRATE_LIST[*]} · 대상 ${TARGET_LIST[*]}"
 nl_log "출력 $OUT"
-rm -rf "$OUT"; mkdir -p "$OUT"
+mkdir -p "$OUT"
+# 자기 산출물만 지운다. `dist-local/verify/` 에는 `scripts/verify-all.sh` 의 로그가 들어 있어
+# 통째로 지우면 방금 돌린 검증 기록이 사라진다.
+find "$OUT" -mindepth 1 -maxdepth 1 ! -name verify -exec rm -rf {} +
 
 # ── 빌드 ──────────────────────────────────────────────────────────────
 pkg_args=()
