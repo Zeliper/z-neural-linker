@@ -15,6 +15,12 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 /// 최대 리다이렉트 횟수. https→http 강등 사슬과 무한 리다이렉트를 막는다.
 const MAX_REDIRECTS: u32 = 3;
+/// 미리 잡아 둘 수 있는 최대 바이트.
+///
+/// `Content-Length` 는 **서버가 적는 숫자**다. 그대로 선할당하면 헤더 한 줄로 256 MB 를 잡게 할 수 있다.
+/// 이만큼만 미리 잡고 나머지는 받으면서 늘린다 — 정상 도구는 여기 안에 들어오고, 넘더라도
+/// `Vec` 이 알아서 자란다.
+const MAX_PREALLOC_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 고정해 둔 Inno Setup 버전. 올릴 때는 [`INNO_SHA256`] 과 [`INNO_SIZE`] 도 함께 고쳐야 한다
 /// (`curl -sL <주소> | sha256sum`).
@@ -282,7 +288,14 @@ fn run_streaming(
     extra_path: Option<&Path>,
     send: &impl Fn(ToolProgress),
 ) -> anyhow::Result<()> {
-    let mut cmd = std::process::Command::new(program);
+    // 이름이 아니라 **풀어낸 절대 경로**로 띄운다. 무엇이 실행되는지 로그에 남고,
+    // 확인한 순간과 실행하는 순간 사이에 PATH 가 바뀌어도 다른 파일이 잡히지 않는다.
+    // (PATH 자체를 믿는 것은 그대로다 — 이 도구들은 사용자 툴체인이라 경로를 박을 수 없다.)
+    let resolved = resolve_program(program)?;
+    if resolved != Path::new(program) {
+        send(ToolProgress::Output(format!("{program} → {}", resolved.display())));
+    }
+    let mut cmd = std::process::Command::new(&resolved);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
@@ -381,6 +394,19 @@ fn host_triple() -> Option<String> {
     let out = std::process::Command::new("rustc").arg("-vV").output().ok()?;
     let text = String::from_utf8(out.stdout).ok()?;
     text.lines().find_map(|l| l.strip_prefix("host: ")).map(str::to_string)
+}
+
+/// 이름을 `PATH` 에서 찾아 절대 경로로 바꾼다. 이미 경로 꼴이면 그대로 쓴다.
+///
+/// 못 찾으면 무엇을 깔아야 하는지 알려 주는 오류를 낸다 — 그냥 띄우면 `No such file or directory` 만 나온다.
+fn resolve_program(program: &str) -> anyhow::Result<PathBuf> {
+    let p = Path::new(program);
+    if p.components().count() > 1 {
+        return Ok(p.to_path_buf());
+    }
+    which(program)
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .ok_or_else(|| anyhow::anyhow!("{program} 을(를) PATH 에서 찾지 못했습니다 — 먼저 설치하고 PATH 에 넣으세요"))
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -566,7 +592,7 @@ fn download(url: &str, size_hint: u64, send: &impl Fn(ToolProgress)) -> anyhow::
         .and_then(|v| v.parse::<u64>().ok());
 
     let mut reader = res.body_mut().as_reader();
-    let mut out: Vec<u8> = Vec::with_capacity(total.unwrap_or(size_hint).min(MAX_DOWNLOAD_BYTES) as usize);
+    let mut out: Vec<u8> = Vec::with_capacity(total.unwrap_or(size_hint).min(MAX_PREALLOC_BYTES) as usize);
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
         let n = reader.read(&mut chunk).context("본문을 읽는 중 끊겼습니다")?;
@@ -852,6 +878,58 @@ mod tests {
         assert_eq!(std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
+    /// L16: 이름이 아니라 풀어낸 절대 경로로 띄운다.
+    #[test]
+    fn programs_resolve_to_an_absolute_path_before_running() {
+        // PATH 에 있는 이름은 절대 경로가 된다.
+        let sh = resolve_program("sh").expect("sh 는 있어야 합니다");
+        assert!(sh.is_absolute(), "{}", sh.display());
+        assert!(sh.is_file(), "{}", sh.display());
+
+        // 경로 꼴이면 그대로 둔다.
+        assert_eq!(resolve_program("/usr/bin/env").unwrap(), PathBuf::from("/usr/bin/env"));
+        assert_eq!(resolve_program("./tool").unwrap(), PathBuf::from("./tool"));
+
+        // 없으면 무엇을 해야 하는지 알려 주는 오류.
+        let err = resolve_program("이런건-없다-확실히").unwrap_err().to_string();
+        assert!(err.contains("PATH 에서 찾지 못했습니다"), "{err}");
+    }
+
+    /// L4: 서버가 적은 `Content-Length` 만 믿고 크게 선할당하지 않는다.
+    #[test]
+    fn a_lying_content_length_cannot_make_us_preallocate() {
+        let body = "가짜 도구".as_bytes().to_vec();
+        let server = TestServer::start_with_length("/tool.exe", body.clone(), Some(200_000_000));
+        let dir = tempfile::tempdir().unwrap();
+
+        let plan = ToolPlan::new(
+            "시험 도구",
+            server.url("/tool.exe"),
+            Some(sha256_hex(&body)),
+            0,
+            dir.path().join("tool.exe"),
+            vec![],
+            vec![],
+            0,
+        );
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        // 설치 명령(wine)이 없어 실패할 수는 있지만, 내려받기 자체는 끝난다.
+        let _ = run_tool_plan(&plan, tx);
+        assert_eq!(
+            std::fs::read(dir.path().join("tool.exe")).unwrap(),
+            body,
+            "내용이 그대로여야 합니다"
+        );
+    }
+
+    #[test]
+    fn the_prealloc_cap_is_far_below_the_download_cap() {
+        const _: () = assert!(MAX_PREALLOC_BYTES < MAX_DOWNLOAD_BYTES);
+        // 서버가 알린 길이가 아무리 커도 선할당은 상한에서 멈춘다.
+        assert_eq!(200_000_000u64.min(MAX_PREALLOC_BYTES), MAX_PREALLOC_BYTES);
+        assert_eq!(1_000u64.min(MAX_PREALLOC_BYTES), 1_000, "작은 값은 그대로 쓴다");
+    }
+
     /// 시험용 최소 HTTP 서버. 루프백이라 `NL_ALLOW_HTTP=1` 이 있어야 한다.
     struct TestServer {
         addr: String,
@@ -861,6 +939,11 @@ mod tests {
 
     impl TestServer {
         fn start(path: &'static str, body: Vec<u8>) -> Self {
+            Self::start_with_length(path, body, None)
+        }
+
+        /// `fake_len` 을 주면 그 값을 `Content-Length` 로 보낸다 — 서버가 거짓말하는 상황을 만든다.
+        fn start_with_length(path: &'static str, body: Vec<u8>, fake_len: Option<u64>) -> Self {
             allow_loopback_http();
             let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("서버"));
             let addr = server.server_addr().to_ip().expect("IP").to_string();
@@ -868,7 +951,15 @@ mod tests {
             let handle = std::thread::spawn(move || {
                 for req in worker.incoming_requests() {
                     if req.url().split('?').next() == Some(path) {
-                        let _ = req.respond(tiny_http::Response::from_data(body.clone()));
+                        let mut res = tiny_http::Response::from_data(body.clone());
+                        if let Some(n) = fake_len {
+                            // 본문보다 훨씬 큰 길이를 알린다. 선할당을 이 값으로 하면 안 된다.
+                            res = res.with_header(
+                                tiny_http::Header::from_bytes(&b"Content-Length"[..], n.to_string().as_bytes())
+                                    .unwrap(),
+                            );
+                        }
+                        let _ = req.respond(res);
                     } else {
                         let _ = req.respond(tiny_http::Response::empty(404));
                     }

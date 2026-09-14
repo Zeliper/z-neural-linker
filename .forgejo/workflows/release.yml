@@ -37,8 +37,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon0 \
-            clang lld llvm \
-            minisign
+            clang lld llvm
         # clang·lld·llvm: cargo-xwin 이 clang-cl·lld-link·llvm-lib 로 MSVC 대상을 링크한다.
         #   러너는 root 라 배포판 패키지를 그대로 쓴다 (개발 기계에서는 rustup 의 rust-lld 로 대신할 수 있다 —
         #   packaging/README.md "준비물" 참고).
@@ -136,14 +135,24 @@ jobs:
         if: env.MINISIGN_KEY != ''
         run: |
           set -euo pipefail
-          # 비밀번호 없는 키(minisign -G -W)여야 한다. 비밀번호가 걸린 키는 대화형 입력을 요구한다.
-          printf '%s\n' "$MINISIGN_KEY" > /tmp/minisign.key
-          chmod 600 /tmp/minisign.key
+          # minisign CLI 를 깔지 않는다 — nl-update 의 예제 도구가 같은 형식을 만든다.
+          # 비밀키는 MINISIGN_KEY 환경 변수로만 건네고 디스크에 쓰지 않는다.
+          # 비밀번호 없는 키(minisign -G -W 와 같은 것)여야 한다 — CI 는 대화형 입력을 받을 수 없다.
           for f in dist/latest.json dist/runtimes/latest.json; do
-            minisign -Sm "$f" -s /tmp/minisign.key < /dev/null
-            echo "서명: $f.minisig"
+            cargo run -q -p nl-update --example nl-keygen -- sign "$f"
           done
-          rm -f /tmp/minisign.key
+
+      - name: 서명 검증 (배포 앱과 같은 코드로)
+        if: env.MINISIGN_KEY != '' && vars.UPDATE_PUBLIC_KEY != ''
+        env:
+          UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          # 올리기 전에 여기서 막는다. 이 검증은 nl_update::verify_manifest 를 그대로 부른다 —
+          # 통과하면 사용자의 앱에서도 통과한다.
+          for f in dist/latest.json dist/runtimes/latest.json; do
+            cargo run -q -p nl-update --example nl-keygen -- verify "$f" --pubkey "$UPDATE_PUBLIC_KEY"
+          done
 
       - name: 산출물 보관
         uses: actions/upload-artifact@v4
