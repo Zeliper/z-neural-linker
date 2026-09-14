@@ -36,6 +36,8 @@ pub struct RunnerSession {
     pub stats: Option<RunnerStats>,
     /// 파이프라인의 모델 노드 → 그 노드가 돌리는 모델. `Binding::ModelOutput` 위젯에 값을 넘길 때 쓴다.
     model_nodes: BTreeMap<PNodeId, ModelId>,
+    /// 마지막으로 찍은 stderr 마커. 같은 줄이 잇따르면 찍지 않는다.
+    last_marker: Option<String>,
 }
 
 /// 틱 루프의 실제 속도 (`RunnerEvent::Stats`).
@@ -100,7 +102,21 @@ impl RunnerSession {
                     _ => None,
                 })
                 .collect(),
+            last_marker: None,
         })
+    }
+
+    /// 실행기 소식을 stderr 마커로 한 줄 찍는다 — uitest 하네스가 `wait-log` 로 기다린다.
+    ///
+    /// `RUST_LOG` 와 무관하게 보여야 해서 `log::info!` 가 아니라 `eprintln!` 이다. 값 이벤트는
+    /// 초당 수십 줄이 되므로 넣지 않는다. 오류는 틱마다 같은 것이 다시 오므로 **바로 앞과 같은
+    /// 줄이면 건너뛴다** — 안 그러면 로그가 금세 부풀어 `wait-log` 가 느려진다.
+    fn marker(&mut self, what: &str) {
+        if self.last_marker.as_deref() == Some(what) {
+            return;
+        }
+        eprintln!("[nl-app] runner: {what}");
+        self.last_marker = Some(what.to_string());
     }
 
     pub fn is_running(&self) -> bool {
@@ -130,16 +146,32 @@ impl RunnerSession {
         while let Ok(ev) = self.handle.events.try_recv() {
             out.changed = true;
             match ev {
-                RunnerEvent::Started => out.logs.push("파이프라인 시작".into()),
+                RunnerEvent::Started => {
+                    self.marker("started");
+                    out.logs.push("파이프라인 시작".into());
+                }
                 RunnerEvent::Stopped => {
                     self.finished = true;
                     self.live.running = false;
                     out.stopped = true;
+                    self.marker("stopped");
                     out.logs.push("파이프라인 정지".into());
                 }
-                RunnerEvent::Log(s) => out.logs.push(s),
+                RunnerEvent::Log(s) => {
+                    // 값 로그는 너무 잦다 — 하네스가 기다릴 만한 것은 서버가 열린 순간뿐이다.
+                    if let Some(addr) = http_opened(&s) {
+                        let m = format!("http {addr}");
+                        self.marker(&m);
+                    }
+                    out.logs.push(s);
+                }
                 RunnerEvent::Error { node, message } => {
                     self.errors += 1;
+                    let m = format!(
+                        "error {} {message}",
+                        node.map(|n| n.short()).unwrap_or_else(|| "-".into())
+                    );
+                    self.marker(&m);
                     match node {
                         Some(n) => {
                             self.live.errors.insert(n, message.clone());
@@ -200,6 +232,15 @@ impl Drop for RunnerSession {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+/// 실행기 로그가 "HTTP 서버가 열렸다" 인지 보고, 맞으면 주소만 뽑는다.
+///
+/// 로그 형식은 `HTTP 서버 https://127.0.0.1:39481/infer 열림 (토큰 필요)` (nl-io `runner.rs`).
+fn http_opened(log: &str) -> Option<&str> {
+    let (addr, rest) = log.strip_prefix("HTTP 서버 ")?.split_once(' ')?;
+    // " 열림" 이 없는 다른 HTTP 서버 로그(TLS 오류 등)는 지나간다.
+    (!addr.is_empty() && rest.trim_start().starts_with("열림")).then_some(addr)
 }
 
 /// `Binding::PipelineOutput{node}` 로 묶인 위젯에도 노드 값을 반영한다 (런타임과 같은 규칙).
@@ -392,6 +433,20 @@ mod tests {
                 action: BuiltinAction::StopPipeline
             })
         ));
+    }
+
+    #[test]
+    fn the_http_marker_takes_only_opened_server_logs() {
+        assert_eq!(
+            http_opened("HTTP 서버 http://127.0.0.1:39481/infer 열림 (루프백 전용)"),
+            Some("http://127.0.0.1:39481/infer")
+        );
+        assert_eq!(
+            http_opened("HTTP 서버 https://127.0.0.1:1/infer 열림 (토큰 필요)"),
+            Some("https://127.0.0.1:1/infer")
+        );
+        assert_eq!(http_opened("HTTP 서버 TLS: 인증서를 읽을 수 없다"), None);
+        assert_eq!(http_opened("파이프라인 시작"), None);
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub fn show(
                     if ui.button("⛶ 전체 보기").on_hover_text("F").clicked() {
                         canvas.request_fit();
                     }
+                    onnx_button(ui, ctx, id, report, &mut out.actions);
                     ui.separator();
                     summary(ui, ctx, id, report);
                 }
@@ -78,6 +79,35 @@ pub fn show(
         }
     }
     out
+}
+
+/// "ONNX 로 내보내기…" — 내보낼 수 없는 그래프면 회색으로 두고 이유를 툴팁에 적는다.
+fn onnx_button(ui: &mut egui::Ui, ctx: &ViewCtx, id: ModelId, report: &ShapeReport, actions: &mut Vec<ViewAction>) {
+    let Some(m) = ctx.project.models.get(&id) else { return };
+    // `check` 는 가중치를 읽지 않는다 — 학습 전에도 부를 수 있다.
+    let unsupported = nl_engine::onnx::check(m).unsupported;
+    let blocked = if !unsupported.is_empty() {
+        Some(format!(
+            "아직 ONNX 로 내보낼 수 없는 레이어가 있습니다: {}",
+            unsupported.join(", ")
+        ))
+    } else if !report.errors.is_empty() {
+        Some("형상 오류를 먼저 고쳐야 내보낼 수 있습니다 — 하단 도크의 문제 탭을 보세요".to_string())
+    } else if m.graph.nodes.is_empty() {
+        Some("레이어가 없는 모델은 내보낼 것이 없습니다".to_string())
+    } else {
+        None
+    };
+    let tip = match &blocked {
+        Some(why) => why.clone(),
+        None if m.weights.is_none() => "가중치가 아직 없습니다 — 누르면 어떻게 만드는지 알려 줍니다".to_string(),
+        None => "학습한 가중치를 담아 .onnx 파일로 씁니다 (opset 17, 배치 차원은 동적)".to_string(),
+    };
+    ui.add_enabled_ui(blocked.is_none(), |ui| {
+        if ui.button("ONNX 로 내보내기…").on_hover_text(&tip).clicked() {
+            actions.push(ViewAction::ExportOnnx { model: id, run: None });
+        }
+    });
 }
 
 /// 노드·엣지 수와 형상 추론 결과 한 줄.

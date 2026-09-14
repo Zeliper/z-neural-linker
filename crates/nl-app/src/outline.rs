@@ -23,6 +23,8 @@ struct OutlineOut {
     /// 편집 중인 이름을 확정한다.
     commit_rename: bool,
     cancel_rename: bool,
+    /// 이 모델을 ONNX 로 내보낸다 (파일 대화상자는 앱이 연다).
+    export_onnx: Option<ModelId>,
 }
 
 impl NlApp {
@@ -114,6 +116,15 @@ impl NlApp {
                 resp.header_response.context_menu(|ui| {
                     if ui.button("이름 변경").clicked() {
                         out.start_rename = Some((Selection::Model(*id), m.name.clone()));
+                        ui.close();
+                    }
+                    // 모델 뷰 툴바와 같은 일. 아웃라인에서 바로 꺼낼 수 있으면 모델이 여럿일 때 편하다.
+                    let exportable = nl_engine::onnx::check(m).unsupported.is_empty() && !m.graph.nodes.is_empty();
+                    if ui
+                        .add_enabled(exportable, egui::Button::new("ONNX 로 내보내기…"))
+                        .clicked()
+                    {
+                        out.export_onnx = Some(*id);
                         ui.close();
                     }
                     if ui.button("삭제").clicked() {
@@ -341,7 +352,9 @@ impl NlApp {
             self.sel.set(Selection::Node(model, node));
             self.canvas.pending_focus = Some(node);
         }
-        let _ = now;
+        if let Some(model) = out.export_onnx {
+            self.export_onnx(model, None, now);
+        }
     }
 }
 

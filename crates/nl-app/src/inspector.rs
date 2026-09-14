@@ -395,6 +395,19 @@ impl NlApp {
         // 서로 다른 필드라 동시에 빌릴 수 있다.
         let shape_buf = &mut self.shape_buf;
         let doc = &mut self.doc;
+        // 다출력 경고에 쓸 이름 목록. 아래에서 노드를 가변으로 빌리므로 그 전에 모아 둔다.
+        let output_names: Vec<(nl_core::NodeId, String)> = doc
+            .project
+            .models
+            .get(&model)
+            .map(|m| {
+                m.graph
+                    .output_nodes()
+                    .into_iter()
+                    .filter_map(|id| m.graph.nodes.get(&id).map(|n| (id, n.name.trim().to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
         let Some(node) = doc
             .project
             .models
@@ -450,11 +463,47 @@ impl NlApp {
                 }
             }
             LayerKind::Output => {
-                ui.label(
-                    RichText::new("모델의 출력입니다. 설정이 없습니다.")
-                        .color(COL_WEAK)
-                        .size(11.5),
-                );
+                // 출력이 둘 이상이면 이름이 페이로드 필드 순서를 정한다 — 여기서 바로 알려 준다.
+                if output_names.len() > 1 {
+                    let mine = node.name.trim();
+                    let dup = !mine.is_empty()
+                        && output_names
+                            .iter()
+                            .filter(|(id, _)| *id != node.id)
+                            .any(|(_, n)| n == mine);
+                    if mine.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "⚠ 이름을 지어 주세요 — 다출력 모델은 Output 이름이 페이로드 필드 순서를 정합니다",
+                            )
+                            .color(COL_WARN)
+                            .size(11.5),
+                        );
+                    } else if dup {
+                        ui.label(
+                            RichText::new(format!(
+                                "⚠ 이름 '{mine}' 이 다른 출력과 겹칩니다 — 필드를 가릴 수 없습니다"
+                            ))
+                            .color(COL_WARN)
+                            .size(11.5),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "출력 {}개 중 하나 — 이름이 페이로드 필드가 됩니다",
+                                output_names.len()
+                            ))
+                            .color(COL_WEAK)
+                            .size(11.5),
+                        );
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("모델의 출력입니다. 설정이 없습니다.")
+                            .color(COL_WEAK)
+                            .size(11.5),
+                    );
+                }
             }
             LayerKind::Linear { out_features, bias } => {
                 ui.horizontal(|ui| {

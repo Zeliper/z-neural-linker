@@ -317,7 +317,16 @@ impl View {
     }
 }
 
-/// 설정을 실제 장치로 푼다. **백그라운드 스레드에서만 부른다.**
+/// 템플릿을 놓기 전에 물어볼 것.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemplateAsk {
+    pub name: &'static str,
+    pub pos: [f32; 2],
+    pub params: nl_core::templates::TemplateParams,
+    /// 선택돼 있던 노드. 블록의 열린 입력을 여기에 잇는다.
+    pub attach: Option<NodeId>,
+}
+
 /// 프로젝트 폴더 밖에 파일을 쓰기 전에 묻는 내용 (보안 리뷰 M22).
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutsideAsk {
@@ -333,6 +342,12 @@ enum DeviceMsg {
     List(Vec<DeviceInfo>),
     /// 자동 선택까지 끝났다. 이 뒤로는 `nl_engine::resolve_cached` 가 곧바로 답한다.
     Ready { note: String },
+}
+
+/// 진행 중인 ONNX 내보내기. 결과는 노드·이니셜라이저 수와 쓴 파일 크기다.
+struct OnnxJob {
+    rx: Receiver<Result<(nl_engine::ExportReport, u64), String>>,
+    out: PathBuf,
 }
 
 /// 녹화 라벨 스위치로 쓰는 숫자키 0~9.
@@ -445,6 +460,8 @@ pub struct NlApp {
     /// 진행 중인 설치를 멈추라는 신호. 청크 사이에서 확인된다.
     /// 행 수를 세는 백그라운드 작업 (데이터셋별).
     count_jobs: BTreeMap<DatasetId, Receiver<Result<usize, String>>>,
+    /// ONNX 내보내기 (한 번에 하나). 큰 모델은 가중치를 읽고 쓰는 데 몇 초가 걸린다.
+    onnx_job: Option<OnnxJob>,
     tool_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 자동 저장·복구.
     autosaver: recovery::AutoSaver,
@@ -455,6 +472,8 @@ pub struct NlApp {
     pub(crate) autosave_file: bool,
     /// 복구 직후에는 원본 자동 저장을 멈춘다 — 되살린 내용이 원본을 조용히 덮으면 안 된다.
     file_autosave_held: bool,
+    /// 템플릿을 놓기 전에 파라미터를 묻는 창.
+    template_ask: Option<TemplateAsk>,
     /// 지금 문서 파일을 마지막으로 읽거나 쓴 시각. 외부 변경을 알아채는 기준이다.
     file_seen_at: Option<std::time::SystemTime>,
     /// 연 파일이 이 앱보다 새 형식이었는가. 저장할 때 한 번 더 알린다.
@@ -599,12 +618,14 @@ impl NlApp {
             tool_job: None,
             tool_progress: None,
             count_jobs: BTreeMap::new(),
+            onnx_job: None,
             tool_cancel: None,
             autosaver: recovery::AutoSaver::default(),
             recover_candidates: recovery::list(&recovery::default_dir()),
             recovery_dir: recovery::default_dir(),
             autosave_file: stored("autosave_file", false),
             file_autosave_held: false,
+            template_ask: None,
             file_seen_at: None,
             doc_newer_format: false,
             overwrite_ask: None,
@@ -1033,6 +1054,20 @@ impl NlApp {
             return;
         };
         match action {
+            CanvasAction::OpenTemplate { name, pos } => {
+                if let Some(spec) = nl_core::templates::spec(name) {
+                    self.template_ask = Some(TemplateAsk {
+                        name,
+                        pos,
+                        params: spec.default_params,
+                        // 노드를 골라 둔 채 템플릿을 놓으면 그 노드 뒤에 잇는다.
+                        attach: match self.sel.primary {
+                            Selection::Node(_, n) => Some(n),
+                            _ => None,
+                        },
+                    });
+                }
+            }
             CanvasAction::AddNode { kind, pos } => {
                 let node = Node::new(kind, pos);
                 let id = node.id;
@@ -1132,6 +1167,7 @@ impl NlApp {
                 self.toast("정지를 요청했습니다", now);
             }
             ViewAction::ApplyRunWeights(id) => self.apply_run_weights(id, now),
+            ViewAction::ExportOnnx { model, run } => self.export_onnx(model, run, now),
             ViewAction::StartPipeline(pid) => self.start_pipeline(pid, now),
             ViewAction::StopPipeline => self.stop_pipeline(now),
             ViewAction::SetArmInput(on) => {
@@ -1648,6 +1684,109 @@ impl NlApp {
         self.toast(format!("{which} 가중치를 모델에 적용했습니다"), now);
     }
 
+    // ── ONNX 내보내기 ───────────────────────────────────────────
+
+    /// "ONNX 로 내보내기…" — 저장 경로를 묻고 백그라운드 스레드에서 쓴다.
+    ///
+    /// `run` 이 있으면 그 실행의 체크포인트를, 없으면 모델에 붙은 가중치를 쓴다. 실행 쪽에서
+    /// 부르면 모델 가중치는 건드리지 않는다 — 예전 실행을 그대로 꺼내 볼 수 있어야 한다.
+    pub(crate) fn export_onnx(&mut self, model: ModelId, run: Option<RunId>, now: f64) {
+        if self.onnx_job.is_some() {
+            self.toast("이미 ONNX 를 내보내는 중입니다", now);
+            return;
+        }
+        let Some(m) = self.doc.project.models.get(&model).cloned() else {
+            self.toast("모델을 찾을 수 없습니다", now);
+            return;
+        };
+        // 버튼이 회색이어도 단축키·기록 표에서 올 수 있으니 여기서 한 번 더 막는다.
+        let unsupported = nl_engine::onnx::check(&m).unsupported;
+        if !unsupported.is_empty() {
+            self.toast(
+                format!("내보낼 수 없는 레이어가 있습니다: {}", unsupported.join(", ")),
+                now,
+            );
+            return;
+        }
+        let base = self.base_dir();
+        let weights = match onnx_weights_path(&self.doc.project, &m, run, &base) {
+            Ok(p) => p,
+            Err(msg) => {
+                self.toast(msg, now);
+                return;
+            }
+        };
+        if !weights.is_file() {
+            self.toast(format!("가중치 파일이 없습니다: {}", weights.display()), now);
+            return;
+        }
+        let suggested = format!("{}.onnx", sanitize(&m.name));
+        let Some(out) = rfd::FileDialog::new()
+            .add_filter("ONNX", &["onnx"])
+            .set_directory(&base)
+            .set_file_name(&suggested)
+            .save_file()
+        else {
+            return;
+        };
+        // rfd 가 확장자를 붙여 주지 않는 데스크톱 환경이 있다.
+        let out = if out.extension().is_some() {
+            out
+        } else {
+            out.with_extension("onnx")
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = out.clone();
+        let spawned = std::thread::Builder::new().name("nl-onnx".into()).spawn(move || {
+            let r = nl_engine::export_onnx(&m, &weights, &target, nl_engine::ExportOptions::default())
+                .map(|rep| {
+                    let size = std::fs::metadata(&target).map(|md| md.len()).unwrap_or(0);
+                    (rep, size)
+                })
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(r);
+        });
+        match spawned {
+            Ok(_) => {
+                self.onnx_job = Some(OnnxJob { rx, out: out.clone() });
+                self.log(format!("ONNX 내보내기 시작: {}", out.display()));
+                self.toast("ONNX 로 내보내는 중…", now);
+            }
+            Err(e) => self.toast(format!("내보내기 스레드를 띄우지 못했습니다: {e}"), now),
+        }
+    }
+
+    /// 내보내기 결과를 받아 토스트로 알린다.
+    fn tick_onnx(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(job) = &self.onnx_job else { return };
+        let result = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("내보내기가 끊겼습니다".to_string()),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(REPOLL);
+                return;
+            }
+        };
+        let out = self.onnx_job.take().map(|j| j.out).unwrap_or_default();
+        match result {
+            Ok((rep, size)) => {
+                let msg = format!(
+                    "ONNX 저장 완료 — 노드 {}개 · 가중치 {}개 · {} ({})",
+                    rep.nodes,
+                    rep.initializers,
+                    views::fmt_bytes(size),
+                    views::short_path(&out.display().to_string())
+                );
+                self.log(msg.clone());
+                self.toast(msg, now);
+            }
+            Err(e) => {
+                self.log(format!("ONNX 내보내기 실패: {e}"));
+                self.toast(format!("ONNX 내보내기 실패: {e}"), now);
+            }
+        }
+    }
+
     // ── 파이프라인 ──────────────────────────────────────────────
 
     /// 지금 보고 있는 파이프라인.
@@ -2139,6 +2278,145 @@ impl NlApp {
         if self.overwrite_ask.is_some() && modal.should_close() {
             self.overwrite_ask = None;
         }
+    }
+
+    /// 템플릿 파라미터 창. 확인을 눌러야 노드가 놓인다.
+    fn template_modal(&mut self, ctx: &egui::Context, now: f64) {
+        use nl_core::templates::TemplateParams as P;
+        let Some(mut ask) = self.template_ask.clone() else {
+            return;
+        };
+        let Some(spec) = nl_core::templates::spec(ask.name) else {
+            self.template_ask = None;
+            return;
+        };
+        let (mut insert, mut cancel) = (false, false);
+        let modal = egui::Modal::new(egui::Id::new("template-params")).show(ctx, |ui| {
+            ui.set_width(MODAL_WIDTH);
+            ui.heading(spec.label);
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new(spec.description).color(views::COL_WEAK).size(11.5)).wrap());
+            ui.add_space(8.0);
+
+            egui::Grid::new("template-params-grid")
+                .num_columns(2)
+                .spacing([10.0, 5.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut egui::Ui, label: &str, v: &mut usize, max: usize, tip: &str| {
+                        ui.label(RichText::new(label).color(views::COL_WEAK));
+                        ui.add(egui::DragValue::new(v).range(1..=max)).on_hover_text(tip);
+                        ui.end_row();
+                    };
+                    match &mut ask.params {
+                        P::ResidualBlock { width } => {
+                            row(
+                                ui,
+                                "폭",
+                                width,
+                                65_536,
+                                "블록이 폭을 바꾸지 않으므로 상류 폭과 같아야 합니다",
+                            );
+                        }
+                        P::TransformerBlock {
+                            d_model,
+                            heads,
+                            ff_mult,
+                        } => {
+                            row(ui, "d_model", d_model, 65_536, "이 폭으로 들어와 이 폭으로 나갑니다");
+                            row(ui, "헤드 수", heads, 64, "d_model 이 이 값으로 나누어떨어져야 합니다");
+                            row(ui, "피드포워드 배수", ff_mult, 64, "가운데 층의 폭 = d_model × 이 값");
+                        }
+                        P::ConvBlock { channels } => {
+                            row(ui, "채널", channels, 65_536, "합성곱이 낼 채널 수입니다");
+                        }
+                    }
+                });
+
+            // 값이 잘못되면 확인을 막는다 — 놓고 나서 형상 오류를 보는 것보다 낫다.
+            let problem = ask.params.check().err();
+            if let Some(e) = &problem {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(format!("✖ {e}")).color(views::COL_ERROR).size(11.5)).wrap());
+            }
+            match ask.attach {
+                Some(_) => {
+                    ui.label(
+                        RichText::new("고른 노드 뒤에 잇습니다")
+                            .color(views::COL_WEAK)
+                            .size(11.0),
+                    );
+                }
+                None => {
+                    ui.label(
+                        RichText::new("연결 없이 놓습니다 — 노드를 고른 뒤 열면 그 뒤에 이어 줍니다")
+                            .color(views::COL_WEAK)
+                            .size(11.0),
+                    );
+                }
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(problem.is_none(), egui::Button::new("놓기")).clicked() {
+                    insert = true;
+                }
+                if ui.button("취소").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if insert {
+            self.insert_template(&ask, now);
+            self.template_ask = None;
+        } else if cancel || modal.should_close() {
+            self.template_ask = None;
+        } else {
+            self.template_ask = Some(ask);
+        }
+    }
+
+    /// 템플릿이 만든 노드와 엣지를 한 묶음으로 넣는다 — undo 한 번에 통째로 사라진다.
+    fn insert_template(&mut self, ask: &TemplateAsk, now: f64) {
+        let Some(model) = self.active_model() else {
+            self.toast("모델을 먼저 만드세요", now);
+            return;
+        };
+        let (nodes, edges) = match nl_core::templates::instantiate(ask.name, ask.pos, &ask.params) {
+            Ok(v) => v,
+            Err(e) => {
+                self.toast(format!("템플릿을 놓지 못했습니다: {e}"), now);
+                return;
+            }
+        };
+        let open = nl_core::templates::open_inputs(&nodes, &edges);
+        let first = nodes.first().map(|n| n.id);
+
+        let mut ops: Vec<Op> = Vec::with_capacity(nodes.len() + edges.len() + open.len());
+        ops.extend(nodes.into_iter().map(|node| Op::UpsertNode { model, node }));
+        ops.extend(edges.into_iter().map(|edge| Op::UpsertEdge { model, edge }));
+        // 잔차가 있는 블록은 열린 입력이 둘이고 **둘 다 같은 상류**에 이어야 덧셈 형상이 맞는다.
+        if let Some(from) = ask.attach {
+            for to in &open {
+                ops.push(Op::UpsertEdge {
+                    model,
+                    edge: Edge {
+                        id: nl_core::EdgeId::new(),
+                        from,
+                        to: *to,
+                    },
+                });
+            }
+        }
+        self.doc.apply_local(ops);
+        if let Some(id) = first {
+            self.sel.set(Selection::Node(model, id));
+        }
+        let attached = if ask.attach.is_some() {
+            format!(", 입력 {}곳 연결", open.len())
+        } else {
+            String::new()
+        };
+        self.toast(format!("템플릿을 놓았습니다{attached}"), now);
     }
 
     /// 산출물 폴더가 프로젝트 폴더 밖이면 물어볼 내용을 만든다.
@@ -3085,6 +3363,7 @@ impl NlApp {
             || self.pending_plan.is_some()
             || self.outside_ask.is_some()
             || self.overwrite_ask.is_some()
+            || self.template_ask.is_some()
             || !self.recover_candidates.is_empty()
         {
             return;
@@ -3392,6 +3671,7 @@ impl eframe::App for NlApp {
         self.tick_devices(ctx);
         self.tick_autosave(ctx, now);
         self.tick_counts(ctx, now);
+        self.tick_onnx(ctx, now);
         self.doc.tick(now);
         if self.doc.in_burst() {
             // 입력이 멎어도 burst 를 undo 항목으로 확정하려면 한 번 더 깨어나야 한다.
@@ -3460,6 +3740,7 @@ impl eframe::App for NlApp {
         self.tool_modal(ctx, now);
         self.outside_modal(ctx, now);
         self.overwrite_modal(ctx, now);
+        self.template_modal(ctx, now);
         self.update_window(ctx, now);
         self.draw_toasts(ctx, now);
 
@@ -3741,6 +4022,35 @@ pub fn sanitize(name: &str) -> String {
         "project".into()
     } else {
         t.to_string()
+    }
+}
+
+/// ONNX 로 내보낼 때 쓸 가중치 파일. 실패하면 사용자에게 보일 안내 문구를 돌려준다.
+///
+/// `run` 이 있으면 그 실행의 체크포인트를 쓴다. 조기 종료로 남은 "가장 좋았던" 가중치가 있으면
+/// 마지막 것보다 그쪽을 먼저 쓴다 — 마지막 에포크는 이미 과적합으로 넘어갔을 수 있다.
+fn onnx_weights_path(
+    project: &Project,
+    model: &nl_core::ModelDef,
+    run: Option<RunId>,
+    base: &Path,
+) -> Result<PathBuf, String> {
+    match run {
+        Some(id) => {
+            let r = project
+                .runs
+                .get(&id)
+                .ok_or_else(|| "실행 기록을 찾을 수 없습니다".to_string())?;
+            r.best_checkpoint
+                .clone()
+                .or_else(|| r.checkpoint.clone())
+                .map(|p| base.join(p))
+                .ok_or_else(|| "이 실행에는 체크포인트가 없습니다".to_string())
+        }
+        // 회색으로 막지 않는다 — 왜 못 쓰는지, 무엇을 하면 되는지 알려 주는 쪽이 낫다.
+        None => model.weights.clone().map(|p| base.join(p)).ok_or_else(|| {
+            "가중치가 없습니다 — 학습 탭에서 학습한 뒤 실행 기록의 '가중치 적용'을 누르세요".to_string()
+        }),
     }
 }
 
@@ -4221,5 +4531,74 @@ mod tests {
             relative_to(base, Path::new("/elsewhere/w.safetensors")),
             "/elsewhere/w.safetensors"
         );
+    }
+
+    /// ONNX 내보내기가 어느 가중치를 집는가 — 실행 쪽은 최적 체크포인트가 먼저다.
+    #[test]
+    fn onnx_export_prefers_the_best_checkpoint_of_a_run() {
+        use nl_core::train::{RunRecord, RunStatus};
+        use nl_core::{ModelDef, RunId};
+
+        fn run_for(model: nl_core::ModelId) -> RunRecord {
+            RunRecord {
+                id: RunId::new(),
+                model,
+                dataset: None,
+                config: Default::default(),
+                started: chrono::Utc::now(),
+                finished: None,
+                status: RunStatus::Finished,
+                device_name: String::new(),
+                epochs: Vec::new(),
+                checkpoint: None,
+                best_checkpoint: None,
+                error: None,
+                note: String::new(),
+            }
+        }
+
+        let base = Path::new("/proj");
+        let mut p = Project::new("p");
+        let mut m = ModelDef::new("M");
+        m.weights = Some("w/model.safetensors".into());
+        let mid = m.id;
+        p.models.insert(mid, m.clone());
+
+        // 가중치가 없으면 무엇을 하면 되는지 알려 준다.
+        let mut bare = ModelDef::new("빈 모델");
+        bare.weights = None;
+        let err = onnx_weights_path(&p, &bare, None, base).unwrap_err();
+        assert!(err.contains("가중치 적용"), "{err}");
+
+        // 모델 쪽은 모델에 붙은 가중치.
+        assert_eq!(
+            onnx_weights_path(&p, &m, None, base).unwrap(),
+            PathBuf::from("/proj/w/model.safetensors")
+        );
+
+        let mut run = run_for(mid);
+        let rid = run.id;
+        run.checkpoint = Some("runs/a/final.safetensors".into());
+        p.runs.insert(rid, run.clone());
+        assert_eq!(
+            onnx_weights_path(&p, &m, Some(rid), base).unwrap(),
+            PathBuf::from("/proj/runs/a/final.safetensors")
+        );
+
+        // 조기 종료가 남긴 최적 체크포인트가 있으면 마지막보다 그쪽.
+        run.best_checkpoint = Some("runs/a/best.safetensors".into());
+        p.runs.insert(rid, run);
+        assert_eq!(
+            onnx_weights_path(&p, &m, Some(rid), base).unwrap(),
+            PathBuf::from("/proj/runs/a/best.safetensors")
+        );
+
+        // 체크포인트가 하나도 없는 실행.
+        let empty = run_for(mid);
+        let eid = empty.id;
+        p.runs.insert(eid, empty);
+        assert!(onnx_weights_path(&p, &m, Some(eid), base)
+            .unwrap_err()
+            .contains("체크포인트가 없습니다"));
     }
 }

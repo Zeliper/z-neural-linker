@@ -246,6 +246,11 @@ pub enum CanvasAction {
     DuplicateNodes(Vec<NodeId>),
     /// 이 노드에 붙은 엣지를 모두 뗀다.
     DisconnectNode(NodeId),
+    /// 템플릿 파라미터 창을 연다. 삽입은 창에서 확인을 눌러야 일어난다.
+    OpenTemplate {
+        name: &'static str,
+        pos: [f32; 2],
+    },
 }
 
 // ── 내부 상태 ───────────────────────────────────────────────────────
@@ -1197,9 +1202,10 @@ fn node_menu(ui: &mut egui::Ui, id: NodeId, group: &[NodeId], actions: &mut Vec<
     }
 }
 
-/// 레이어 팔레트: 카테고리별 서브메뉴.
+/// 레이어 팔레트: 카테고리별 서브메뉴 + 템플릿.
 fn palette_menu(ui: &mut egui::Ui, world: Pos2, actions: &mut Vec<CanvasAction>) {
     ui.label(egui::RichText::new("레이어 추가").strong());
+    template_menu(ui, world, actions);
     let mut by_cat: BTreeMap<usize, (LayerCategory, Vec<LayerKind>)> = BTreeMap::new();
     for kind in LayerKind::palette() {
         let cat = kind.spec().category;
@@ -1229,6 +1235,38 @@ fn palette_menu(ui: &mut egui::Ui, world: Pos2, actions: &mut Vec<CanvasAction>)
             }
         });
     }
+}
+
+/// 여러 레이어를 한 번에 놓는 템플릿. 분류별로 묶어 레이어 팔레트와 같은 머리말을 쓴다.
+fn template_menu(ui: &mut egui::Ui, world: Pos2, actions: &mut Vec<CanvasAction>) {
+    let all = nl_core::templates::list();
+    if all.is_empty() {
+        return;
+    }
+    ui.menu_button("템플릿", |ui| {
+        ui.set_min_width(200.0);
+        let mut by_cat: BTreeMap<usize, (LayerCategory, Vec<nl_core::templates::TemplateSpec>)> = BTreeMap::new();
+        for t in all {
+            by_cat
+                .entry(category_order(t.category))
+                .or_insert_with(|| (t.category, Vec::new()))
+                .1
+                .push(t);
+        }
+        for (_, (cat, specs)) in by_cat {
+            ui.label(egui::RichText::new(cat.label()).weak().size(11.0));
+            for t in specs {
+                // 파라미터를 먼저 물어본다 — 폭이나 헤드 수를 모르고 놓으면 바로 형상 오류가 난다.
+                if ui.button(t.label).on_hover_text(t.description).clicked() {
+                    actions.push(CanvasAction::OpenTemplate {
+                        name: t.name,
+                        pos: spawn_pos(world),
+                    });
+                    ui.close();
+                }
+            }
+        }
+    });
 }
 
 /// 팔레트 서브메뉴 순서 (입출력이 맨 위, 나머지는 자주 쓰는 순서).
@@ -1275,6 +1313,28 @@ mod tests {
         let n = labels.len();
         labels.dedup();
         assert_eq!(labels.len(), n, "팔레트에 같은 레이어가 두 번");
+    }
+
+    /// 템플릿도 팔레트 분류 안에 들어가야 서브메뉴가 만들어진다.
+    #[test]
+    fn every_template_lands_in_a_palette_category() {
+        let all = nl_core::templates::list();
+        assert!(!all.is_empty(), "템플릿이 하나는 있어야 한다");
+        for t in &all {
+            assert!(
+                category_order(t.category) < 100,
+                "{} 의 분류에 팔레트 순서가 없다",
+                t.label
+            );
+            assert!(!t.label.trim().is_empty());
+            assert!(!t.description.trim().is_empty(), "{} 에 설명이 없다", t.label);
+            // 기본 파라미터는 그대로 놓아도 통과해야 한다 — 창을 열자마자 빨간 글씨면 안 된다.
+            assert!(
+                t.default_params.check().is_ok(),
+                "{} 의 기본값이 검사에 걸린다",
+                t.label
+            );
+        }
     }
 
     /// 팔레트 서브메뉴가 `LayerCategory` 전체를 덮는지.

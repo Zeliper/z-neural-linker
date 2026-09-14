@@ -169,6 +169,13 @@ pub enum ViewAction {
     FindRecoveryFiles,
     /// CSV 행 수를 정확히 센다 (백그라운드).
     CountDatasetRows(DatasetId),
+    /// 모델을 ONNX 파일로 내보낸다.
+    ///
+    /// `run` 이 있으면 그 실행의 체크포인트를, 없으면 모델에 붙은 가중치를 쓴다.
+    ExportOnnx {
+        model: ModelId,
+        run: Option<RunId>,
+    },
 }
 
 /// 뷰가 프레임 사이에 들고 있는 UI 상태 (문서가 아닌 것). 앱이 소유한다.

@@ -619,6 +619,19 @@ fn runs_table(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut TrainViewState, acti
                             actions.push(ViewAction::ApplyRunWeights(*id));
                         }
                     });
+                    // 이 실행의 체크포인트로 바로 ONNX 를 쓴다 — 모델 가중치를 바꾸지 않는다.
+                    ui.add_enabled_ui(has, |ui| {
+                        if ui
+                            .small_button("ONNX")
+                            .on_hover_text("이 실행의 가중치로 .onnx 파일을 씁니다")
+                            .clicked()
+                        {
+                            actions.push(ViewAction::ExportOnnx {
+                                model: r.model,
+                                run: Some(*id),
+                            });
+                        }
+                    });
                     if ui.small_button("🗑").on_hover_text("실행 기록 삭제").clicked() {
                         actions.push(ViewAction::Ops(vec![nl_core::Op::DeleteRun { id: *id }]));
                         if state.selected_run == Some(*id) {

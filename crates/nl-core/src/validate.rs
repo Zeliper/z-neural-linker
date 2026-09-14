@@ -71,6 +71,37 @@ pub fn validate(p: &Project) -> Vec<Issue> {
         if m.graph.output_nodes().is_empty() {
             v.push(err(at.clone(), format!("모델 '{}' 에 Output 노드가 없음", m.name)));
         }
+        // 다출력 모델은 Output 노드 **이름**이 페이로드 필드 순서를 정한다. 이름이 없거나 겹치면
+        // 어느 출력이 어느 필드인지 정할 수 없다 (io 의 다출력 배선 계약).
+        let outputs = m.graph.output_nodes();
+        if outputs.len() > 1 {
+            let mut seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            for nid in &outputs {
+                let Some(n) = m.graph.nodes.get(nid) else { continue };
+                let name = n.name.trim();
+                if name.is_empty() {
+                    v.push(warn(
+                        Where::Node(*mid, *nid),
+                        "출력 이름이 비어 있음 — 다출력 모델은 Output 이름이 페이로드 필드 순서를 정합니다".to_string(),
+                    ));
+                } else {
+                    *seen.entry(name).or_default() += 1;
+                }
+            }
+            for nid in &outputs {
+                let Some(n) = m.graph.nodes.get(nid) else { continue };
+                let name = n.name.trim();
+                if !name.is_empty() && seen.get(name).copied().unwrap_or(0) > 1 {
+                    v.push(warn(
+                        Where::Node(*mid, *nid),
+                        format!(
+                            "출력 이름 '{name}' 이 겹침 — 다출력 모델은 Output 이름이 페이로드 필드 순서를 정합니다"
+                        ),
+                    ));
+                }
+            }
+        }
+
         let rep = infer(&m.graph);
         for (nid, e) in &rep.errors {
             let name = m.graph.nodes.get(nid).map(|n| n.display_name()).unwrap_or_default();
@@ -585,5 +616,52 @@ mod tests {
         assert!(issues
             .iter()
             .any(|i| i.severity == Severity::Warning && i.message.contains("연결되지 않음")));
+    }
+
+    /// 다출력 모델은 Output 이름이 필드 순서를 정한다 — 비었거나 겹치면 정할 수 없다.
+    #[test]
+    fn multi_output_models_need_distinct_output_names() {
+        use crate::{Graph, LayerKind, Node, Port, Project};
+
+        fn build(names: &[&str]) -> Project {
+            let mut p = Project::new("p");
+            let mid = p.add_model("m");
+            let m = p.models.get_mut(&mid).unwrap();
+            let mut g = Graph::default();
+            let input = g.add_node(Node::new(LayerKind::Input { shape: vec![4] }, [0.0, 0.0]));
+            for (i, name) in names.iter().enumerate() {
+                let mut out = Node::new(LayerKind::Output, [200.0, i as f32 * 100.0]);
+                out.name = (*name).to_string();
+                let id = g.add_node(out);
+                let _ = g.add_edge(input, Port::new(id, 0));
+            }
+            m.graph = g;
+            p
+        }
+        let names_of = |p: &Project| -> Vec<String> {
+            validate(p)
+                .into_iter()
+                .map(|i| i.message)
+                .filter(|m| m.contains("출력 이름"))
+                .collect()
+        };
+
+        // 출력이 하나면 이름이 없어도 상관없다 — 순서를 정할 일이 없다.
+        assert!(names_of(&build(&[""])).is_empty());
+        // 이름이 서로 다르면 조용하다.
+        assert!(names_of(&build(&["확률", "위치"])).is_empty());
+
+        let empty = names_of(&build(&["확률", ""]));
+        assert_eq!(empty.len(), 1, "{empty:?}");
+        assert!(empty[0].contains("비어 있음"));
+
+        let dup = names_of(&build(&["같음", "같음"]));
+        assert_eq!(dup.len(), 2, "겹치는 둘 다에 붙는다: {dup:?}");
+        assert!(dup[0].contains("겹침"));
+
+        // 경고이지 오류가 아니다 — 이름을 안 붙였다고 학습을 막지는 않는다.
+        assert!(validate(&build(&["확률", ""]))
+            .iter()
+            .all(|i| i.severity != Severity::Error));
     }
 }
