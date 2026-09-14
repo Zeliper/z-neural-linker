@@ -1,81 +1,130 @@
 # 로드맵
 
-2026-09-10 시작. 설계는 `docs/ARCHITECTURE.md`. 각 마일스톤은 "빌더에서 만들고 배포판에서 도는" 수직 조각을 하나씩 늘린다.
+2026-09-10 시작. 설계는 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md), 변경 이력은 [`CHANGELOG.md`](../CHANGELOG.md).
+각 마일스톤은 "빌더에서 만들고 배포판에서 도는" 수직 조각을 하나씩 늘린다.
+항목 끝의 해시는 그 일이 들어온 커밋이다.
 
-## M0 — 뼈대와 첫 수직 조각 (2026-09-10~11, 진행 중)
-- [x] 워크스페이스·문서·`nl-core` 데이터 모델 계약
-- [x] `nl-core`: 그래프 op/undo/diff, 형상 추론, 검증, 직렬화 왕복 테스트 (22)
-- [x] `nl-engine`: burn 0.21 인터프리터(LayerKind 17종), CPU(ndarray)/GPU(wgpu) + `probe` 기반 Auto, 학습 루프(SGD/Adam/AdamW ×
-      MSE/CrossEntropy/BCE/MAE), safetensors 체크포인트, 추론 세션, 데이터 로더(합성/CSV/이미지 폴더/녹화), codec (34)
-- [x] `nl-io`: 자원 조회, 화면 캡처(X11·wlroots), 입력 시뮬레이션, HTTP, 파이프라인 Runner (44)
-- [x] `nl-gui` 렌더러 · `nl-bundle` 번들/첨부/아카이브 · `nl-runtime` 실행기(`--headless --run-for`) (37)
-- [x] `nl-app` 1차: 프로젝트 관리, 모델 캔버스, 인스펙터, 데이터/학습/자원 뷰, 샘플 (65)
-- [x] `nl-app` 2차: 파이프라인 뷰(시험 실행·입력 무장·킬 스위치), GUI 디자이너(바인딩·미리보기), 빌드 뷰(도구 상태·동의 모달·tar.gz/zip·latest.json)
-- [x] `nl-app` 3·4차: HttpServer/HttpReply 노드, 녹화 UI, Inno Setup 동의 설치, 빌더 자체 업데이트, 시작 지연 수정(12.2s→1.6s)·`[nl-app] ready/focused` 마커
-- [x] `nl-cli`: 헤드리스 inspect/devices/train/infer/run/record/build/sample — 실측 sample→train(98%)→build→배포판 HTTP /infer 응답 일치
-- [x] Windows: cargo-xwin 크로스 빌드(nl-runtime.exe 53.7MB, nl-app.exe 61MB), AttachConsole, Inno Setup 실컴파일·실설치(wine + Inno 6.7.3)
-- [x] `nl-update` + 배포 런타임 자동 업데이트(배지/적용) + minisign 검증
-- [x] uitest 시나리오 러너(run/wait-log/expect-shot, PPM 골든) · egui_kittest 스냅샷 골든(nl-gui/nl-runtime)
-- [x] `tools/uitest` 이식(app_id `neural-linker`), egui_kittest 헤드리스 렌더 테스트
-- [x] 패키징(`packaging/linux`, `packaging/windows`) 이식
+## M0 — 뼈대와 첫 수직 조각 · **완료 (2026-09-14)**
 
-### 환경에서 확인된 사실 (2026-09-10)
-- 이 개발 PC 의 RTX 2060 은 오픈소스 NVK 드라이버라 wgpu 컴퓨트가 죽는다(`Parent device is lost`). Auto 는 probe 로 걸러 Intel UHD 630 을
-  고른다. NVIDIA 공식 드라이버를 깔면 RTX 로 잡힌다.
-- 이 PC 의 실제 세션은 KDE Plasma 6 Wayland → wlr-screencopy·X11 GetImage 둘 다 불가. **xdg-desktop-portal 경로가 M1 최우선**(아래).
+닷새 만에 "설계 → 학습 → 연결 → GUI → 빌드 → 배포 → 자동 업데이트" 한 바퀴가 돌았다.
+`nl sample → train → build → 배포판 HTTP 추론`이 한 줄로 이어지고, 그 경로를 종단 시험이 지킨다.
+
+- [x] 워크스페이스·문서·`nl-core` 데이터 모델 계약 — `9a1dd8e`
+- [x] `nl-core`: 그래프 op/undo/diff, 형상 추론, 검증, 직렬화 왕복 — `9a1dd8e`
+- [x] `nl-engine`: burn 0.21 인터프리터, CPU(ndarray)/GPU(wgpu) + `probe` 기반 Auto, 학습 루프,
+      safetensors 체크포인트, 추론 세션, 데이터 로더, codec — `824e155`
+- [x] `nl-io`: 자원 조회, 화면 캡처, 입력 시뮬레이션, HTTP, 파이프라인 `Runner` — `1e9bc78`
+- [x] `nl-gui` 렌더러 · `nl-bundle` 번들/첨부/아카이브 · `nl-runtime` 실행기 — `401009d`
+- [x] `nl-app` 1차: 프로젝트 관리, 모델 캔버스, 인스펙터, 데이터/학습/자원 뷰 — `48e5a7d`
+- [x] `nl-app` 2차: 파이프라인 뷰(시험 실행·킬 스위치), GUI 디자이너, 빌드 뷰 — `00d7fb6`
+- [x] `nl-app` 3·4차: HttpServer/HttpReply 노드, 녹화 UI, Inno 동의 설치, 빌더 자체 업데이트 — `a150a54`
+- [x] 빌더 시작 지연 12.2초 → 1.6초, `[nl-app] ready/focused` 마커 — `4a08ba5`
+- [x] `nl-cli`: 헤드리스 inspect/devices/train/infer/run/record/build/sample — `e600a15`
+- [x] `nl-update` + 배포 런타임 자동 업데이트(배지/적용) + minisign 검증 — `af588da`, `f1af512`
+- [x] Windows 크로스 빌드(cargo-xwin, rust-lld 심), AttachConsole — `8b15a2b`, `16c5149`
+- [x] Inno Setup 실컴파일·실설치 확인 (wine 11.0 + Inno 6.7.3) — `436bec4`
+- [x] uitest 시나리오 러너(run/wait-log/expect-shot, PPM 골든) — `2123bf3`
+- [x] `egui_kittest` 인프로세스 스냅샷 골든 — `3f2f7de`
+- [x] GitHub·Forgejo Actions 두 벌, 릴리스 워크플로 — `0ebb3ab`
+- [x] 릴리스 공통 함수(`packaging/lib.sh`)와 로컬 드라이런 — `89609a9`
+- [x] 앱 아이콘 일습(SVG → PNG → ICO, 실행 파일·설치 프로그램·데스크톱) — `49ccb46`
+- [x] 전체 검증 러너 `scripts/verify-all.sh` — `ae81f8a`
+- [x] 전 크레이트 포맷 정리, CI fmt 검사 강제 — `6149b01`
+
+### 산출 (2026-09-14 실측)
+
+`cargo test --workspace` **668개 통과**. 크레이트별 내역은 통합 시험 바이너리를 그 크레이트에 합친 수다.
+
+| 크레이트 | 테스트 | 역할 |
+| --- | ---: | --- |
+| `nl-app` | 130 | 빌더 GUI |
+| `nl-io` | 126 | 캡처·입력·HTTP 서버·WebSocket·녹화·`Runner` |
+| `nl-engine` | 102 | burn 인터프리터·학습·추론·codec |
+| `nl-update` | 85 | 매니페스트·서명·다운로드·적용 |
+| `nl-bundle` | 74 | `.nlapp`·첨부·아카이브·설치 프로그램·도구 |
+| `nl-core` | 47 | 문서 모델·형상·op/undo·번들 포맷 |
+| `nl-runtime` | 46 | 배포 실행기 |
+| `nl-gui` | 32 | 공용 렌더러 |
+| `nl-cli` | 26 | `nl` 명령줄 |
+
+이 밖에 헤드리스 sway 시나리오 둘(`smoke`·`startup`)과 종단 시험(`NL_E2E=1`)이 따로 돈다.
+전부 한 번에 돌리려면 `scripts/verify-all.sh --gui`.
+
+### 환경에서 확인된 사실
+
+- 이 개발 PC 의 RTX 2060 은 오픈소스 NVK(nouveau) 드라이버라 wgpu 컴퓨트가 죽는다
+  (`Parent device is lost`). `Auto` 는 `probe` 로 걸러 Intel UHD 630 을 고른다. 공식 드라이버를 깔면 RTX 로 잡힌다.
+- 이 PC 의 실제 세션은 KDE Plasma 6 Wayland 다. wlr-screencopy·X11 `GetImage` 둘 다 쓸 수 없어
+  xdg-desktop-portal Screenshot 경로를 붙였다 — **실측 2.8 fps**. 고 fps 는 pipewire ScreenCast 가 필요하다.
+- Windows 크로스 빌드는 관리자 권한 없이 된다. `lld-link` 가 없으면 rustup 의 `rust-lld` 를 부르는
+  얇은 스크립트로 대신한다. SDK 캐시 1.2 GB, 첫 빌드 9분 남짓.
+- Inno Setup 의 실제 배포처는 GitHub 릴리스다. `jrsoftware.org/download.php/is.exe` 는 설치본이 아니라
+  안내 페이지로 302 한다 — 예전에 "네트워크 차단" 으로 적어 둔 것은 잘못된 주소 탓이었다.
+- `pkill -f`/`pgrep -f` 에 명령줄 조각을 넣으면 호출한 셸 자신이 걸려 죽는다. `pgrep -x` 와 `/proc` 를 쓴다.
 
 ## 보안
 
 2026-09-14 에 네트워크·번들·업데이트 경로를 읽기 전용으로 리뷰했다(높음 11 · 중간 22 · 낮음 25).
-같은 날 엔진 정확성 리뷰도 따로 했다(버그 7 · 의심 9).
+같은 날 엔진 정확성 리뷰도 따로 했다.
 
-- [`docs/reviews/security-2026-09-14.md`](reviews/security-2026-09-14.md) — 맨 위 "처리 현황" 표가 항목별 상태·담당 크레이트·근거·남은 한계
-- [`docs/reviews/engine-2026-09-14.md`](reviews/engine-2026-09-14.md) — 같은 자리에 현황표(아직 전부 열려 있다)
-- [`docs/RELEASE.md`](RELEASE.md) — 릴리스 체크리스트와 롤백 절차. 키·공개키·배포 서버가 여기에 묶여 있다
+- [`docs/reviews/security-2026-09-14.md`](reviews/security-2026-09-14.md) — 항목별 상태·담당 크레이트·근거·남은 한계
+- [`docs/reviews/engine-2026-09-14.md`](reviews/engine-2026-09-14.md) — 엔진 리뷰 현황표
+- [`docs/RELEASE.md`](RELEASE.md) — 릴리스 체크리스트와 롤백 절차
 
-높음 11건 중 9건, 전체 58건 중 37건을 고쳤고 3건은 부분 처리다. 남은 것은 nl-engine(M15~M19·L21)과
-nl-app(H5·H9·M21·M22·L1~L3·L22) 담당이다. 미처리 4건(L5·L14·L23·L25)은 내 크레이트 밖이거나
-상위 크레이트가 고정한 것이다.
+보안 리뷰 58건 중 **수정 44 · 부분 3 · 진행 중 9 · 미처리 2**. 높음 11건은 9건 수정 + 2건 진행 중이다.
+엔진 리뷰 24건은 **수정 23 · 부분 1**. 남은 진행 중 9건은 nl-app 담당이다.
 
-신뢰 모델이 한 줄로 바뀌었다. **서명 공개키가 없으면 자동 업데이트 기능 자체가 켜지지 않는다.**
+신뢰 모델이 한 줄로 바뀌었다. **서명 공개키가 없으면 자동 업데이트 기능 자체가 켜지지 않는다** — `ed57559`.
 예전처럼 "키가 없으면 검증을 건너뛰고 경고만" 하지 않는다.
 
 릴리스 전에 끝내야 하는 일:
 
-- [x] **키 생성·서명 도구** — `cargo run -p nl-update --example nl-keygen -- keygen|sign|verify`.
-      `minisign` CLI 를 깔지 않아도 되고 CI 러너에도 설치 단계가 없다
-- [ ] **서명 키 발급** — 위 도구로 키 쌍을 만들고 `MINISIGN_KEY` 시크릿·`UPDATE_PUBLIC_KEY` 변수를 등록한다.
-      절차는 [`docs/RELEASE.md`](RELEASE.md) 의 "첫 릴리스 전에 반드시 끝낼 것" 에 있다
+- [x] **키 생성·서명 도구** — `nl-keygen`(`keygen`/`sign`/`verify`). `minisign` CLI 도 CI 설치 단계도 필요 없다 — `3e01d27`
+- [x] **Inno Setup 실컴파일 확인** — `436bec4`
+- [ ] **서명 키 발급** — 위 도구로 키 쌍을 만들고 `MINISIGN_KEY` 시크릿·`UPDATE_PUBLIC_KEY` 변수를 등록한다
 - [ ] **공개키를 코드에 박기** — 빌더는 `crates/nl-app/src/update_key.rs` 의 `PUBLIC_KEY`(지금 `None` → 업데이트 꺼짐),
-      배포 앱은 빌더 UI 가 번들 매니페스트의 `update_public_key` 에 채워 넣는다
-- [ ] **실제 배포 서버** — https 로만 서빙하고 `latest.json` 옆에 `latest.json.minisig` 를 같이 올린다.
-      자산은 매니페스트와 같은 오리진에 둔다(아니면 `allowed_asset_hosts` 에 적는다)
-- [x] **Inno Setup 실컴파일 확인** — 2026-09-14 에 wine 11.0 + Inno Setup 6.7.3 으로 내려받기·검증·설치·실컴파일·실설치까지 확인했다 (`packaging/README.md`)
-- [ ] **Authenticode 서명** — Windows 설치본에 붙인다. 지금 신뢰의 뿌리는 서명된 매니페스트의 sha256 하나뿐이다(M10)
+      배포 앱은 빌더 UI 가 번들 매니페스트에 채워 넣는다
+- [ ] **실제 배포 서버** — https 로만 서빙하고 `latest.json` 옆에 `.minisig` 를 같이 올린다.
+      자산은 매니페스트와 같은 오리진에 둔다
+- [ ] **Authenticode 서명** — Windows 설치본에 붙인다. 지금 신뢰의 뿌리는 서명된 매니페스트의 sha256 하나뿐이다
 
-## M1 — 데이터·페이로드·파이프라인
-- [x] **화면 캡처 (KDE/GNOME Wayland)**: `org.freedesktop.portal.Screenshot`(zbus, 순수 Rust) — 이 PC 실측 2.8fps
-- [ ] `ScreenCast` + pipewire(고 fps; 빌드 머신에 `pipewire-devel` 필요 → optional feature `pipewire`)
-- [x] WebSocket 소스/싱크, 인바운드 HTTP 서버/응답 노드(배포 앱을 API 로), 녹화기(`Recorder` → `Recorded` 데이터셋)
-- [x] 엔진: 다입출력 학습, LR 스케줄(Step/Cosine/Plateau)·워밍업·조기 종료, 상주 배치(detach 버그 수정)
-- [x] 배포 앱 입력 무장 opt-in(`BundleManifest.arm_input`), Runner 서버 선기동(모델 로딩 중 503), 샘플 통일(nl-core 로 이동)
-- 데이터셋: CSV, 이미지 폴더, 녹화(화면 + 입력 라벨) 가져오기와 미리보기
-- 페이로드 편집기(필드·Transform 체인), 인코더/디코더 실행(`codec`)
-- 파이프라인 캔버스: 화면 캡처 → 모델 → 마우스/키보드, HTTP 폴링 → 모델 → HTTP 호출, stdio JSON 연결
-- 파이프라인 시험 실행(빌더 내부) + 킬 스위치
-- 자동 저장·복구(trust-pms `recovery.rs` 이식)
+## M1 — 데이터·페이로드·파이프라인 · **거의 완료**
 
-## M2 — GUI 디자이너·Windows 배포·도구 설치
-- GUI 디자이너(위젯 팔레트·드래그 배치·바인딩) + 런타임 공용 렌더러
-- Windows 빌드: 런타임 바이너리 매니페스트 내려받기(동의 팝업), zip + Inno Setup(가능할 때)
-- 자동 업데이트(trust-pms `update.rs` 이식), 매니페스트 서명(minisign)
-- 도구 설치 관리자: 상태 점검 → 동의 → 설치 → 재점검
+- [x] 화면 캡처 (KDE/GNOME Wayland): `org.freedesktop.portal.Screenshot`(zbus, 순수 Rust) — `1d0917e`
+- [x] WebSocket 소스/싱크 — URL 별 연결 풀·팬아웃·지수 백오프·`wss` — `ae762f1`
+- [x] 인바운드 HTTP 서버 소스 / 응답 싱크 (배포 앱을 API 로) — `373e4bd`
+- [x] 녹화기 `Recorder` → `Recorded` 데이터셋 — `c92e277`
+- [x] 데이터셋 가져오기·미리보기: 합성·CSV·이미지 폴더·녹화 — `824e155`, `48e5a7d`
+- [x] 페이로드 편집기(필드·Transform 체인)와 `codec` 실행 — `00d7fb6`
+- [x] 파이프라인 캔버스와 시험 실행 + 킬 스위치 — `00d7fb6`
+- [x] 엔진: 다입출력 학습, LR 스케줄(Step/Cosine/Plateau)·워밍업·조기 종료, 상주 배치 — `c48bc78`
+- [x] 배포 앱 입력 무장 opt-in, `Runner` 서버 선기동(모델 로딩 중 503) — `f66309f`
+- [x] 자동 저장·복구 — `84e9085`
+- [ ] `ScreenCast` + pipewire (고 fps). **미착수** — 빌드 머신에 `pipewire-devel` 이 필요해
+      기본 꺼진 선택 기능이어야 한다. 지금 포털 경로로 2.8 fps 는 나온다
 
-## M3 — 모델 관리·고급 레이어·상호운용
-- 모델 레지스트리: 실행 기록 비교(지표 표), 버전 태그, 가중치 내보내기/가져오기
-- 레이어: Embedding, LSTM/GRU, MultiHeadAttention, Transformer 블록, Residual 템플릿
-- ONNX 가져오기(tract 로 추론 전용) / 내보내기(검토)
-- 학습 상황 프리셋: 분류·회귀·화면 상태 분류·행동 복제(입력 라벨) 템플릿
+## M2 — GUI 디자이너·Windows 배포·도구 설치 · **완료 (배포 운영만 남음)**
 
-## M4 — 협업·서버형 배포
-- `--headless` 런타임 + HTTP/WS 서빙, 프로젝트 동기화 서버(trust-pms `pms-server` 계열, op 경로 재사용)
+- [x] GUI 디자이너(위젯 팔레트·배치·바인딩) + 런타임 공용 렌더러 — `00d7fb6`
+- [x] `Binding::ModelOutput` 배선(빌더 편집기 + 런타임 반영) — `99aaef5`, `695689b`
+- [x] Windows 빌드: zip + Inno Setup 설치 프로그램, 런타임 크로스 빌드 — `b2a6de7`, `8b15a2b`
+- [x] 자동 업데이트 + 매니페스트 서명(minisign) — `af588da`, `ed57559`
+- [x] 도구 설치 관리자: 상태 점검 → 동의 모달 → 설치 → 재점검 — `b2a6de7`, `a150a54`
+- 남은 것은 코드가 아니라 운영이다 — 위 "보안" 절의 키 발급·배포 서버·Authenticode 셋.
+
+## M3 — 모델 관리·고급 레이어·상호운용 · **진행 중**
+
+- [ ] 레이어: LSTM/GRU, MultiHeadAttention, Transformer 블록, Residual 템플릿 — **엔진 담당 작업 중**
+      (아직 메인에 없다. `Embedding` 과 `Transform::Tokenize` 는 들어왔다 — `89cee6e`)
+- [ ] HTTP 서버 TLS — **io 담당 작업 중** (아직 메인에 없다. 지금은 토큰 인증 + 루프백 제한으로 막는다 — `5632065`)
+- [ ] `Binding::ModelOutput` 의 `field` 로 다출력 갈라 보내기. 지금은 같은 모델을 가리키는 위젯이
+      모두 같은 값을 받는다 — 모델이 출력을 여럿 낼 때 필요하다
+- [ ] 모델 레지스트리: 실행 기록 비교(지표 표), 버전 태그, 가중치 내보내기/가져오기. **미착수**
+- [ ] ONNX 가져오기(tract 로 추론 전용) / 내보내기(검토). **미착수**
+- [ ] 학습 상황 프리셋: 분류·회귀·화면 상태 분류·행동 복제 템플릿. **미착수**
+
+## M4 — 협업·서버형 배포 · **미착수**
+
+- [ ] `--headless` 런타임의 HTTP/WS 서빙을 다중 모델·다중 파이프라인으로 넓히기
+      (단일 파이프라인 서빙은 M1 에서 됐다 — `373e4bd`)
+- [ ] 프로젝트 동기화 서버 (trust-pms `pms-server` 계열, op 경로 재사용)
