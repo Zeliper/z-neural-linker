@@ -4,6 +4,9 @@
 //! **입력 무장** 토글이 켜져 있을 때만 실제 입력을 보낸다(기본 꺼짐). 실행 중 `Esc` 를 길게 누르면 즉시 멈춘다.
 
 use super::{ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_SELECT, COL_SURFACE, COL_WARN, COL_WEAK};
+
+/// 인스펙터 축소판의 최대 표시 크기(px). 실제 축소판은 최장변 160px 로 온다.
+const INSPECTOR_PREVIEW_MAX: f32 = 200.0;
 use crate::canvas::{Selection, SelectionState};
 use crate::pcanvas::{kind_summary, LiveView, PipelineAction, PipelineCanvas};
 use eframe::egui::{self, DragValue, RichText};
@@ -246,13 +249,25 @@ pub fn inspect_node(
         changed |= ui.add(DragValue::new(&mut next.pos[1]).prefix("y ").speed(1.0)).changed();
     });
 
-    // 실행 중이면 마지막 값·오류.
-    if live.running || live.values.contains_key(&nid) || live.errors.contains_key(&nid) {
+    // 실행 중이면 마지막 값·오류·이미지 축소판.
+    let preview = live.previews.get(&nid);
+    if live.running || live.values.contains_key(&nid) || live.errors.contains_key(&nid) || preview.is_some() {
         ui.add_space(8.0);
         ui.separator();
         match live.values.get(&nid) {
             Some(v) => super::kv(ui, "마지막 값", v.clone()),
-            None => super::kv(ui, "마지막 값", "—"),
+            None if preview.is_none() => super::kv(ui, "마지막 값", "—"),
+            None => {}
+        }
+        if let Some(p) = preview {
+            ui.label(RichText::new("마지막 이미지").color(COL_WEAK).size(11.0));
+            let size = p.fit(ui.available_width().min(INSPECTOR_PREVIEW_MAX));
+            ui.add(egui::Image::new(&p.texture).fit_to_exact_size(size));
+            ui.label(
+                RichText::new(format!("축소판 {}×{} — 원본이 아닙니다", p.size.0, p.size.1))
+                    .color(COL_WEAK)
+                    .size(10.5),
+            );
         }
         if let Some(e) = live.errors.get(&nid) {
             ui.label(RichText::new(format!("✖ {e}")).color(COL_ERROR).size(11.5));

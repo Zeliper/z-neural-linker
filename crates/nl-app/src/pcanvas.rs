@@ -126,7 +126,29 @@ pub struct LiveView {
     pub values: BTreeMap<PNodeId, String>,
     /// 노드의 마지막 오류.
     pub errors: BTreeMap<PNodeId, String>,
+    /// 노드가 낸 이미지의 축소판 (`RunnerEvent::ValuePreview`, 노드당 초당 4장까지).
+    pub previews: BTreeMap<PNodeId, NodePreview>,
     pub running: bool,
+}
+
+/// 캔버스·인스펙터에 그리는 노드 축소판.
+///
+/// 원본 이미지는 실행기가 보내지 않는다 (초당 수십 장이면 채널이 막힌다). 여기 있는 것은
+/// 최장변 [`nl_io::runner::PREVIEW_MAX_SIDE`] 로 줄인 것뿐이라, 화면 캡처 영역이 맞는지
+/// 눈으로 확인하는 용도다.
+pub struct NodePreview {
+    pub texture: egui::TextureHandle,
+    /// 축소판 크기(px).
+    pub size: (u32, u32),
+}
+
+impl NodePreview {
+    /// 원본 비율을 지키면서 `max_side` 안에 들어가는 표시 크기.
+    pub fn fit(&self, max_side: f32) -> Vec2 {
+        let (w, h) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
+        let k = (max_side / w.max(h)).min(1.0);
+        Vec2::new(w * k, h * k)
+    }
 }
 
 // ── 내부 상태 ───────────────────────────────────────────────────────
@@ -452,6 +474,7 @@ impl PipelineCanvas {
                 zoom,
                 project,
                 live.values.get(&id).map(String::as_str),
+                live.previews.get(&id),
             );
             let resp = match err {
                 Some(e) if hovered => resp.on_hover_text(format!("{}\n{e}", node_title(node))),
@@ -765,6 +788,7 @@ fn draw_node(
     zoom: f32,
     project: &nl_core::Project,
     value: Option<&str>,
+    preview: Option<&NodePreview>,
 ) {
     let base = kind_color(&node.kind);
     let fill = mix(base, Color32::from_rgb(0x20, 0x23, 0x29), 0.78);
@@ -798,6 +822,24 @@ fn draw_node(
             FontId::proportional((10.5 * zoom).clamp(6.0, 16.0)),
             COL_TEXT_DIM,
         );
+    }
+
+    // 이미지를 내는 노드는 축소판을 본문에 깐다 — 캡처 영역이 맞는지 바로 보인다.
+    if let Some(p) = preview.filter(|_| zoom >= 0.45) {
+        let box_w = sr.width() - 24.0 * zoom;
+        let box_h = sr.height() - 46.0 * zoom;
+        if box_w > 8.0 && box_h > 8.0 {
+            let size = p.fit(box_w.min(box_h));
+            let top_left = Pos2::new(sr.max.x - 12.0 * zoom - size.x, sr.min.y + 40.0 * zoom);
+            let rect = Rect::from_min_size(top_left, size);
+            painter.image(
+                p.texture.id(),
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, COL_TEXT_DIM), StrokeKind::Outside);
+        }
     }
 
     let pr = (PORT_R * zoom).clamp(2.0, 9.0);
@@ -924,6 +966,21 @@ fn lighten(c: Color32, amount: u8) -> Color32 {
 mod tests {
     use super::*;
     use nl_core::pipeline::PNode;
+
+    /// 축소판은 비율을 지키면서 상자 안에 들어가야 한다 — 늘어나면 캡처 영역 확인에 쓸 수 없다.
+    #[test]
+    fn preview_fit_keeps_the_aspect_ratio() {
+        let ctx = egui::Context::default();
+        let image = egui::ColorImage::from_rgba_unmultiplied([160, 120], &[0u8; 160 * 120 * 4]);
+        let texture = ctx.load_texture("t", image, egui::TextureOptions::LINEAR);
+        let p = NodePreview { texture, size: (160, 120) };
+
+        let a = p.fit(80.0);
+        assert_eq!((a.x, a.y), (80.0, 60.0));
+        // 상자가 원본보다 크면 확대하지 않는다.
+        let b = p.fit(400.0);
+        assert_eq!((b.x, b.y), (160.0, 120.0));
+    }
 
     fn pipe() -> (Pipeline, PNodeId, PNodeId, PNodeId) {
         let mut p = Pipeline::new("t");

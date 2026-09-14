@@ -61,6 +61,19 @@ pub struct TrainPoll {
 
 /// 스텝 플롯이 무한정 커지지 않도록 유지하는 점 개수.
 const MAX_STEP_POINTS: usize = 4000;
+/// 학습률 곡선의 높이(px). 손실 곡선(240)보다 낮게 둬 보조 정보임을 드러낸다.
+const LR_PLOT_HEIGHT: f32 = 110.0;
+
+/// 학습률 표기. 1e-3 처럼 작은 값이라 고정 소수점으로는 0.001 이 0.00 으로 뭉개진다.
+fn fmt_lr(v: f64) -> String {
+    if v == 0.0 {
+        "0".into()
+    } else if v < 0.001 {
+        format!("{v:.2e}")
+    } else {
+        format!("{v:.5}")
+    }
+}
 
 impl TrainSession {
     pub fn start(req: TrainRequest, run_dir: PathBuf, now: f64) -> anyhow::Result<Self> {
@@ -449,6 +462,20 @@ fn plot(ui: &mut egui::Ui, ctx: &ViewCtx, state: &TrainViewState) {
             }
         });
     ui.label(RichText::new(title).color(COL_WEAK).size(11.0));
+
+    // 학습률은 손실과 자릿수가 딴판이라(1e-3 대 1) 같은 축에 겹치면 한쪽이 납작해진다. 따로 그린다.
+    let lr: Vec<[f64; 2]> = epochs.iter().filter_map(|e| e.lr.map(|v| [epoch_x(e.epoch, batches), v])).collect();
+    if lr.len() >= 2 {
+        ui.add_space(6.0);
+        Plot::new("lr-plot")
+            .height(LR_PLOT_HEIGHT)
+            .legend(Legend::default())
+            .x_axis_label(if batches > 0 { "스텝" } else { "에포크" })
+            .y_axis_label("학습률")
+            .show(ui, |p| {
+                p.line(Line::new("학습률", PlotPoints::from(lr)).width(2.0).color(COL_WARN));
+            });
+    }
 }
 
 fn runs_table(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut TrainViewState, actions: &mut Vec<ViewAction>) {
@@ -462,8 +489,8 @@ fn runs_table(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut TrainViewState, acti
     let mut rows: Vec<(&RunId, &RunRecord)> = ctx.project.runs.iter().collect();
     rows.sort_by_key(|a| std::cmp::Reverse(a.1.started));
 
-    egui::Grid::new("runs-table").striped(true).num_columns(8).spacing([10.0, 4.0]).show(ui, |ui| {
-        for h in ["시작", "상태", "에포크", "최종 손실", "최고 val", "장치", "체크포인트", ""] {
+    egui::Grid::new("runs-table").striped(true).num_columns(9).spacing([10.0, 4.0]).show(ui, |ui| {
+        for h in ["시작", "상태", "에포크", "최종 손실", "최고 val", "마지막 lr", "장치", "체크포인트", ""] {
             ui.label(RichText::new(h).color(COL_WEAK).size(11.0));
         }
         ui.end_row();
@@ -478,6 +505,8 @@ fn runs_table(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut TrainViewState, acti
             ui.label(format!("{}/{}", r.epochs.len(), r.config.epochs));
             ui.label(r.last().map(|e| fmt_metric(e.train_loss)).unwrap_or_else(|| "-".into()));
             ui.label(r.best_val_loss().map(fmt_metric).unwrap_or_else(|| "-".into()));
+            // 스케줄이 없으면 엔진이 lr 을 채우지 않는다 — 그때는 빈 칸이 맞다.
+            ui.label(r.last().and_then(|e| e.lr).map(fmt_lr).unwrap_or_else(|| "-".into()));
             ui.label(if r.device_name.is_empty() { "-" } else { r.device_name.as_str() });
             match &r.checkpoint {
                 Some(p) => {

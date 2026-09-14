@@ -301,6 +301,14 @@ impl View {
     }
 }
 
+/// 설정을 실제 장치로 푼다. **백그라운드 스레드에서만 부른다.**
+///
+/// 이 한 줄이 전체에서 유일한 `nl_engine::resolve` 호출 지점이다. 엔진이 이미 확인한 결과만
+/// 돌려주는 `resolve_cached` 를 내놓으면 여기만 바꾸면 된다 — 그때는 UI 스레드에서 불러도 안전해진다.
+fn resolve_device(pref: DevicePref) -> DeviceInfo {
+    nl_engine::resolve(pref).info
+}
+
 /// 백그라운드 장치 확인이 UI 로 보내는 소식.
 enum DeviceMsg {
     /// 열거된 장치 목록 (콤보·자원 뷰).
@@ -591,7 +599,7 @@ impl NlApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("nl-devices".into()).spawn(move || {
             let _ = tx.send(DeviceMsg::List(nl_engine::enumerate()));
-            let info = nl_engine::resolve(pref).info;
+            let info = resolve_device(pref);
             let _ = tx.send(DeviceMsg::Resolved { pref, info, note: nl_engine::describe(pref) });
         });
         match spawned {
@@ -1008,9 +1016,12 @@ impl NlApp {
             ViewAction::StopPipeline => self.stop_pipeline(now),
             ViewAction::SetArmInput(on) => {
                 self.arm_input = on;
-                if self.runner.as_ref().map(|r| r.is_running()).unwrap_or(false) {
-                    // 무장 상태는 실행기를 만들 때 정해진다 — 켜고 끄려면 다시 시작해야 한다.
-                    self.toast("무장 설정은 다음 시험 실행부터 적용됩니다", now);
+                // 실행 중이어도 바로 먹는다 — 무장을 끄는 것은 안전 장치라 기다리게 하면 안 된다.
+                if let Some(r) = &self.runner {
+                    if r.is_running() {
+                        r.handle.set_armed(on);
+                        self.log(if on { "입력 무장: 켬 — 실제 입력을 보냅니다" } else { "입력 무장: 끔" }.to_string());
+                    }
                 }
             }
             ViewAction::SendManual { node, value } => match &self.runner {
@@ -1098,6 +1109,9 @@ impl NlApp {
         self.view = view;
         self.canvas.cancel_interaction();
         self.pcanvas.cancel_interaction();
+        log::info!("뷰 전환: {}", view.label());
+        // 하네스가 `wait-log` 로 기다린다 — 고정 `sleep` 은 키가 씹혀도 지나가 버린다.
+        eprintln!("[nl-app] view {}", view.label());
     }
 
     // ── 데이터셋 ────────────────────────────────────────────────
@@ -1416,7 +1430,7 @@ impl NlApp {
     fn tick_runner(&mut self, ctx: &egui::Context) {
         let Some(session) = self.runner.as_mut() else { return };
         let layout = self.doc.project.gui.clone();
-        let poll = session.poll(&mut self.gui_state, &layout);
+        let poll = session.poll(ctx, &mut self.gui_state, &layout);
         for line in poll.logs {
             self.log(line);
         }
@@ -2358,9 +2372,11 @@ impl NlApp {
     fn handle_keys(&mut self, ctx: &egui::Context, now: f64) {
         // 킬 스위치는 무엇보다 먼저 본다 — 텍스트 칸에 포커스가 있어도, 모달이 떠 있어도 멈춰야 한다.
         self.tick_kill_switch(ctx, now);
-        if ctx.egui_wants_keyboard_input() || self.pending_action.is_some() || self.pending_plan.is_some() {
+        // 모달이 떠 있으면 아래 단축키는 전부 막는다 — 모달이 먼저 답을 받아야 한다.
+        if self.pending_action.is_some() || self.pending_plan.is_some() {
             return;
         }
+        let typing = ctx.egui_wants_keyboard_input();
         let k = ctx.input(|i| Keys {
             del: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             undo: i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
@@ -2382,6 +2398,7 @@ impl NlApp {
                 .flatten(),
             view: i.modifiers.command.then(|| VIEW_KEYS.iter().position(|key| i.key_pressed(*key))).flatten(),
         });
+        let k = if typing { k.while_typing() } else { k };
 
         if k.undo {
             self.undo();
@@ -2598,6 +2615,7 @@ impl NlApp {
     }
 }
 
+#[derive(Default)]
 struct Keys {
     del: bool,
     undo: bool,
@@ -2616,6 +2634,27 @@ struct Keys {
     view: Option<usize>,
     /// 숫자키 0~9 (녹화 라벨).
     digit: Option<usize>,
+}
+
+impl Keys {
+    /// 텍스트 칸을 편집하는 중에도 살아 있어야 하는 것만 남긴다.
+    ///
+    /// 이름을 고치다가 Ctrl+S 를 눌렀는데 저장이 안 되면 글을 잃는다. 뷰 전환·패널 토글도 마찬가지로
+    /// 글자를 넣는 동작이 아니라 막을 이유가 없다. 반대로 Ctrl+A·Ctrl+Z·Delete·Esc 는 `TextEdit` 이
+    /// 스스로 쓰는 것이라 가로채면 편집이 망가진다 — 그것들은 egui 에 넘긴다.
+    fn while_typing(self) -> Self {
+        Keys {
+            save: self.save,
+            save_as: self.save_as,
+            open: self.open,
+            new: self.new,
+            outline: self.outline,
+            inspector: self.inspector,
+            dock: self.dock,
+            view: self.view,
+            ..Keys::default()
+        }
+    }
 }
 
 // ── eframe ──────────────────────────────────────────────────────────
@@ -2987,6 +3026,39 @@ mod tests {
 
     fn first_model(p: &Project) -> ModelId {
         *p.models.keys().next().unwrap()
+    }
+
+    /// 텍스트 칸을 편집하는 중에도 저장·뷰 전환은 살아 있고, egui 가 쓰는 조합은 넘긴다.
+    #[test]
+    fn typing_keeps_save_and_view_but_yields_editing_keys() {
+        let all = Keys {
+            del: true,
+            undo: true,
+            redo: true,
+            save: true,
+            save_as: true,
+            open: true,
+            new: true,
+            fit: true,
+            select_all: true,
+            duplicate: true,
+            escape: true,
+            outline: true,
+            inspector: true,
+            dock: true,
+            view: Some(1),
+            digit: Some(3),
+        };
+        let k = all.while_typing();
+        // 글자를 넣는 동작이 아닌 것은 그대로 산다.
+        assert!(k.save && k.save_as && k.open && k.new);
+        assert!(k.outline && k.inspector && k.dock);
+        assert_eq!(k.view, Some(1));
+        // `TextEdit` 이 스스로 쓰는 것은 넘긴다.
+        assert!(!k.del && !k.undo && !k.redo && !k.select_all && !k.escape);
+        // 캔버스 전용 동작도 편집 중에는 뜻이 없다.
+        assert!(!k.fit && !k.duplicate);
+        assert_eq!(k.digit, None, "숫자키는 글자로 들어가야 한다");
     }
 
     #[test]

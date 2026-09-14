@@ -477,6 +477,8 @@ fn run_bundle_tool(plan: &nl_bundle::ToolPlan, tx: &std::sync::mpsc::Sender<Tool
                 },
                 ToolProgress::Downloaded { path } => ToolEvent::Log(format!("내려받음: {}", path.display())),
                 ToolProgress::Running { command } => ToolEvent::Log(format!("실행: {command}")),
+                // 설치 프로그램이 뱉는 줄. wine 이 왜 실패했는지는 여기에만 나온다.
+                ToolProgress::Output(line) => ToolEvent::Log(format!("  {}", line.trim_end())),
                 ToolProgress::Done => ToolEvent::Log("설치 완료".into()),
                 ToolProgress::Failed { message } => ToolEvent::Log(format!("실패: {message}")),
             };

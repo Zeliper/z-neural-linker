@@ -3,7 +3,8 @@
 //! 배선은 배포 런타임(`nl-runtime::app`)과 같다: 이벤트를 받아 위젯 값에 반영하고,
 //! 위젯 이벤트는 바인딩을 보고 `RunnerInput` 으로 되돌린다. 다른 점은 **입력 무장이 기본 꺼짐**이라는 것뿐이다.
 
-use crate::pcanvas::LiveView;
+use crate::pcanvas::{LiveView, NodePreview};
+use eframe::egui;
 use nl_core::gui::Binding;
 use nl_core::{DevicePref, GuiLayout, PNodeId, Pipeline, PipelineId, Project, WidgetId, WidgetKind};
 use nl_engine::Value;
@@ -107,7 +108,9 @@ impl RunnerSession {
     }
 
     /// 이번 프레임에 도착한 이벤트를 모두 소비한다.
-    pub fn poll(&mut self, gui: &mut GuiState, layout: &GuiLayout) -> RunnerPoll {
+    ///
+    /// `ctx` 는 이미지 축소판을 텍스처로 올리는 데 쓴다 — 미리보기는 이 경로로만 들어온다.
+    pub fn poll(&mut self, ctx: &egui::Context, gui: &mut GuiState, layout: &GuiLayout) -> RunnerPoll {
         let mut out = RunnerPoll::default();
         while let Ok(ev) = self.handle.events.try_recv() {
             out.changed = true;
@@ -139,10 +142,9 @@ impl RunnerSession {
                     let points = max_points(layout, widget);
                     gui.push_value(widget, value, points);
                 }
-                // 이미지 원본은 `Value` 로 오지 않는다 (드롭 정책). 캔버스에 값이 흐르는 것이 보이도록
-                // 크기만 적는다. 축소판을 실제로 그리는 일은 텍스처 수명 관리가 필요해 아직 하지 않는다.
-                RunnerEvent::ValuePreview { node, width, height, .. } => {
-                    self.live.values.insert(node, format!("이미지 {width}×{height}"));
+                // 이미지 원본은 `Value` 로 오지 않는다 (드롭 정책) — 이 축소판이 유일한 통로다.
+                RunnerEvent::ValuePreview { node, width, height, rgba } => {
+                    set_preview(ctx, &mut self.live, node, width, height, &rgba);
                     self.live.errors.remove(&node);
                 }
                 RunnerEvent::Stats { tick, tick_ms, hz } => {
@@ -201,6 +203,30 @@ fn max_points(layout: &GuiLayout, widget: WidgetId) -> usize {
     }
 }
 
+/// 축소판을 텍스처로 올려 `LiveView` 에 넣는다.
+///
+/// 노드마다 텍스처를 하나만 두고 내용만 갈아 끼운다 — 초당 4장씩 새 텍스처를 만들면
+/// GPU 메모리가 계속 늘어난다.
+fn set_preview(ctx: &egui::Context, live: &mut LiveView, node: PNodeId, width: u32, height: u32, rgba: &[u8]) {
+    let (w, h) = (width as usize, height as usize);
+    // 채널이 늦게 도착해 크기와 바이트 수가 어긋나면 그냥 버린다 — egui 는 이 경우 패닉한다.
+    if w == 0 || h == 0 || rgba.len() != w * h * 4 {
+        return;
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba);
+    match live.previews.get_mut(&node) {
+        Some(p) => {
+            p.texture.set(image, egui::TextureOptions::LINEAR);
+            p.size = (width, height);
+        }
+        None => {
+            let name = format!("pnode-preview-{}", node.short());
+            let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+            live.previews.insert(node, NodePreview { texture, size: (width, height) });
+        }
+    }
+}
+
 /// 저장되지 않은 프로젝트를 시험 실행할 때 쓰는 임시 폴더.
 pub fn temp_run_dir() -> PathBuf {
     std::env::temp_dir().join(format!("nl-app-run-{}", std::process::id()))
@@ -209,6 +235,31 @@ pub fn temp_run_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 축소판은 노드마다 텍스처 하나를 재사용하고, 크기가 어긋난 바이트는 조용히 버린다.
+    /// (egui 는 길이가 맞지 않는 `ColorImage` 에 패닉한다 — 채널이 늦으면 실제로 일어날 수 있다.)
+    #[test]
+    fn previews_reuse_one_texture_and_reject_mismatched_bytes() {
+        let ctx = egui::Context::default();
+        let mut live = LiveView::default();
+        let node = PNodeId::new();
+
+        set_preview(&ctx, &mut live, node, 4, 2, &[0u8; 4 * 2 * 4]);
+        let first = live.previews[&node].texture.id();
+        assert_eq!(live.previews[&node].size, (4, 2));
+
+        // 같은 노드의 다음 장은 새 텍스처를 만들지 않는다.
+        set_preview(&ctx, &mut live, node, 8, 2, &[1u8; 8 * 2 * 4]);
+        assert_eq!(live.previews[&node].texture.id(), first, "노드당 텍스처는 하나여야 한다");
+        assert_eq!(live.previews[&node].size, (8, 2));
+
+        // 길이가 어긋나면 그대로 둔다.
+        set_preview(&ctx, &mut live, node, 8, 2, &[2u8; 3]);
+        assert_eq!(live.previews[&node].size, (8, 2), "깨진 프레임은 무시한다");
+        set_preview(&ctx, &mut live, PNodeId::new(), 0, 0, &[]);
+        assert_eq!(live.previews.len(), 1, "크기가 0 이면 만들지 않는다");
+    }
+
     use nl_core::gui::BuiltinAction;
     use nl_core::{Widget, WidgetKind};
 

@@ -4,15 +4,22 @@
 #
 # 골든이 없으면 첫 실행이 만들고 "골든 생성" 으로 알린다. 만들어진 PPM 을 눈으로 확인한 뒤
 # 커밋해야 다음 실행부터 실제 비교가 된다. 갱신 절차는 tools/uitest/README.md 참고.
+#
+# 뷰 전환은 앱이 찍는 `[nl-app] view <이름>` 마커를 기다린다. 로그는 앱을 띄울 때마다 비워지지만
+# 한 시나리오 안에서 같은 뷰로 두 번 가면 두 번째 대기는 이전 줄을 보고 바로 지나간다 —
+# 이 시나리오는 뷰마다 한 번씩만 간다.
 
 # ── 좌표·시간 상수 ───────────────────────────────────────────────
-# 창이 뜬 직후에는 아직 최종 화면이 아니다. 앱이 GPU 장치를 훑는 동안(이 기계에서 10초 남짓,
-# 드라이버가 패닉하면 더) 다른 화면이 떠 있고 그동안에도 화면은 멎어 있어 프레임 안정 판정으로는
-# 구분되지 않는다. 그래서 첫 캡처 앞에만 넉넉히 기다린다.
-#   앱이 "준비 완료" 마커를 로그에 찍게 되면 이 줄을 `wait-log "준비 완료" 60` 으로 바꾸면 된다.
-set SETTLE_FIRST 35
-# 뷰를 바꾼 뒤 다시 그려질 때까지. 앱이 데워진 뒤라 짧아도 된다.
+# 뷰를 바꾼 뒤 다시 그려질 때까지.
 set SETTLE 1.2
+# 클릭 전 여유. `expect-shot` 이 grim 으로 여러 장 찍은 직후라 시스템이 바쁘다.
+set BEFORE_KEY 0.3
+# 뷰 바 버튼의 y 좌표. x 는 아래에 버튼마다 박혀 있다.
+set VIEWBAR_Y 45
+# 캡처 전에 커서를 치워 두는 자리. 어느 뷰에서도 비어 있는 지점이라 호버 강조도 툴팁도 뜨지 않는다.
+# 커서를 버튼 위에 둔 채로 찍으면 툴팁이 뜨는 타이밍에 따라 골든이 흔들린다.
+set PARK_X 800
+set PARK_Y 850
 # 뷰 바 아래 중앙 영역만 견주고 싶을 때 쓰는 예시 영역 (지금은 전체를 본다).
 set BODY 0,80 1600x920
 
@@ -20,37 +27,78 @@ set BODY 0,80 1600x920
 # 인자로 `.nlproj` 를 주면 그 문서를 연다. 인자가 없으면 빈 프로젝트로 시작한다.
 app
 wait-app
-sleep $SETTLE_FIRST
+# 첫 화면이 그려질 때까지. 장치 확인은 백그라운드로 빠졌으므로 1~2초면 온다.
+wait-log "\[nl-app\] ready" 30
+# 화면이 그려진 것과 입력을 받을 수 있는 것은 다르다. 컴포지터가 포커스를 주기 전에 보낸
+# 입력은 그냥 사라진다.
+wait-log "\[nl-app\] focused" 30
+# 장치 확인이 끝나면 상태바의 "장치 확인 중…" 이 실제 이름으로 바뀐다. 골든에 상태바가 들어가므로
+# 여기서 한 번 맞춰 둔다. 드라이버가 깨진 GPU 를 훑느라 20초 넘게 걸릴 수 있어 넉넉히 잡는다.
+wait-log "\[nl-app\] devices ready" 180
+move $PARK_X $PARK_Y
+sleep $SETTLE
 
 # 시작 화면 전체.
 expect-shot 01-start
 
-# ── 뷰 전환 (Ctrl+2 … Ctrl+7) ────────────────────────────────────
-key -M ctrl -k 2 -m ctrl
+# ── 뷰 전환 (뷰 바 클릭) ─────────────────────────────────────────
+# 여기서는 단축키 대신 클릭을 쓴다. `expect-shot` 이 화면을 여러 장 찍은 직후에 보낸 키는
+# 가끔 컴포지터에 닿기 전에 사라진다 (wtype 은 가상 키보드를 만들자마자 키를 보내고 지운다).
+# 이 시나리오가 보는 것은 화면 모양이라 전환 수단은 상관없다.
+# 단축키 경로 자체는 startup.uit 가 확인한다.
+sleep $BEFORE_KEY
+click 70 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view 데이터" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 02-view2
 
-key -M ctrl -k 3 -m ctrl
+sleep $BEFORE_KEY
+click 116 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view 학습" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 03-view3
 
-key -M ctrl -k 4 -m ctrl
+sleep $BEFORE_KEY
+click 172 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view 파이프라인" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 04-view4
 
-key -M ctrl -k 5 -m ctrl
+sleep $BEFORE_KEY
+click 230 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view GUI" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 05-view5
 
-key -M ctrl -k 6 -m ctrl
+sleep $BEFORE_KEY
+click 267 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view 빌드" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 06-view6
 
-key -M ctrl -k 7 -m ctrl
+sleep $BEFORE_KEY
+click 307 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view 자원" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 07-view7
 
 # 첫 뷰로 돌아와 시작 화면과 같은지 본다.
-key -M ctrl -k 1 -m ctrl
+sleep $BEFORE_KEY
+click 24 $VIEWBAR_Y
+# 전환이 실제로 일어났는지 앱이 찍는 마커로 본다. 고정 대기만 쓰면 놓친 전환이 골든이 된다.
+wait-log "\[nl-app\] view 모델" 10
+move $PARK_X $PARK_Y
 sleep $SETTLE
 expect-shot 08-back-to-start

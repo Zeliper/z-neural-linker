@@ -1,9 +1,12 @@
 //! 한글 폰트 폴백.
 //!
-//! 기본은 `nl_gui::font_definitions()` 다. 그 함수는 고정된 후보 경로 목록을 훑는데, 배포판마다
-//! 폰트 폴더 이름이 달라(예: Fedora 의 `/usr/share/fonts/google-noto-sans-cjk-fonts/`) 목록에 없으면
-//! 한글이 전부 □ 로 나온다. 여기서는 **nl-gui 가 CJK 폰트를 못 찾았을 때만** 폰트 폴더를 직접 훑어
-//! 하나를 얹는다. nl-gui 의 후보 목록이 넓어지면 이 폴백은 아무 일도 하지 않는다.
+//! 기본은 `nl_gui::font_definitions()` 다. 그 함수는 **고정된 경로 목록**을 위에서부터 훑는다.
+//! 목록에 Fedora 경로가 들어간 뒤로 이 개발 기계에서는 여기 있는 폴백이 돌지 않는다.
+//!
+//! 그래도 남겨 두는 이유: 고정 목록은 사용자가 직접 설치한 폰트(`~/.local/share/fonts`)나 목록에
+//! 없는 배포판 경로를 알지 못한다. 거기서는 한글이 전부 □ 로 나온다. 여기서는
+//! **nl-gui 가 CJK 폰트를 못 찾았을 때만** 폰트 폴더를 실제로 훑어 하나를 얹는다.
+//! nl-gui 가 찾았으면 아무 일도 하지 않으므로 비용은 0 이다.
 
 use eframe::egui::{FontData, FontDefinitions, FontFamily};
 use std::path::{Path, PathBuf};
@@ -188,6 +191,15 @@ mod tests {
             for c in icon.chars() {
                 assert!(chars.contains_key(&c), "아이콘 {icon:?}(U+{:04X}) 글리프가 없어 두부로 보인다", c as u32);
             }
+        }
+    }
+
+    /// nl-gui 가 찾았으면 폴백은 얹지 않는다 — 폰트가 두 번 실리면 글리프 선택이 흔들린다.
+    #[test]
+    fn the_fallback_stays_out_of_the_way_when_nl_gui_found_a_font() {
+        let defs = font_definitions();
+        if defs.font_data.contains_key(NL_GUI_KEY) {
+            assert!(!defs.font_data.contains_key(FALLBACK_KEY), "nl-gui 가 찾았는데 폴백까지 실렸다");
         }
     }
 

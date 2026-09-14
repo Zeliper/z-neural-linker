@@ -9,7 +9,7 @@ use crate::pcanvas::LiveView;
 use crate::views::{self, parse_shape_text, shape_text, ViewAction, ViewCtx, COL_ERROR, COL_OK, COL_WARN, COL_WEAK};
 use eframe::egui::{self, DragValue, RichText};
 use nl_core::dataset::{DataSource, Split, SyntheticKind};
-use nl_core::train::{Loss, Metric, Optimizer};
+use nl_core::train::{Loss, LrSchedule, Metric, Optimizer};
 use nl_core::{Act, DevicePref, LayerKind, Op, PayloadId};
 
 impl NlApp {
@@ -279,7 +279,21 @@ impl NlApp {
                 .on_hover_text("0 이면 없음")
                 .changed();
             ui.end_row();
+            ui.label(RichText::new("조기 종료").color(COL_WEAK).size(11.5));
+            changed |= ui
+                .add(DragValue::new(&mut c.early_stop_patience).range(0..=10_000).suffix(" 에포크"))
+                .on_hover_text("검증 손실이 이만큼 나아지지 않으면 멈춥니다. 0 이면 끄기 — 검증 집합이 없으면 무시됩니다")
+                .changed();
+            ui.end_row();
+            ui.label(RichText::new("워밍업").color(COL_WEAK).size(11.5));
+            changed |= ui
+                .add(DragValue::new(&mut c.warmup_steps).range(0..=1_000_000).suffix(" 스텝"))
+                .on_hover_text("처음 이만큼은 학습률을 0 에서 기본값까지 선형으로 올립니다. 0 이면 끄기")
+                .changed();
+            ui.end_row();
         });
+
+        changed |= lr_schedule(ui, &mut c.schedule);
 
         ui.label(RichText::new("장치").color(COL_WEAK).size(11.5));
         let cur_dev = c.device;
@@ -696,6 +710,73 @@ fn pair(ui: &mut egui::Ui, label: &str, v: &mut [usize; 2], range: std::ops::Ran
         ui.label("×");
         changed |= ui.add(DragValue::new(&mut v[1]).range(range)).changed();
     });
+    changed
+}
+
+/// 학습률 스케줄 편집기: 종류 콤보 + 그 종류의 파라미터.
+///
+/// 종류를 바꿔도 이전 값을 되살리지 않는다 — 스케줄마다 뜻이 다른 숫자라 이어 가면 오히려 헷갈린다.
+/// `LrSchedule::ALL` 의 기본 인스턴스에서 다시 시작한다.
+fn lr_schedule(ui: &mut egui::Ui, schedule: &mut LrSchedule) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("학습률 스케줄").color(COL_WEAK).size(11.5));
+        egui::ComboBox::from_id_salt("insp-lr-schedule").selected_text(schedule.label()).show_ui(ui, |ui| {
+            for preset in LrSchedule::ALL {
+                let same = preset.label() == schedule.label();
+                if ui.selectable_label(same, preset.label()).clicked() && !same {
+                    *schedule = preset;
+                    changed = true;
+                }
+            }
+        });
+    });
+    match schedule {
+        LrSchedule::None => {}
+        LrSchedule::Step { every, gamma } => {
+            egui::Grid::new("insp-lr-step").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("주기").color(COL_WEAK).size(11.5));
+                changed |= ui.add(DragValue::new(every).range(1..=10_000).suffix(" 에포크")).changed();
+                ui.end_row();
+                ui.label(RichText::new("감쇠율").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(DragValue::new(gamma).range(0.0..=1.0).speed(0.01))
+                    .on_hover_text("주기마다 학습률에 곱하는 값")
+                    .changed();
+                ui.end_row();
+            });
+        }
+        LrSchedule::Cosine { min_lr } => {
+            egui::Grid::new("insp-lr-cos").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("최저 학습률").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(DragValue::new(min_lr).range(0.0..=1.0).speed(1e-5).custom_formatter(|v, _| format!("{v:.6}")))
+                    .on_hover_text("마지막 에포크에서 도달하는 값")
+                    .changed();
+                ui.end_row();
+            });
+        }
+        LrSchedule::Plateau { patience, factor } => {
+            egui::Grid::new("insp-lr-plateau").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("기다릴 에포크").color(COL_WEAK).size(11.5));
+                changed |= ui
+                    .add(DragValue::new(patience).range(1..=10_000))
+                    .on_hover_text("검증 손실이 이만큼 나아지지 않으면 낮춥니다")
+                    .changed();
+                ui.end_row();
+                ui.label(RichText::new("감쇠율").color(COL_WEAK).size(11.5));
+                changed |= ui.add(DragValue::new(factor).range(0.0..=1.0).speed(0.01)).changed();
+                ui.end_row();
+            });
+        }
+    }
+    let summary = schedule.summary();
+    if !summary.is_empty() {
+        ui.label(RichText::new(summary).color(COL_WEAK).size(11.0));
+    }
+    if matches!(schedule, LrSchedule::Plateau { .. }) {
+        ui.label(RichText::new("검증 집합이 있어야 동작합니다").color(COL_WEAK).size(11.0));
+    }
     changed
 }
 
