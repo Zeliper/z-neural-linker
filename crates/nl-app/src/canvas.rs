@@ -1275,11 +1275,64 @@ mod tests {
         let n = labels.len();
         labels.dedup();
         assert_eq!(labels.len(), n, "팔레트에 같은 레이어가 두 번");
-        // 모든 분류에 순서가 있어야 서브메뉴가 만들어진다.
-        for kind in &p {
-            let cat = kind.spec().category;
-            assert!(category_order(cat) < 100, "{cat:?} 에 팔레트 순서가 없다");
+    }
+
+    /// 팔레트 서브메뉴가 `LayerCategory` 전체를 덮는지.
+    ///
+    /// `category_order` 는 `match` 라 새 분류가 생기면 컴파일이 멈춘다. 하지만 **분류만 추가하고
+    /// 그 분류의 레이어를 팔레트에 넣지 않으면** 조용히 빈 채로 남는다. 여기서 두 방향을 함께 본다:
+    /// 팔레트의 모든 분류에 순서가 있고, 순서가 있는 모든 분류에 레이어가 하나는 있다.
+    #[test]
+    fn every_layer_category_has_a_submenu_and_something_in_it() {
+        use nl_core::model::LayerCategory as C;
+        // `LayerCategory` 에 변형을 더하면 이 배열도 함께 고쳐야 한다 — 아래 `match` 가 그것을 강제한다.
+        const ALL: [C; 12] = [
+            C::Io,
+            C::Dense,
+            C::Conv,
+            C::Pool,
+            C::Shape,
+            C::Activation,
+            C::Regularize,
+            C::Normalize,
+            C::Merge,
+            C::Embed,
+            C::Sequence,
+            C::Attention,
+        ];
+        for c in ALL {
+            // 컴파일러가 빠진 변형을 여기서 잡는다.
+            let _: &str = match c {
+                C::Io => "io",
+                C::Dense => "dense",
+                C::Conv => "conv",
+                C::Pool => "pool",
+                C::Shape => "shape",
+                C::Activation => "act",
+                C::Regularize => "reg",
+                C::Normalize => "norm",
+                C::Merge => "merge",
+                C::Embed => "embed",
+                C::Sequence => "seq",
+                C::Attention => "attn",
+            };
         }
+
+        let palette = nl_core::LayerKind::palette();
+        for c in ALL {
+            assert!(
+                palette.iter().any(|k| k.spec().category == c),
+                "{} 분류에 팔레트 항목이 없어 서브메뉴가 비어 보인다",
+                c.label()
+            );
+        }
+
+        // 순서가 겹치면 두 분류가 한 서브메뉴로 합쳐진다.
+        let mut orders: Vec<usize> = ALL.iter().map(|c| category_order(*c)).collect();
+        orders.sort_unstable();
+        let before = orders.len();
+        orders.dedup();
+        assert_eq!(orders.len(), before, "두 분류가 같은 팔레트 순서를 쓴다");
     }
 
     use super::*;
