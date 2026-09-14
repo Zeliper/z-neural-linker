@@ -68,3 +68,38 @@ jobs:
       # 테스트가 다 통과해도 배포가 막히므로 여기서 같이 본다.
       - name: 릴리스 빌드 (배포 런타임)
         run: cargo build --release -p nl-runtime
+
+  # Windows 는 배포 대상이라 실기에서 한 번은 돌려 봐야 한다.
+  # 개발 기계에서는 `cargo xwin` 으로 컴파일만 확인할 수 있고, 소켓 타임아웃·경로·권한처럼
+  # 실제로 돌려 봐야 아는 것들이 남는다. 그 공백을 이 잡이 메운다.
+  #
+  # `check` 잡과 따로 둔다. 여기서 깨져도 Linux 결과는 그대로 보이는 편이 고치기 쉽다.
+  #
+  # Forgejo 쪽 주의: 두 파일을 바이트 동일로 두기 때문에 이 잡이 Forgejo 에도 그대로 간다.
+  # 인스턴스에 `windows-latest` 라벨을 가진 러너가 없으면 이 잡은 배정되지 않고 계속 대기한다.
+  # Windows 러너를 붙이거나, 그때까지는 Forgejo 에서 이 잡을 무시하도록 운영하면 된다.
+  windows:
+    runs-on: windows-latest
+    # Windows 러너는 Linux 보다 느리고, burn·wgpu 트리를 처음 받으면 오래 걸린다.
+    timeout-minutes: 90
+    # 기본값이지만 적어 둔다 — 여기서 깨지면 CI 전체가 빨간불이어야 한다는 뜻이다.
+    # `check` 와 서로 `needs` 가 없어 나란히 도니, 이 잡이 깨져도 Linux 결과는 끝까지 나온다.
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # GUI 크레이트(nl-gui·nl-app·nl-runtime)는 뺐다 — 러너에 GPU·CJK 글꼴이 없어
+      # 스냅샷 테스트가 의미 있게 돌지 않는다. Linux 잡이 그쪽을 맡는다.
+      # GPU 게이트 테스트는 환경 변수를 주지 않으므로 스스로 건너뛴다.
+      #
+      # `--release` 없이 디버그로 돌린다. 이 워크스페이스는 `[profile.dev.package."*"] opt-level = 2`
+      # 라 burn·ndarray 같은 의존성이 디버그에서도 최적화되어 있다. 가장 무거운 nl-engine 조차
+      # 개발 기계에서 테스트 실행에 49 초밖에 안 걸리므로(빌드 시간 제외), 릴리스로 바꿔 봐야
+      # 컴파일만 길어지고 얻는 것이 없다. 오래 걸리는 쪽은 테스트가 아니라 빌드이고, 그건
+      # rust-cache 가 맡는다.
+      - name: 테스트
+        run: cargo test -p nl-core -p nl-io -p nl-cli -p nl-bundle -p nl-update -p nl-engine
