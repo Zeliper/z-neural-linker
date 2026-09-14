@@ -256,10 +256,9 @@ fn the_cnn_sample_classifies_a_png_through_the_deployed_app() {
 
     let dir = temp_dir("cnn");
     let proj = dir.join("cnn.nlproj");
-    // `nl sample` 은 XOR 만 만든다. CNN 은 nl-core 에서 직접 꺼내 쓴다.
-    let project = nl_core::sample::quadrants_cnn_project();
-    let json = nl_core::ProjectFile::new(project).to_json();
-    std::fs::write(&proj, json).expect("프로젝트를 쓰지 못했다");
+    let out = run("nl sample --kind cnn", Command::new(NL).args(["sample"]).arg(&proj).args(["--kind", "cnn"]));
+    assert!(proj.is_file(), "CNN 샘플 파일이 만들어지지 않았다: {}", stdout(&out));
+    assert!(stdout(&out).contains("사분면 CNN"), "모델 이름이 안 보인다:\n{}", stdout(&out));
 
     // ── 학습 (짧게) ──
     let out = run(

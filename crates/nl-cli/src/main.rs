@@ -159,8 +159,15 @@ enum Command {
     },
     /// XOR 샘플 프로젝트를 만든다.
     Sample {
-        /// 만들 `.nlproj` 파일.
-        out: PathBuf,
+        /// 만들 `.nlproj` 파일. `--list` 와 함께면 생략한다.
+        #[arg(required_unless_present = "list")]
+        out: Option<PathBuf>,
+        /// 어떤 샘플을 만들지. `nl sample --list` 로 목록을 본다.
+        #[arg(long, default_value = "xor")]
+        kind: String,
+        /// 만들 수 있는 샘플 목록만 보여 준다.
+        #[arg(long, conflicts_with = "kind")]
+        list: bool,
     },
 }
 
@@ -226,21 +233,78 @@ fn dispatch() -> Result<i32> {
                 arm_input,
             })
         }
-        Command::Sample { out } => make_sample(&out),
+        Command::Sample { out, kind, list } => {
+            if list {
+                list_samples()
+            } else {
+                make_sample(out.as_deref().expect("clap 이 required_unless_present 로 보장한다"), &kind)
+            }
+        }
     }
 }
 
-fn make_sample(out: &std::path::Path) -> Result<i32> {
-    // 샘플은 `nl-core` 한 곳에 있다 — 빌더의 "샘플 열기" 와 정확히 같은 프로젝트가 나온다.
-    let project = nl_core::sample::xor_project();
+/// `--kind` 값 → nl-core 의 샘플 함수.
+///
+/// 샘플 자체는 `nl-core` 한 곳에 있다 — 빌더의 "샘플 열기" 와 정확히 같은 프로젝트가 나온다.
+fn sample_factory(kind: &str) -> Result<(&'static str, nl_core::sample::SampleFactory)> {
+    match kind.trim().to_lowercase().as_str() {
+        "xor" => Ok(("xor", nl_core::sample::xor_project as nl_core::sample::SampleFactory)),
+        "cnn" | "quadrants" => Ok(("cnn", nl_core::sample::quadrants_cnn_project as _)),
+        other => anyhow::bail!("모르는 샘플: {other} (xor | cnn). `nl sample --list` 로 목록을 본다"),
+    }
+}
+
+fn make_sample(out: &std::path::Path, kind: &str) -> Result<i32> {
+    let (key, make) = sample_factory(kind)?;
+    let project = make();
     common::save_project_atomic(out, &project)?;
-    println!("{} {}", common::bold("샘플"), out.display());
-    println!("  {} {}", common::dim("모델"), project.models.values().next().map(|m| m.name.as_str()).unwrap_or(""));
-    println!("  {} {}", common::dim("데이터셋"), project.datasets.values().next().map(|d| d.name.as_str()).unwrap_or(""));
+
+    let model = project.models.values().next();
+    println!("{} {} ({key})", common::bold("샘플"), out.display());
+    println!("  {} {}", common::dim("모델"), model.map(|m| m.name.as_str()).unwrap_or(""));
+    println!(
+        "  {} {}",
+        common::dim("데이터셋"),
+        project.datasets.values().next().map(|d| d.name.as_str()).unwrap_or("")
+    );
+    if !project.pipelines.is_empty() {
+        let names: Vec<&str> = project.pipelines.values().map(|p| p.name.as_str()).collect();
+        println!("  {} {}", common::dim("파이프라인"), names.join(", "));
+    }
+
+    if let Some(m) = model {
+        println!();
+        println!("{}", common::dim("다음:"));
+        println!("  nl train {} --model '{}' --device cpu --epochs 30", out.display(), m.name);
+        // 입력 형태가 달라 예시도 갈린다.
+        if key == "cnn" {
+            println!(
+                "  nl infer {} --model '{}' --image 그림.png",
+                out.display(),
+                m.name
+            );
+        } else {
+            println!("  nl infer {} --model '{}' --input '[1,0]'", out.display(), m.name);
+        }
+    }
+    Ok(0)
+}
+
+/// 만들 수 있는 샘플 목록.
+fn list_samples() -> Result<i32> {
+    let mut rows = vec![vec!["--kind".into(), "이름".into(), "모델".into(), "설명".into()]];
+    for (key, make) in [("xor", nl_core::sample::xor_project as nl_core::sample::SampleFactory), ("cnn", nl_core::sample::quadrants_cnn_project as _)] {
+        let p = make();
+        rows.push(vec![
+            key.to_string(),
+            p.name.clone(),
+            p.models.values().next().map(|m| m.name.clone()).unwrap_or_default(),
+            p.description.clone(),
+        ]);
+    }
+    common::table(&rows);
     println!();
-    println!("{}", common::dim("다음:"));
-    println!("  nl train {} --model 'XOR MLP' --device cpu --epochs 30", out.display());
-    println!("  nl infer {} --model 'XOR MLP' --input '[1,0]'", out.display());
+    println!("{}", common::dim("예: nl sample /tmp/x.nlproj --kind cnn"));
     Ok(0)
 }
 
@@ -320,6 +384,55 @@ mod tests {
         assert!(Cli::try_parse_from(["nl", "inspect"]).is_err());
     }
 
+    #[test]
+    fn sample_kinds_map_to_the_core_factories() {
+        assert_eq!(sample_factory("xor").unwrap().0, "xor");
+        assert_eq!(sample_factory(" XOR ").unwrap().0, "xor");
+        assert_eq!(sample_factory("cnn").unwrap().0, "cnn");
+        assert_eq!(sample_factory("quadrants").unwrap().0, "cnn");
+        let err = sample_factory("mlp").unwrap_err().to_string();
+        assert!(err.contains("--list"), "{err}");
+    }
+
+    #[test]
+    fn the_cnn_kind_writes_the_cnn_project() {
+        let dir = std::env::temp_dir().join(format!("nl-cli-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cnn.nlproj");
+        assert_eq!(make_sample(&path, "cnn").unwrap(), 0);
+
+        let p = common::load_project(&path).unwrap().project;
+        assert_eq!(p.id, nl_core::sample::quadrants_cnn_project().id);
+        assert!(p.models.values().any(|m| m.name == "사분면 CNN"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn listing_samples_needs_no_output_path() {
+        // `--list` 면 경로가 없어도 된다.
+        assert!(Cli::try_parse_from(["nl", "sample", "--list"]).is_ok());
+        // 경로도 `--kind` 도 없으면 오류.
+        assert!(Cli::try_parse_from(["nl", "sample"]).is_err());
+        // `--list` 와 `--kind` 는 함께 쓸 수 없다.
+        assert!(Cli::try_parse_from(["nl", "sample", "--list", "--kind", "cnn"]).is_err());
+
+        let c = Cli::parse_from(["nl", "sample", "/tmp/x.nlproj", "--kind", "cnn"]);
+        match c.command {
+            Command::Sample { out, kind, list } => {
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("/tmp/x.nlproj")));
+                assert_eq!(kind, "cnn");
+                assert!(!list);
+            }
+            _ => panic!("sample 이 아니다"),
+        }
+        // 기본은 xor.
+        match Cli::parse_from(["nl", "sample", "/tmp/x.nlproj"]).command {
+            Command::Sample { kind, .. } => assert_eq!(kind, "xor"),
+            _ => panic!("sample 이 아니다"),
+        }
+        assert_eq!(list_samples().unwrap(), 0);
+    }
+
     /// nl-core 샘플이 파일을 거쳐도 온전한지: 검증 문제 없음 + 파이프라인 2개 + GUI 4위젯 + 빌드 설정.
     /// 빌더와 명령줄이 같은 것을 쓰는지 지키는 자리다 (nl-core 는 nl-app 을 볼 수 없어 여기서 확인한다).
     #[test]
@@ -328,7 +441,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nl-cli-core-sample-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("xor.nlproj");
-        assert_eq!(make_sample(&path).unwrap(), 0);
+        assert_eq!(make_sample(&path, "xor").unwrap(), 0);
 
         let p = common::load_project(&path).unwrap().project;
         let errors: Vec<_> =
@@ -378,7 +491,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("xor.nlproj");
 
-        assert_eq!(make_sample(&path).unwrap(), 0);
+        assert_eq!(make_sample(&path, "xor").unwrap(), 0);
         assert!(path.is_file());
 
         let mut loaded = common::load_project(&path).unwrap().project;
