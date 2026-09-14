@@ -47,7 +47,7 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
-      - name: 포맷 검사 (아직 강제하지 않음)
+      - name: 포맷 검사
         run: cargo fmt --all -- --check
 
       - name: 클리피
