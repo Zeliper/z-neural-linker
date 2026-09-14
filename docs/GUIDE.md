@@ -788,6 +788,21 @@ systemctl --user restart neural-linker-app
 넘어가라는 뜻입니다. 포트마다 다른 토큰을 쓰려면 `NL_HTTP_TOKEN_8799` 처럼 포트를 붙이세요 —
 포트별 값이 먼저입니다.
 
+앱이 직접 읽게 할 수도 있습니다. `--env-file` 은 systemd 가 없는 곳(Windows 작업 스케줄러)에서
+쓰려고 만들었지만 리눅스에서도 똑같이 됩니다.
+
+```sh
+./내앱 --headless --work-dir ~/.local/share/neural-linker/내앱 \
+       --env-file ~/.local/share/neural-linker/내앱/local/app.env
+```
+
+형식은 한 줄에 `KEY=VALUE` 하나이고 빈 줄과 `#` 주석을 건너뜁니다. 셸이 아니므로 따옴표를 벗기지도,
+변수를 치환하지도 않습니다 — 값은 `=` 뒤부터 줄 끝까지 그대로입니다. 줄 양끝 공백은 없앱니다
+(Windows 에서 만든 파일의 `\r` 이 토큰에 섞이면 인증이 조용히 어긋나기 때문입니다).
+
+**이미 있는 환경 변수는 덮어쓰지 않습니다.** 한 번만 다른 토큰으로 띄우고 싶을 때
+`NL_HTTP_TOKEN=... ./내앱 --env-file ...` 로 이길 수 있습니다.
+
 ### 최소 권한
 
 템플릿은 `NoNewPrivileges`·`ProtectSystem=strict`·`PrivateTmp` 등을 켜 둡니다. 한 가지만 기억하세요.
@@ -839,6 +854,56 @@ location /infer {
 
 프록시 뒤에서는 `Origin` 헤더가 붙은 요청이 403 으로 막힙니다. 브라우저에서 직접 부르는 구성이라면
 프록시가 `Origin` 을 떼거나, 브라우저가 아닌 백엔드를 거쳐 부르세요.
+
+### Windows 에서 상시 실행
+
+systemd 자리를 **작업 스케줄러**가 대신합니다. 관리자 권한은 필요 없습니다.
+
+```powershell
+.\install-service.ps1 -App C:\apps\내앱.exe
+```
+
+로그온할 때마다 지금 사용자 권한(`/RL LIMITED`)으로 헤드리스 실행합니다. 만드는 것은 이렇습니다.
+
+| 자리 | 경로 |
+| --- | --- |
+| 작업 | `NeuralLinker\<이름>` (작업 스케줄러) |
+| 작업 폴더 | `%LOCALAPPDATA%\neural-linker\<이름>` |
+| 사용자 파일 | 그 아래 `local\` — 인증서 등, 번들을 갱신해도 남습니다 |
+| 환경 파일 | `local\app.env` — 여기에 `NL_HTTP_TOKEN=...` 을 적습니다 |
+| 로그 | 작업 폴더의 `app.log` |
+
+```powershell
+schtasks /Run   /TN NeuralLinker\내앱                 # 지금 띄우기
+schtasks /Query /TN NeuralLinker\내앱 /V /FO LIST     # 상태
+.\install-service.ps1 -Name 내앱 -Uninstall           # 지우기 (작업 폴더·환경 파일은 남김)
+```
+
+실패하면 1분 뒤 다시 띄우고 3번까지 시도합니다. 배터리로 돌 때도 멈추지 않고, 실행 시간 제한도 없습니다.
+
+#### 토큰을 명령줄에 넣지 않는 이유
+
+작업 스케줄러에는 **환경 변수를 넣어 주는 기능이 없습니다.** 그래서 `cmd /c "set TOKEN=... && app.exe"`
+로 감싸는 방법이 흔히 쓰이는데, 그러면 토큰이 작업 목록(`schtasks /Query /XML`)과 명령줄에 그대로
+드러납니다. 같은 기계의 다른 사용자가 읽을 수 있습니다.
+
+대신 앱의 `--env-file` 을 씁니다. 작업에 적히는 것은 **파일 경로**뿐이고, 토큰은 그 파일 안에 있습니다.
+스크립트가 파일의 ACL 에서 상속을 끊고 지금 사용자만 남깁니다 — Windows 에는 유닉스 권한 비트가
+없어 `chmod 600` 에 해당하는 일을 ACL 로 합니다.
+
+> ACL 조이기에 실패하면 스크립트가 경고만 내고 넘어갑니다. 여러 사람이 쓰는 기계라면
+> `local\app.env` 의 권한을 직접 확인하세요.
+
+#### 확인하지 못한 것
+
+이 스크립트는 **Windows 에서 실행해 보지 못했습니다.** 개발 기계가 리눅스이고 wine 으로는 작업
+스케줄러를 흉내 낼 수 없습니다. 확인한 것은 여기까지입니다.
+
+- PowerShell 7.6 파서로 구문 검사 통과, 매개변수·도움말이 제대로 읽힘
+- 작업에 넣는 명령 문자열의 따옴표가 맞고 토큰이 섞여 있지 않음
+- `--env-file` 자체는 리눅스에서 끝까지 확인 (CRLF 파일의 토큰으로 401 → 200)
+
+처음 쓸 때는 `schtasks /Run` 으로 바로 띄워 `app.log` 를 보세요.
 
 ### 업데이트는 서버형에서 어떻게 되나
 
