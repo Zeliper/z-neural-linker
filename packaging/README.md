@@ -296,5 +296,23 @@ CI 에는 `MINISIGN_KEY` 시크릿으로만 넣는다. 릴리스 절차 전체�
 - 설치 프로그램은 파일 경로로만 실행할 수 있어, 해시를 다시 확인한 시점과 실행 시점 사이에 아주 짧은
   틈이 남는다. 내려받기 폴더가 사용자 전용(0700)이라 이 틈을 노리려면 이미 그 계정을 쥐고 있어야 한다.
 
-릴리스 절차: 워크스페이스 `version` 올리기 → 양쪽 빌드 → 매니페스트 생성(+ 서명) → 자산과 `latest.json`
-(+ `latest.json.minisig`) 을 배포 서버에 올리기.
+## 릴리스
+
+전체 절차와 롤백은 [`docs/RELEASE.md`](../docs/RELEASE.md) 에 있다. 요약하면 워크스페이스 `version` 올리기 →
+태그 `v*` 밀기 → CI 가 빌드·포장·서명·검증 → 자산과 `latest.json`(+ `.minisig`)을 배포 서버에 올리기다.
+
+단계의 실제 내용은 **`packaging/lib.sh`** 한 곳에 있고 CI 와 로컬 스크립트가 같은 함수를 부른다
+(`nl_pack_linux`·`nl_make_app_manifest`·`nl_sign`·`nl_verify` 등). 그래서 로컬에서 본 결과와 CI 결과가 어긋나지 않는다.
+
+태그를 밀기 전에 그대로 돌려 볼 수 있다.
+
+```sh
+packaging/release-local.sh --crates nl-runtime,nl-cli --out /tmp/dist-local
+```
+
+`--key` 를 주지 않으면 임시 키로 서명하고 검증까지 해 본다(형식 확인용, 배포용 아님). `--targets linux,windows`,
+`--skip-build`, `--installer`(Inno Setup 이 있을 때 setup.exe 까지) 를 받는다. `--installer` 는 러너에 Inno Setup 이
+없어 **CI 에는 없는 단계**다.
+
+산출물 이름은 크레이트 이름이 아니라 실제 실행 파일 이름을 따른다 — `nl-cli` 는 `nl` 을 만든다.
+스크립트는 `cargo metadata` 에 물어보므로 크레이트를 늘려도 고칠 것이 없다.

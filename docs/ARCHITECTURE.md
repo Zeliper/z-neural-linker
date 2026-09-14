@@ -32,19 +32,23 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 `nl-core` 는 GUI/네트워크/ML 프레임워크 의존성이 없는 순수 로직 크레이트다. 빌더와 런타임이 같은 모델·같은 op 적용 코드를
 공유하므로 "빌더에서 보이는 것 = 배포판에서 도는 것"이 보장된다.
 
+의존 방향은 한쪽이다. `nl-core → nl-engine → nl-io → nl-gui` 순으로 쌓이고, `nl-bundle → nl-update` 는 있지만
+그 반대는 없다 — `nl-update` 는 배포 앱에도 들어가므로 번들 포맷을 알 필요가 없고, 그래야 순환이 생기지 않는다.
+`nl-app`·`nl-runtime`·`nl-cli` 는 잎이라 서로를 모른다.
+
 ## 크레이트
 
 | 크레이트 | 역할 | 의존 |
 |---|---|---|
 | `nl-core` | 프로젝트 문서 모델, 레이어 그래프, 형상 추론, 페이로드/데이터셋/파이프라인/GUI 레이아웃 스펙, op·undo·diff, 번들 포맷 | serde 만 |
 | `nl-engine` | burn 기반 **런타임 정의 그래프** 인터프리터, 장치 선택(CPU ndarray / GPU wgpu), 학습 루프(스레드 + 이벤트 채널), 체크포인트(safetensors), 추론 세션 | nl-core, burn |
-| `nl-io` | 화면 캡처(Linux: x11rb·wlr-screencopy, Windows: xcap), 입력 시뮬레이션(enigo), HTTP 호출(ureq), 자원 조회(sysinfo), **파이프라인 실행기 `Runner`** | nl-core, nl-engine |
-| `nl-gui` | 빌더 미리보기와 런타임이 공유하는 egui 요소: `GuiLayout` 렌더러, 한글 폰트, 테마 | nl-core, nl-engine, egui |
+| `nl-io` | 화면 캡처(Linux: libwayshot·xdg-desktop-portal·x11rb, 그 밖: xcap), 입력 시뮬레이션(enigo), HTTP 호출·**자체 인바운드 HTTP 서버(`httpd`)**, WebSocket(tungstenite+rustls), 화면 녹화기(`Recorder`), 자원 조회(sysinfo), **파이프라인 실행기 `Runner`** | nl-core, nl-engine |
+| `nl-gui` | 빌더 미리보기와 런타임이 **같은 픽셀을 그리도록** 공유하는 egui 요소: `GuiLayout` 렌더러(`render_layout`), 위젯 상태(`GuiState`)·이벤트(`GuiEvent`), 편집/실행 두 모드(`RenderMode`), 한글 폰트·테마 | nl-core, nl-engine, egui |
 | `nl-bundle` | `.nlapp` zip 읽기/쓰기, 런타임 바이너리 첨부, 배포 아카이브(tar.gz/zip), Windows 설치 프로그램(Inno Setup) 생성, 아이콘 변환(PNG→ICO), 업데이트 매니페스트 생성, 외부 도구 설치·크로스 빌드 계획 | nl-core, nl-update, zip, image |
-| `nl-update` | 자동 업데이트 코어: 매니페스트 확인, minisign 서명 검증, 스트리밍 다운로드 + sha256, 적용(실행 파일 교체 / 설치 프로그램 실행) — **GUI 무의존** | serde, semver, ureq, minisign-verify |
+| `nl-update` | 자동 업데이트 코어: 매니페스트 확인(https 강제·서명 필수·신선도·동일 오리진), 스트리밍 다운로드 + sha256, 적용 직전 재검증 후 교체 — **GUI 무의존**. 서명 키 도구는 예제 대상 `nl-keygen` | serde, semver, ureq, minisign-verify |
 | `nl-app` | 빌더 GUI | 위 전부 + eframe |
 | `nl-runtime` | 배포판 실행기(단일 바이너리 + 번들) | nl-core, nl-engine, nl-io, nl-gui, nl-bundle, nl-update, eframe |
-| `nl-cli` | `nl` 명령줄 도구 — inspect·devices·train·infer·run·record·build·sample. 스크립트·CI 용이라 종료 코드가 계약이다 | 위 전부 (GUI 제외) |
+| `nl-cli` | `nl` 명령줄 도구 — inspect·devices·train·infer·run·record·build·sample. 스크립트·CI 용이라 종료 코드가 계약이다. **실행 파일 이름은 `nl`** (크레이트 이름과 다르다) | 위 전부 (GUI 제외) |
 | `tools/uitest` | 헤드리스 sway GUI 테스트 하네스 + 시나리오 러너·골든 이미지 비교 (trust-pms 이식) | — |
 
 ## nl-core
@@ -108,10 +112,31 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 - `Binding::{PipelineInput(PNodeId), PipelineOutput(PNodeId), ModelOutputField{model, field}, Action(ActionId)}`.
 - 렌더러 `nl_gui::render_layout(ui, layout, state, RenderMode::{Run, Design})` 하나를 빌더 디자이너와 런타임이 공유한다.
 
-### 번들 (`bundle.rs`)
+### 번들과 빌드 스펙 (`bundle.rs`)
 - `.nlapp` = zip: `manifest.json`(이름·버전·대상 모델·진입 파이프라인·GUI), `project.json`, `weights/<model>.safetensors`, `assets/`.
 - 배포 바이너리 = 런타임 실행 파일 + 번들 바이트 + 꼬리표 `NLAPP1` + u64 길이. 런타임은 자기 실행 파일 끝을 읽어 번들을 꺼낸다
   → **사용자 PC 에 Rust 툴체인이 필요 없다.** 런타임 바이너리는 빌더 옆 `runtimes/<target>/` 에 두거나 매니페스트로 내려받는다.
+  꼬리표의 길이는 신뢰할 수 없는 입력이라 `find_attached` 가 `usize::try_from` 으로 받아 들어가지 않으면 거절한다.
+- `BuildSpec` 은 빌드 설정이다: `app_name`·`app_version`·`targets`·`entry_pipeline`·`autostart`·`default_device`·`models`·
+  `output_dir`·`icon`, 그리고 배포 정책 넷 — `update_base_url`·`update_url`·`update_public_key`·`auto_update`·`arm_input`.
+- `BundleManifest` 는 그중 **배포판이 실행 중에 보는 것**만 담는다: `format`·`app_name`·`app_version`·`built_with`·
+  `entry_pipeline`·`models`·`default_device`·`autostart` + `update_url`·`update_public_key`·`auto_update`·`arm_input`.
+  뒤의 넷이 배포 앱의 신뢰 경계를 정한다(아래 "보안 모델").
+  - `arm_input` — **기본 꺼짐.** 꺼져 있으면 `Sink::MouseKeyboard` 는 로그만 남긴다. 받은 사람이 모르는 사이 커서가 움직이지
+    않도록 빌더에서 명시적으로 켜야 한다.
+  - `update_public_key` — minisign 공개키. **없으면 배포 앱이 자동 업데이트 기능 자체를 켜지 않는다.**
+
+### 샘플 (`sample.rs`)
+빌더의 "샘플 열기" 와 `nl sample` 이 **같은 프로젝트**를 만들도록 한 곳에 모았다. 노드 id 는 고정이라 두 경로의 산출물이
+바이트까지 같다. `xor_project()`(MLP 분류), `quadrants_cnn_project()`(CNN 분류), `new_project()`(빈 뼈대),
+그리고 추론 API 파이프라인을 만드는 `api_pipeline(base, bind, model, payload)` — HttpServer 소스 → 모델 → HttpReply.
+목록은 `SAMPLES`.
+
+### HTTP 서버 노드의 접근 규칙 (`pipeline.rs`)
+파이프라인이 여는 인바운드 서버는 문서 모델 단계에서 이미 규칙을 갖는다.
+- `new_token()` — URL-safe 32자(192비트) 토큰. `Source::HttpServer` 를 만들 때 기본으로 붙는다.
+- `is_loopback_bind(bind)` — 바인드 주소가 루프백인지. **토큰 없이 서버를 열어도 되는지**를 이것이 가른다.
+  루프백이 아니면서 토큰이 없는 파이프라인은 검증에서 걸린다.
 
 ## nl-engine
 
@@ -120,6 +145,9 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   `enumerate()` 가 wgpu 어댑터 목록(이름·백엔드·VRAM)과 CPU 정보를 돌려준다. `probe(pref)` 가 그 장치에서 작은 matmul+backward 를
   실제로 돌려(별도 스레드·catch_unwind·20초 타임아웃) 동작 여부를 캐시하고, **Auto = probe 를 통과하는 첫 이산 GPU → 통합 GPU → CPU**
   (예: 오픈소스 NVK 드라이버의 RTX 2060 은 컴퓨트가 죽어 건너뛰고 Intel iGPU 를 고른다). 명시적 선택은 검사 없이 존중.
+- **UI 스레드에서 부를 수 있는 것과 없는 것이 나뉜다.** `resolve(Auto)` 의 첫 호출은 GPU 셰이더 컴파일로 수십 초가 걸리고
+  `probe` 는 스레드를 띄운다 — 둘 다 UI 스레드 금지다. 매 프레임 도는 상태바는 `resolve_cached`/`probe_cached` 를 쓴다.
+  이들은 **이미 정해진 결과만** 돌려주고 아직 없으면 `None` 이라, 장치 열거도 스레드 생성도 하지 않는다.
 - 백엔드 타입: `type Cpu = Autodiff<NdArray<f32>>`, `type Gpu = Autodiff<Wgpu<f32, i32>>`. 제네릭 코드는 `B: AutodiffBackend` 로
   한 번만 쓰고 `dispatch!(device, |B| …)` 매크로가 둘 중 하나로 단형화한다.
 
@@ -135,24 +163,111 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 - `Trainer::spawn(model, dataset, config, device) -> (JoinHandle, Receiver<TrainEvent>, Control)`.
   `TrainEvent::{Started{device}, Step{epoch, step, loss}, Epoch{epoch, train_loss, val_loss, val_metric}, Checkpoint(path),
   Finished, Failed(String)}`, `Control::{pause, resume, stop}`.
-- 데이터 로더는 `DatasetSpec` → `Batch { inputs: Vec<DynTensor>, targets }`; CSV/이미지 폴더/합성 3종을 먼저 지원.
+- 데이터 로더는 `DatasetSpec` → `Batch { inputs: Vec<DynTensor>, targets }`; 합성·CSV·이미지 폴더·녹화(`Recorded`) 를 지원한다.
 - 체크포인트 = safetensors(파라미터 이름 `"{node_id}.{name}"`) + `run.json`(설정·지표). `RunRecord` 가 프로젝트에 남는다.
+- **상주 배치.** 데이터셋이 작으면 에포크마다 호스트에서 배치를 만들지 않고 통째로 장치에 올려 둔다(`DeviceSet`).
+  에포크 셔플은 `select_rows` 한 번, 배치 잘라내기는 `narrow_dim` + **`detach`** 다. detach 를 빠뜨리면 역전파가 데이터셋
+  전체 버퍼를 다뤄 두 배 가까이 느려진다(실측 252s → 129s). 상한은 `RESIDENT_LIMIT_BYTES`(256 MiB, 셔플 사본 때문에 실제
+  점유는 두 배)이고, CPU 는 샘플이 `RESIDENT_MIN_SAMPLE_BYTES` 보다 작으면 호스트 경로가 빠르다. `NL_NO_RESIDENT=1` 로 끌 수 있다.
+- **학습률 스케줄**은 core 의 `LrSchedule::{None, Step{every,gamma}, Cosine{min_lr}, Plateau{patience,factor}}` 이고,
+  엔진의 `LrController` 가 스케줄·워밍업·정체 감쇠를 한 곳에서 계산한다. 조기 종료도 여기에 붙는다.
+- **다입출력**은 전용 타입 없이 규칙 두 개로 돈다. Input 이 하나면 데이터셋 샘플 형상이 정확히 일치해야 하고, 여럿이면
+  샘플의 평탄한 원소 수가 각 Input 원소 수의 **합**과 같아야 한다(`check_dataset_inputs`). 배치는 `Graph::input_nodes()`
+  순서대로 잘라 각 형상으로 reshape 하고(`split_inputs`), 손실은 첫 Output 으로만 계산한다.
 
 ### 추론 (`infer.rs`)
-- `Session::load(model, weights, device)`; `run(&[DynTensor]) -> Vec<DynTensor>`. `codec.rs` 가 페이로드 Transform 을 적용해
+- `Session::load(model, weights, device)`; `run(&[HostTensor]) -> Vec<HostTensor>`. `codec.rs` 가 페이로드 Transform 을 적용해
   이미지/CSV/JSON ↔ 텐서를 오간다.
+- `Transform::Tokenize { vocab, max_len }`(core 의 `payload.rs`)는 문자 단위 토크나이저다 — `Text` 필드를 Embedding 입력으로
+  바꾼다. `vocab` 의 문자 하나가 인덱스 하나이고 **인덱스는 1부터**, 0 은 패딩 겸 미지 문자다(그래서 Embedding 의 `vocab` 은
+  글자 수 + 1 이상이어야 한다). 결과는 길이 `max_len` 정수 텐서이고 **인코드 전용**이다.
 
 ## nl-io
-- `screen::capture(region) -> Frame`. Linux 는 시스템 개발 라이브러리 없이 빌드되도록 순수 Rust 경로만 쓴다: X11(x11rb `GetImage`) →
-  wlroots(wlr-screencopy, `libwayshot` 기본 feature 끔). GNOME/KDE Wayland 는 M1 에서 xdg-desktop-portal(ashpd). Windows/macOS 는 xcap.
-  (xcap 의 Linux 백엔드는 libpipewire/EGL 개발 패키지를 요구해 제외했다.)
-- `input::{move_to, click, key, type_text}` (enigo). Wayland 에서는 `libei`/`xdo` 폴백. **안전장치**: 시뮬레이션은 사용자가
-  파이프라인 실행을 켠 동안만, 그리고 `Esc` 를 길게 누르면 즉시 중단(킬 스위치).
-- `http::{call(method, url, headers, body) -> Response}` (ureq, 타임아웃 필수 — trust-pms 교훈).
-- stdin/stdout/파일/HTTP 소스·싱크는 별도 모듈 없이 `runner.rs` 안에 구현되어 있다. WebSocket 은 M1.
+
+### 화면 캡처 (`screen.rs`)
+`Backend::{Wayland, Portal, X11, XCap}` 넷이 있고 Linux 는 **wlroots → 포털 → X11** 순으로 시도한다.
+시스템 개발 라이브러리 없이 빌드되도록 순수 Rust 경로만 쓴다.
+
+| 백엔드 | 쓰는 곳 | 구현 | 비고 |
+| --- | --- | --- | --- |
+| `Wayland` | sway·Hyprland 등 wlroots | `libwayshot`(기본 feature 끔) | `zwlr_screencopy_v1` |
+| `Portal` | GNOME·KDE Wayland | zbus + `org.freedesktop.portal.Screenshot` | **초당 1~3장**, 첫 호출에 권한 대화상자, `PORTAL_TIMEOUT` 30초 |
+| `X11` | 순수 X11 세션 | x11rb root 창 `GetImage` | |
+| `XCap` | Windows·macOS | xcap | xcap 의 Linux 백엔드는 pipewire/EGL 개발 패키지를 요구해 쓰지 않는다 |
+
+`Capturer` 는 연결을 유지하는 쪽이고 일회성은 자유 함수 `capture(region)` 이다. 고 fps 가 필요한 ScreenCast(pipewire)
+경로는 아직 없다 — 붙인다면 기본 꺼진 feature 여야 한다.
+
+### 녹화 (`record.rs`)
+`Recorder::start(dir, region, fps)` 가 화면을 캡처해 **학습용 데이터셋 폴더**로 바로 저장한다
+(`nl_core::DataSource::Recorded` 가 그대로 읽는 형식).
+
+```
+<dir>/frames/000001.png …   캡처 프레임
+<dir>/labels.jsonl          {"frame":"000001.png","label":3,"t_ms":1234}
+<dir>/meta.json             영역·fps·시작 시각·백엔드
+```
+
+캡처 스레드와 저장 스레드가 나뉘고 그 사이 큐는 `WRITE_QUEUE`(32)다 — 차면 프레임을 버린다. 파일 번호는 **저장된 순서**로
+매겨 드롭이 있어도 번호가 끊기지 않는다. `RecorderHandle` 로 `set_label`·`frames_written`·`frames_dropped`·`stop` 을 본다.
+
+### 입력 시뮬레이션 (`input.rs`)
+`input::{move_to, click, key, type_text}`(enigo). **안전장치**는 두 겹이다. 빌더에서는 사용자가 파이프라인 실행을 켠 동안만
+동작하고 `Esc` 킬 스위치가 있다. 배포 앱에는 킬 스위치가 없으므로 `BundleManifest.arm_input` 이 꺼져 있으면 `Sink::MouseKeyboard`
+가 **로그만 남기고 아무것도 하지 않는다**(기본 꺼짐).
+
+### 자체 HTTP 서버 (`httpd.rs`)
+인바운드 HTTP 는 **표준 라이브러리만 쓴 자체 HTTP/1.1 서버**다. tiny_http 를 쓰다가 바꿨다 — 연결 수·헤더 상한과 소켓
+타임아웃을 걸 방법이 없어 slowloris 와 헤더 폭탄에 그대로 노출됐기 때문이다. keep-alive 는 없다(응답마다
+`Connection: close`, 연결 하나에 요청 하나). HTTP/1.0 요청도 받되 응답은 언제나 `HTTP/1.1`.
+
+| 상한 | 값 | 넘으면 |
+| --- | --- | --- |
+| `HEADER_TIMEOUT` | 5초 | 요청줄+헤더 마감 (slowloris 차단) |
+| `BODY_TIMEOUT` | 30초 | 본문 읽기 |
+| `WRITE_TIMEOUT` | 10초 | 응답 쓰기 |
+| `MAX_HEADER_BYTES` | 16 KiB | 431 |
+| `MAX_HEADERS` | 64개 | 431 |
+| `HTTP_MAX_CONNECTIONS` | 64 | 503 (`runner.rs` 가 건다) |
+| `MAX_HTTP_REQUEST_BYTES` | 8 MiB | 413 (`runner.rs` 가 건다) |
+
+### 접근 제어 (`AccessPolicy`)
+서버 노드에 들어온 요청은 **세 가지를 순서대로** 통과해야 한다.
+
+1. `Origin` 헤더가 **있으면 403**. 브라우저에서 온 요청을 통째로 막는다(CORS preflight 도 함께 막힌다).
+2. `Host` 가 바인드 주소도 루프백 이름도 아니면 **400**. DNS rebinding 을 막는다.
+3. `Authorization: Bearer <토큰>` 또는 `X-NL-Token` 이 맞아야 한다. 아니면 **401**. 비교는 상수 시간이다.
+
+토큰이 없는 서버는 **루프백에서만** 열 수 있다(`nl_core::is_loopback_bind`). 토큰은 `NL_HTTP_TOKEN`,
+포트별로는 `NL_HTTP_TOKEN_<포트>` 로 덮어쓴다(포트별이 우선).
+
+### 파이프라인 실행기 (`runner.rs`)
+`Runner` 는 틱 루프다. `RunnerHandle { events, inputs, stop }` — GUI 위젯 이벤트는 `RunnerInput` 으로 들어가고
+`Sink::GuiWidget` 값은 `RunnerEvent::Widget` 으로 나온다. `set_armed` 로 실행 중에 입력 무장을 토글하고,
+`ValuePreview` 썸네일과 `Stats`(틱 속도·틱당 시간)를 이벤트로 흘린다.
+
+**준비 순서가 중요하다.** 소스(HTTP 서버·WebSocket·stdin)를 **모델보다 먼저** 연다. 모델을 올리는 동안 들어온 요청은
+큐에 쌓지 않고 곧바로 `503` + `MODEL_LOADING` 으로 돌려보낸다. 포트는 즉시 열리되 준비되기 전에는 정직하게 거절하는 것이다.
+인증·Origin·Host 검사가 이 준비 검사보다 **앞**이라, 준비가 안 됐다는 사실조차 아무에게나 알리지 않는다.
+
+**파일 경로는 프로젝트 폴더 안으로 묶인다.** `resolve_inside(base_dir, path)` 가 절대 경로·`..`·드라이브 접두사·심볼릭
+링크(중간이든 끝이든)를 거절한다. `Sink::File` 같은 파일 노드뿐 아니라 **모델 가중치 경로**도 `Session::load` 전에 이것을
+거친다 — 신뢰할 수 없는 `.nlapp` 이 남의 파일을 읽거나 덮어쓰지 못하게.
+
+**큐는 전부 상한이 있다.** 무제한 큐는 상대가 보내는 속도만큼 메모리를 먹는다.
+
+| 상한 | 값 | 넘으면 |
+| --- | --- | --- |
+| `HTTP_QUEUE_LIMIT` | 16 | 503 |
+| `STREAM_QUEUE_LIMIT` | 256 | WebSocket·stdin 은 오래된 것부터 버린다 |
+| `IMAGE_BACKLOG_LIMIT` | 4 | 이미지 프레임 드롭 |
+| `HTTP_REPLY_TIMEOUT` | 10초 | 504 |
+
+### 그 밖
+- `http::call(method, url, headers, body) -> Response`(ureq, 타임아웃 필수 — trust-pms 교훈).
+- WebSocket 소스·싱크는 URL 별 연결 풀·팬아웃·지수 백오프 재접속이고 `wss`(rustls)를 쓴다.
+  비루프백 평문 `ws://` 는 경고를 낸다.
 - `resources::snapshot()` — CPU/메모리(sysinfo) + GPU 목록(`nl_engine::enumerate()` 가 진실). 앱 상태바·자원 패널.
-- `runner::Runner` — 파이프라인 틱 루프. `RunnerHandle { events, inputs, stop }`. GUI 위젯 이벤트는 `RunnerInput` 으로 들어가고
-  `Sink::GuiWidget` 값은 `RunnerEvent::Widget` 으로 나온다.
 
 ## nl-app
 
@@ -175,8 +290,15 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   선택적 GPU 런타임. `ToolManager::check()` 가 상태를 보고하고, 없는 것은 **동의 모달**("무엇을 어디서 받아 어디에 놓는지"
   명시) → 승인 시 백그라운드 다운로드(sha256 검증) → 진행률 → 재검사. 거부하면 그 도구가 필요 없는 산출물(zip/tar)로 대체.
 - 계획과 실행은 나뉘어 있다: `nl_bundle::tools::{install_inno_setup_plan, cross_build_plan}` 이 `ToolPlan` 을 만들고
-  (`name`·`url`·`size_hint`·`disk_hint`·`dest`·`steps`·`commands`), `run_tool_plan`/`run_cross_build` 가 실행한다.
-  덕분에 "무엇을 받아 어디에 놓고 얼마나 걸리는지" 를 먼저 보여 주고 승인을 받을 수 있다.
+  (`name`·`url`·`sha256`·`verified`·`size_hint`·`disk_hint`·`dest`·`steps`·`commands`), `run_tool_plan`/`run_cross_build`
+  가 실행한다. 덕분에 "무엇을 받아 어디에 놓고 얼마나 걸리는지" 를 먼저 보여 주고 승인을 받을 수 있다.
+- **검증할 수 없는 것은 실행하지 않는다.** `ToolPlan::verified` 는 알려진 sha256 이 있는지를 요약한 값이고,
+  `false` 면 `run_tool_plan` 이 내려받기까지만 하고 **실행 단계를 거부한다**. 받은 파일은 남겨 사용자가 발행처에서 해시를
+  확인한 뒤 직접 실행할 수 있게 한다. 승인 모달은 `verification_note()` 를 그대로 보여 주면 된다.
+- 내려받기는 https 만 받고(리다이렉트로도 http 로 내려가지 않는다) 도구 폴더는 `~/.cache/neural-linker/tools`(0700)다.
+  이 폴더는 `lld-link` 대체 스크립트가 놓이는 자리이자 크로스 빌드 내내 `PATH` 맨 앞에 오는 자리라, 공용 `/tmp` 로
+  떨어지지 않게 `ProjectDirs → $XDG_RUNTIME_DIR → $HOME/.cache` 순으로만 물러선다.
+- 외부 도구는 이름이 아니라 **풀어낸 절대 경로**로 띄우고 그 경로를 로그에 남긴다(`resolve_program`).
 
 #### Windows 런타임 크로스 빌드 (Linux 에서, 실측됨)
 관리자 권한 없이 Linux 에서 `nl-runtime.exe` 를 만들 수 있다. 빌더의 "Windows 런타임 없음 → 동의 후 준비" 는
@@ -194,32 +316,119 @@ cargo xwin build --release -p nl-runtime --target x86_64-pc-windows-msvc
   (Fedora `lld`). 관리자 권한이 없으면 `tools::ensure_lld_link` 가 rustup 이 들고 있는 `rust-lld` 를
   `-flavor link` 로 부르는 얇은 스크립트를 만들어 대신 쓴다 — 같은 LLVM 에서 나온 같은 링커다.
   주의: rustc 가 링커 이름을 보고 스스로 `-flavor link` 를 붙여 보낼 때가 있어 스크립트는 중복을 걸러야 한다.
-- burn/cubecl(wgpu dx12·vulkan), eframe/accesskit_windows, xcap, enigo, tiny_http, ring 모두 그대로 컴파일된다.
+- burn/cubecl(wgpu dx12·vulkan), eframe/accesskit_windows, xcap, enigo, ring 모두 그대로 컴파일된다.
   `nl-io/build.rs` 는 `CARGO_CFG_TARGET_OS != linux` 면 아무것도 하지 않아 Windows 빌드에 끼어들지 않는다.
 - 실측: 산출물 53.7 MB(PE32+ x86-64, GUI 서브시스템), 처음 빌드 15분 남짓, 디스크 약 3 GB
   (SDK 캐시 1.2 GB + 대상 target 1.9 GB).
 - 만든 실행 파일을 `runtimes/x86_64-pc-windows-msvc/nl-runtime.exe` 에 두면 `nl_bundle::find_runtime` 이 찾는다.
 
 ### 빌드 (`build.rs`)
-- `BuildSpec { app_name, version, targets, entry_pipeline, gui, models, output_dir }` → `nl_bundle::Bundle::to_zip` → 대상별 런타임에 `nl_bundle::attach` →
-  Linux: `<name>-<ver>-linux-x86_64.tar.gz`(+ install.sh, .desktop, 아이콘), Windows: `<name>-<ver>-windows-x86_64.zip`
-  (+ Inno Setup 이 있으면 `setup.exe`). 산출물 sha256 매니페스트(`latest.json`, trust-pms 형식) 함께 생성.
+- `BuildSpec`(→ nl-core 절) → `nl_bundle::Bundle::to_zip` → 대상별 런타임에 `nl_bundle::attach` →
+  Linux: `<slug>-<ver>-linux-x86_64.tar.gz`(+ install.sh, .desktop, 아이콘), Windows: `<slug>-<ver>-windows-x86_64.zip`
+  (+ Inno Setup 이 있으면 `setup.exe`). 배포용 `latest.json`(`nl_bundle::write_manifest`)도 함께 만든다.
+- 버전은 **semver 만** 받고(`check_version`), 산출물 경로는 마지막에 `out_dir` 안인지 정규화해 확인한다 —
+  `Path::join` 은 구분자를 하위 경로로 받아들이므로 검사하지 않으면 산출물이 폴더 밖에 떨어진다.
+- 파일 이름은 `slugify` 를 거쳐 `[a-z0-9-]` 만 남는다. 사람이 읽는 이름은 템플릿마다 문맥에 맞게 이스케이프한다(아래 "보안 모델").
 
 ## nl-runtime
-- `nl-runtime` 단독 실행 시 인자로 `.nlapp` 를 받거나, 자기 실행 파일 꼬리표에서 번들을 읽는다.
-- 창 제목/크기 = `GuiLayout.window`, 위젯 = `gui_render`, 파이프라인 = `Runner`. 장치는 번들 기본값 + 설정 창에서 변경.
-- `--headless` 로 GUI 없이 파이프라인만(서버형 배포).
+- 단독 실행 시 인자로 `.nlapp` 를 받거나, 자기 실행 파일 꼬리표에서 번들을 읽는다. 인자로 받은 파일은 통째로 메모리에
+  올리므로 먼저 크기를 본다(`MAX_BUNDLE_FILE_BYTES`, 2 GB).
+- 창 제목/크기 = `GuiLayout.window`, 위젯 = `nl_gui::render_layout`, 파이프라인 = `Runner`. 장치는 번들 기본값 + 설정 창에서 변경.
+- `--headless` 로 GUI 없이 파이프라인만(서버형 배포). `--run-for <초>` 로 자동 종료, `--no-update` 로 업데이트 확인 끔.
+- **작업 폴더.** 번들 가중치는 `tempfile` 이 만든 무작위 이름 0700 폴더에 풀고 종료할 때 지운다. 예측 가능한 경로를 쓰면
+  공용 `/tmp` 에서 다른 로컬 사용자가 먼저 만들어 두는 것만으로 가중치가 남의 폴더에 풀린다.
+- **업데이트 UI.** 새 버전이 있으면 상단 바에 `⬆ 새 버전 x.y.z` 배지가 뜨고 누르면 릴리스 노트·진행률·"지금 적용" 창이
+  열린다. **번들에 서명 공개키가 없으면 이 UI 자체가 만들어지지 않는다** — 확인도 배지도 없다.
+  `auto_update` 가 켜져 있어도 자동으로 하는 일은 "파이프라인이 멈춰 있을 때 미리 내려받기" 까지고, 적용은 언제나 사용자 확인을 거친다.
+- **입력 무장 표시.** `arm_input` 이 켜진 번들은 상단 바에 `⚠ 입력 무장` 배지가 붙고, 파이프라인을 처음 시작할 때 로그에
+  한 번 안내한다. 꺼져 있으면 배지가 없고 입력은 로그로만 남는다.
+- **Windows 콘솔.** 릴리스 빌드는 GUI 서브시스템이라 검은 창이 같이 뜨지 않는다. 대신 `--version`·`--help`·`--headless`
+  처럼 터미널에서 부른 것이 분명한 경우에만 부모 콘솔에 붙어(`AttachConsole`) 출력을 보여 준다.
+
+## 보안 모델
+
+`.nlapp` 번들 · 프로젝트 파일 · safetensors · CSV/이미지 · 업데이트 매니페스트 · 인바운드 HTTP 요청을 전부
+**신뢰할 수 없는 외부 입력**으로 본다. 2026-09-14 보안 리뷰의 항목별 처리 현황은
+[`docs/reviews/security-2026-09-14.md`](reviews/security-2026-09-14.md) 맨 위 표에 있다.
+
+### 자동 업데이트 — fail-closed
+
+신뢰의 사슬은 **번들에 박힌 공개키 → 매니페스트 서명 → 매니페스트의 sha256 → 자산** 하나다. 끊기면 진행하지 않는다.
+
+| 규칙 | 어기면 |
+| --- | --- |
+| 공개키가 있어야 한다 | `Updater` 가 `State::Disabled` 로 남고 확인조차 하지 않는다. 런타임은 UI 를 숨긴다 |
+| 주소는 https | `Disabled`. 에이전트에 `https_only` 를 걸어 리다이렉트로도 http 로 내려가지 않는다 |
+| 매니페스트에 유효한 서명 | 서명을 통과하기 전에는 **내용을 읽지도 않는다** |
+| `published_at` 이 30일 안 | 거절. 정품 서명이 붙은 옛 매니페스트를 다시 들려주는 재생 공격을 막는다 |
+| 자산은 매니페스트와 같은 오리진 | 거절. 예외는 매니페스트 안에 서명된 `allowed_asset_hosts` 뿐 |
+| 자산마다 sha256 | 받은 뒤 검증하고, **적용 직전에 다시 계산해 맞춘다** |
+
+내려받기는 사용자 캐시(0700)에 하고 `.part` 는 `O_EXCL`·`O_NOFOLLOW`·0600 으로 연다. 교체는 같은 폴더의 무작위 이름
+임시 파일에 부어 `rename` 한다. 자산 종류(`Installer`/`Binary`)와 해시는 **서명된 매니페스트에서만** 온다 — 파일 이름의
+확장자로 짐작하지 않는다. 짐작하면 공격자가 정한 URL 의 `.exe` 를 설치 프로그램으로 실행하게 된다.
+
+**한계.** Windows 설치본의 Authenticode 서명은 검증하지 않는다. 실행 전에 확인하는 것은 서명된 매니페스트가 말한
+sha256 뿐이다. 사슬은 닫혀 있지만 배포 서버와 서명 키를 동시에 쥔 공격자는 막지 못한다.
+
+### 번들 읽기 — zip bomb
+
+`Bundle::from_zip` 은 세 가지 상한을 함께 본다: 엔트리 개수 `MAX_ZIP_ENTRIES`(10,000), 엔트리 하나
+`MAX_ENTRY_BYTES`(512 MB), 번들 전체 누적 `MAX_BUNDLE_BYTES`(2 GB). 중앙 디렉터리의 `uncompressed_size` 는
+**공격자가 적는 숫자**라 그대로 선할당하지 않고 8 MiB 로 자르며, 실제로 읽은 길이가 그 숫자와 다르면 거절한다.
+정규화하면 같은 파일이 되는 항목이 두 번 나오면(`weights/a` 와 `weights/./a`) 거절한다 — 무엇이 풀릴지 알 수 없어진다.
+
+### 빌드 템플릿 — 문맥별 이스케이프
+
+앱 이름과 버전은 프로젝트 파일에서 오는 신뢰할 수 없는 값인데 네 가지 출력 포맷에 들어간다. 포맷마다 문법이 다르므로
+이스케이프도 다르다(`Syntax`).
+
+| 출력 | 처리 |
+| --- | --- |
+| `install.sh` | POSIX 단일 인용. 값은 `APP_NAME='…'` 변수 대입으로만 들어가고 본문은 `"$APP_NAME"` 으로 참조한다 |
+| `.desktop` | 명세대로 개행·탭·역슬래시를 두 글자 표기로. 개행으로 새 키나 새 그룹을 만들 수 없다 |
+| `.iss` | 큰따옴표를 **지운다**. Inno Setup 은 `[Icons] Name:` 에서 이중화(`""`)조차 거절한다(6.7.3 실측) |
+| README | 제어문자만 걸러 낸다 |
+
+`.iss` 는 **표시용과 경로용 토큰이 나뉘어 있다.** `DefaultDirName`·`DefaultGroupName`·`[Icons]` 의 바로가기 이름은
+전부 경로라 `windows_dir_name` 을 거친다. 나누지 않으면 이름에 `/` 나 `:` 가 있을 때 컴파일은 통과하고 **설치할 때**
+`The folder name is not valid.` 로 터진다(실측). `AppId` 는 앱 이름 + 발행자의 UUID v5 라, 이름만 베낀 앱이 남의
+설치를 업그레이드로 덮어쓰지 못한다.
+
+### 외부 도구
+
+Inno Setup 설치본은 **버전이 박힌 주소와 고정 sha256** 으로만 받는다(6.7.3). 예전에 쓰던 `download.php/is.exe` 는
+설치본이 아니라 안내 페이지로 302 하는 주소였고 버전이 계속 바뀌어 해시를 박을 수도 없었다.
+해시가 없는 계획은 내려받기만 하고 실행하지 않는다(위 "도구 설치").
 
 ## 테스트
-- `cargo test --workspace`: core 단위 테스트(형상 추론·op/undo/diff 왕복·직렬화), engine(작은 MLP 가 XOR/선형 회귀를 CPU 에서
-  수렴, GPU 는 `NL_TEST_GPU=1` 일 때), app 의 `egui_kittest` 헤드리스 렌더 테스트(모든 뷰가 패닉 없이 그려짐).
-- `tools/uitest/uitest.sh`: 헤드리스 sway 안에서 실제 클릭·드래그·캡처(trust-pms 와 동일, app_id `neural-linker`).
+
+| 갈래 | 무엇 | 어떻게 |
+| --- | --- | --- |
+| 단위·통합 | core(형상 추론·op/undo/diff 왕복·직렬화), engine(작은 MLP 가 XOR/선형 회귀 수렴), io(서버·경로 제한·큐 상한), bundle/update(신뢰 모델) | `cargo test --workspace` |
+| GPU | wgpu 경로 | `NL_TEST_GPU=1` 일 때만 |
+| 인프로세스 렌더 | `egui_kittest` 스냅샷 — nl-gui 위젯과 nl-runtime 상단 바가 픽셀까지 같은지 | `cargo test`, 갱신은 `UPDATE_SNAPSHOTS=1` |
+| 종단 | `nl sample → train → build → 배포판 HTTP /infer` 한 줄로 | `NL_E2E=1 cargo test -p nl-cli --test e2e` |
+| 실제 GUI | 헤드리스 sway 안에서 진짜 클릭·드래그·캡처, PPM 골든 비교 | `tools/uitest/uitest.sh`, 시나리오는 `scenarios/*.uit` |
+
+**건너뛰기를 실패로 바꾸는 스위치가 둘 있다.** cargo 는 통과한 테스트의 출력을 삼키므로, 환경이 없어 조용히 건너뛴
+테스트는 통과와 구분되지 않는다.
+
+- `NL_SNAPSHOT_REQUIRED=1` — 렌더 백엔드(wgpu 어댑터)가 없어 건너뛰는 것을 실패로. CI 가 켠다.
+  반면 **글꼴이 없어 건너뛰는 것은 실패로 바꾸지 않는다** — 배포판마다 Noto CJK 판본이 달라 강제할 수 없고,
+  다른 글꼴로 찍으면 영문 모를 불일치가 난다.
+- `NL_E2E=1` — 무겁고(학습·링크·20 MB 아카이브) 런타임 바이너리를 먼저 빌드해야 해서 기본으로는 돌지 않는다.
 
 ## CI · 릴리스
 
 워크플로는 `.github/workflows/` 와 `.forgejo/workflows/` 에 **같은 내용으로 두 벌** 있다.
 Forgejo Actions 가 GitHub 문법을 그대로 읽으므로 파일이 같고, 고칠 때 둘을 함께 고쳐야 한다.
 Forgejo 인스턴스는 `app.ini` 에 `[actions] DEFAULT_ACTIONS_URL = github` 이 있어야 액션을 받아 온다.
+
+릴리스 단계의 실제 내용은 **`packaging/lib.sh`** 에 있다. 워크플로와 로컬 스크립트가 같은 함수를 부르므로 결과가
+어긋나지 않는다 — `nl_release_version`·`nl_pack_linux`·`nl_pack_windows`·`nl_make_app_manifest`·
+`nl_make_runtimes_manifest`·`nl_sign`·`nl_verify`·`nl_artifact_table`·`nl_bin_names`.
+(실행 파일 이름은 크레이트 이름과 다를 수 있어 `cargo metadata` 에 물어본다 — `nl-cli` 는 `nl` 을 만든다.)
 
 ### `ci.yml` — push·PR
 1. 시스템 의존: `libxkbcommon0`(enigo 런타임), `mesa-vulkan-drivers`(lavapipe — 스냅샷 테스트가 쓰는
@@ -251,7 +460,24 @@ Forgejo 인스턴스는 `app.ini` 에 `[actions] DEFAULT_ACTIONS_URL = github` �
 
 두 매니페스트 모두 `nl_update::Manifest` 형식이다. 차이는 자산 종류다 — 런타임 매니페스트는 언제나
 `binary` 다(빌더가 받아서 `runtimes/<triple>/` 에 놓기만 하고 실행하지 않는다).
-`MINISIGN_KEY` 시크릿이 있으면 두 매니페스트에 `.minisig` 를 붙인다(비밀번호 없는 키여야 한다).
+`MINISIGN_KEY` 시크릿이 있으면 두 매니페스트에 `.minisig` 를 붙이고, `UPDATE_PUBLIC_KEY` 변수가 있으면 올리기 전에
+**같은 코드로 검증까지 한다**. 서명·검증은 `minisign` CLI 가 아니라 `nl-update` 의 예제 도구
+`nl-keygen`(`keygen`/`sign`/`verify`)이 한다 — 러너에 설치할 것이 없고, 검증이 배포 앱이 쓰는
+`nl_update::verify_manifest` 를 그대로 부르므로 여기서 통과하면 사용자 앱에서도 통과한다.
+비밀키는 비밀번호가 없어야 하고(CI 는 대화형 입력을 받을 수 없다) 그래서 키 파일 자체가 곧 비밀이다 —
+`.gitignore` 가 `packaging/keys/*.key` 를 막는다.
+
+### 로컬 드라이런
+
+태그를 밀기 전에 CI 가 무엇을 내놓을지 그대로 볼 수 있다.
+
+```sh
+packaging/release-local.sh --crates nl-runtime,nl-cli --out /tmp/dist-local
+```
+
+`--key` 를 주지 않으면 임시 키로 서명하고 검증까지 해 본다(형식 확인용). `--targets` 로 플랫폼을,
+`--skip-build` 로 이미 빌드된 산출물 재포장을, `--installer` 로 (Inno Setup 이 있을 때) setup.exe 까지 만든다.
+`--installer` 는 러너에 Inno Setup 이 없어 **CI 에는 없는 단계**다. 전체 절차는 [`docs/RELEASE.md`](RELEASE.md).
 
 `latest.json` 에 **Windows 자산은 아직 넣지 않는다.** 자기 자신을 바꿔치울 수 없는 Windows 는
 `kind: installer` 가 맞는데, Inno Setup 이 러너에 없어 설치 프로그램을 만들지 못한다. 그때까지 Windows
