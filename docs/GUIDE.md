@@ -777,19 +777,24 @@ loginctl enable-linger $USER
 ### 토큰은 환경 파일로
 
 HTTP 서버 노드의 토큰을 유닛 파일에 적지 마세요. 유닛은 0644 로 읽히고 `systemctl cat` 에 그대로 나옵니다.
+명령줄에도 적지 마세요 — `ps` 와 `systemctl show` 에 드러납니다.
+
+`install.sh --service` 가 작업 폴더 안에 빈 환경 파일을 0600 으로 만들어 둡니다. 토큰은 거기에 적습니다.
 
 ```sh
-install -m 600 /dev/null ~/.config/neural-linker/app.env
-echo 'NL_HTTP_TOKEN=여기에_토큰' >> ~/.config/neural-linker/app.env
+$EDITOR ~/.local/share/neural-linker/내앱/local/app.env   # NL_HTTP_TOKEN= 뒤에 적는다
 systemctl --user restart neural-linker-app
 ```
 
-유닛이 `EnvironmentFile=-%h/.config/neural-linker/app.env` 로 읽습니다. 앞의 `-` 는 파일이 없어도
-넘어가라는 뜻입니다. 포트마다 다른 토큰을 쓰려면 `NL_HTTP_TOKEN_8799` 처럼 포트를 붙이세요 —
-포트별 값이 먼저입니다.
+유닛이 아니라 **앱이** 이 파일을 읽습니다 — ExecStart 의 `--env-file` 이 그것입니다. systemd 의
+`EnvironmentFile=` 을 써도 되지만 그러지 않았습니다. Windows 작업 스케줄러에는 환경 변수를 넣어 주는
+기능이 없어 거기서는 `--env-file` 이 유일한 길이고, 두 플랫폼이 **같은 파일·같은 규칙**을 쓰는 편이
+설명이 갈리지 않습니다. 파일 자리도 작업 폴더 안(`local/`)이라 앱 하나에 환경 파일 하나로 맞아떨어지고,
+번들을 갈아 끼워도 남습니다.
 
-앱이 직접 읽게 할 수도 있습니다. `--env-file` 은 systemd 가 없는 곳(Windows 작업 스케줄러)에서
-쓰려고 만들었지만 리눅스에서도 똑같이 됩니다.
+포트마다 다른 토큰을 쓰려면 `NL_HTTP_TOKEN_8799` 처럼 포트를 붙이세요 — 포트별 값이 먼저입니다.
+
+서비스로 등록하지 않고 직접 띄울 때도 같습니다.
 
 ```sh
 ./내앱 --headless --work-dir ~/.local/share/neural-linker/내앱 \
@@ -802,6 +807,11 @@ systemctl --user restart neural-linker-app
 
 **이미 있는 환경 변수는 덮어쓰지 않습니다.** 한 번만 다른 토큰으로 띄우고 싶을 때
 `NL_HTTP_TOKEN=... ./내앱 --env-file ...` 로 이길 수 있습니다.
+
+값이 비어 있으면(`NL_HTTP_TOKEN=`) 토큰을 안 쓴 것과 같습니다 — 서버가 **루프백 전용**으로 열립니다.
+로그의 `HTTP 서버 ... 열림` 줄 뒤에 `(토큰 필요)` 인지 `(루프백 전용)` 인지가 적히니 확인하세요.
+
+`./install.sh --uninstall` 은 환경 파일을 지우지 않습니다. 정말 지울 때는 직접 지우세요.
 
 ### 최소 권한
 

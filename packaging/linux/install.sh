@@ -44,9 +44,11 @@ if [[ "$MODE" == uninstall ]]; then
   update-mime-database "$MIME_DIR" >/dev/null 2>&1 || true
   update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
   echo "제거했습니다."
-  if [[ -f "$ENV_DIR/app.env" ]]; then
-    echo "환경 파일은 남겨 두었습니다(비밀이 들어 있습니다): $ENV_DIR/app.env"
-  fi
+  # 환경 파일은 작업 폴더 안에 있고 비밀이 들어 있으므로 지우지 않는다.
+  for env_path in "$HOME"/.local/share/neural-linker/*/local/app.env "$ENV_DIR/app.env"; do
+    [[ -f "$env_path" ]] && echo "환경 파일은 남겨 두었습니다(비밀이 들어 있습니다): $env_path"
+  done
+  true
   exit 0
 fi
 
@@ -95,18 +97,30 @@ if [[ "$MODE" == service ]]; then
   # 사용자가 인증서 같은 것을 두는 자리. 번들을 갱신해도 앱이 건드리지 않는다.
   mkdir -p "$WORK_DIR/local"
 
-  # 유닛의 자리표시자를 실제 경로로 바꾼다. %h 는 systemd 가 풀어 주므로 그대로 둔다.
-  sed "s|^ExecStart=.*|ExecStart=$APP_ABS --headless --device cpu --work-dir $WORK_DIR|" \
+  # 환경 파일은 작업 폴더 안에 둔다 — Windows 쪽 스크립트와 같은 자리, 같은 규칙이다.
+  APP_ENV="$WORK_DIR/local/app.env"
+
+  # 유닛의 ExecStart 를 실제 경로로 바꾼다. 템플릿의 ExecStart 는 여러 줄이라
+  # 첫 줄을 완성된 한 줄로 갈아 끼우고 이어지는 줄(`    --…`)은 지운다.
+  # %h 는 systemd 가 풀어 주지만 여기서는 절대 경로를 직접 박는다.
+  sed -e "s|^ExecStart=.*|ExecStart=$APP_ABS --headless --device cpu --work-dir $WORK_DIR --env-file $APP_ENV|" \
+      -e '/^ *--\(work-dir\|env-file\) /d' \
       "$HERE/neural-linker-app.service" > "$UNIT_DIR/$UNIT_NAME"
   chmod 644 "$UNIT_DIR/$UNIT_NAME"
 
-  # 환경 파일은 비밀이 들어가는 곳이다. 없을 때만 0600 으로 만들어 두고 덮어쓰지 않는다.
-  if [[ ! -f "$ENV_DIR/app.env" ]]; then
+  # 비밀이 들어가는 곳이다. 없을 때만 만들고 덮어쓰지 않는다 — 덮어쓰면 토큰을 잃는다.
+  if [[ ! -f "$APP_ENV" ]]; then
     umask 077
-    printf '# 배포 앱 환경 변수. 이 파일은 0600 이어야 한다.\n# NL_HTTP_TOKEN=여기에_토큰\n' > "$ENV_DIR/app.env"
+    {
+      echo '# 배포 앱 환경 변수. 한 줄에 KEY=VALUE 하나. 빈 줄과 # 주석은 건너뜁니다.'
+      echo '# 값은 = 뒤부터 줄 끝까지 그대로입니다 (따옴표를 벗기지 않습니다).'
+      echo '# 채운 뒤: systemctl --user restart neural-linker-app'
+      echo ''
+      echo 'NL_HTTP_TOKEN='
+    } > "$APP_ENV"
     umask 022
   fi
-  chmod 600 "$ENV_DIR/app.env"
+  chmod 600 "$APP_ENV"
 
   systemctl --user daemon-reload
   systemctl --user enable --now "$UNIT_NAME"
@@ -114,7 +128,7 @@ if [[ "$MODE" == service ]]; then
   echo "서비스를 등록했습니다: $UNIT_DIR/$UNIT_NAME"
   echo "  상태  systemctl --user status ${UNIT_NAME%.service}"
   echo "  로그  journalctl --user -u ${UNIT_NAME%.service} -f"
-  echo "  토큰  $ENV_DIR/app.env 에 NL_HTTP_TOKEN=... 을 적고 systemctl --user restart ${UNIT_NAME%.service}"
+  echo "  토큰  $APP_ENV 의 NL_HTTP_TOKEN= 뒤에 적고 systemctl --user restart ${UNIT_NAME%.service}"
   echo "  작업  $WORK_DIR (번들이 풀리는 곳)"
   echo "  파일  $WORK_DIR/local (인증서 등 — 번들을 갱신해도 남습니다. 예: cert_pem \"local/server.crt\")"
   echo "로그아웃 뒤에도 돌게 하려면: loginctl enable-linger $USER"
