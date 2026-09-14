@@ -643,6 +643,37 @@ pub fn diff_ops(from: &Project, to: &Project) -> Vec<Op> {
 
 #[cfg(test)]
 mod tests {
+    /// 편집을 거쳐도 모르는 필드는 남는다 (보안 리뷰 L3).
+    ///
+    /// `diff_ops` 와 op 들은 `extra` 를 건드리지 않는다. 앱이 해석하지 못하는 값이라 바꿀 이유가 없고,
+    /// 그래서 이름만 고친 뒤 저장해도 새 버전의 설정이 그대로 돌아간다.
+    #[test]
+    fn editing_a_model_keeps_its_unknown_fields() {
+        let mut p = Project::new("p");
+        let mut m = ModelDef::new("옛 이름");
+        m.extra.insert("미래_모델".into(), serde_json::json!({"k": 1}));
+        let id = m.id;
+        p.models.insert(id, m);
+
+        apply_ops(
+            &mut p,
+            &[Op::UpsertModelMeta {
+                id,
+                name: "새 이름".into(),
+                description: String::new(),
+                payload: None,
+                weights: None,
+            }],
+        );
+        let after = &p.models[&id];
+        assert_eq!(after.name, "새 이름");
+        assert_eq!(
+            after.extra["미래_모델"],
+            serde_json::json!({"k": 1}),
+            "모르는 필드가 사라졌다"
+        );
+    }
+
     use super::*;
     use crate::model::{LayerKind, Port};
 

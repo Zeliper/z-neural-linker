@@ -519,7 +519,7 @@ impl NlApp {
                 Ok(l) => {
                     if l.newer {
                         startup_error = Some(format!(
-                            "이 파일은 앱보다 새 형식입니다 — 모르는 항목은 저장 시 사라집니다: {}",
+                            "이 파일은 앱보다 새 형식입니다 — 모르는 항목은 보존되지만 여기서 편집할 수는 없습니다: {}",
                             path.display()
                         ));
                     }
@@ -839,12 +839,9 @@ impl NlApp {
                 self.discard_recovery(now);
                 self.file_autosave_held = false;
                 if self.doc_newer_format {
-                    // 한 번 저장하고 나면 그 파일은 더 이상 새 형식이 아니다 — 다시 알릴 것도 없다.
+                    // 한 번 알렸으면 됐다. 값 자체는 `ProjectFile` 의 `extra` 가 그대로 돌려준다.
                     self.doc_newer_format = false;
-                    self.toast(
-                        "새 형식이던 항목은 이번 저장에서 빠졌습니다 — 원본이 필요하면 .bak 을 보세요",
-                        now,
-                    );
+                    self.toast("새 형식 항목은 그대로 보존해 저장했습니다", now);
                 }
                 self.recent.push(&path);
                 self.toast(
@@ -880,7 +877,10 @@ impl NlApp {
         match project::load(path) {
             Ok(l) => {
                 if l.newer {
-                    self.toast("이 파일은 앱보다 새 형식입니다 — 모르는 항목은 저장 시 사라집니다", now);
+                    self.toast(
+                        "이 파일은 앱보다 새 형식입니다 — 모르는 항목은 보존되지만 여기서 편집할 수는 없습니다",
+                        now,
+                    );
                 }
                 // 저장할 때 한 번 더 알리려고 기억해 둔다 (보안 리뷰 L3). 토스트는 몇 초 뒤 사라지고,
                 // 그사이 편집하다 Ctrl+S 를 누르면 모르는 항목이 조용히 빠진다.

@@ -54,6 +54,7 @@ fn chain(model: &mut ModelDef, base: u128, layers: &[(LayerKind, &str)]) {
                 name: (*name).to_string(),
                 kind: kind.clone(),
                 pos: [80.0 + i as f32 * 260.0, 160.0],
+                ..Node::new(kind.clone(), [0.0, 0.0])
             },
         );
         if let Some(from) = prev {

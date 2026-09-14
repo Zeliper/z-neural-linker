@@ -479,7 +479,10 @@ mod tests {
             key_pem: format!("{name}.key"),
         };
         assert!(has_tls_warning(&build("0.0.0.0:8799", None)), "평문 노출을 안 짚었다");
-        assert!(!has_tls_warning(&build("0.0.0.0:8799", Some(pem("a")))), "TLS 가 있는데 경고했다");
+        assert!(
+            !has_tls_warning(&build("0.0.0.0:8799", Some(pem("a")))),
+            "TLS 가 있는데 경고했다"
+        );
         // 루프백은 전선을 타지 않으므로 평문이어도 짚지 않는다.
         assert!(!has_tls_warning(&build("127.0.0.1:8799", None)), "루프백을 짚었다");
         assert!(!has_tls_warning(&build("localhost:8799", None)), "localhost 를 짚었다");

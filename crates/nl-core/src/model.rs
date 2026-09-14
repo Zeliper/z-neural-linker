@@ -40,6 +40,12 @@ pub struct Project {
     pub runs: BTreeMap<RunId, RunRecord>,
     #[serde(default)]
     pub settings: ProjectSettings,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,6 +85,7 @@ impl Project {
             gui: GuiLayout::default(),
             runs: BTreeMap::new(),
             settings: ProjectSettings::default(),
+            extra: BTreeMap::new(),
         }
     }
 
@@ -109,6 +116,12 @@ pub struct ModelDef {
     /// 마지막으로 학습된 가중치 파일 (프로젝트 폴더 기준 상대 경로).
     #[serde(default)]
     pub weights: Option<String>,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl ModelDef {
@@ -121,6 +134,7 @@ impl ModelDef {
             train: TrainConfig::default(),
             payload: None,
             weights: None,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -143,6 +157,12 @@ pub struct Node {
     /// 캔버스 월드 좌표 (줌 1.0 기준 px).
     #[serde(default)]
     pub pos: [f32; 2],
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Node {
@@ -152,6 +172,7 @@ impl Node {
             name: String::new(),
             kind,
             pos,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -699,6 +720,12 @@ impl LayerKind {
 pub struct ProjectFile {
     pub format_version: u32,
     pub project: Project,
+    /// 이 버전이 모르는 필드. 새 버전이 만든 문서를 열고 저장해도 그대로 돌려준다 (보안 리뷰 L3).
+    ///
+    /// `flatten` 이라 JSON 에서는 이 구조체의 필드와 같은 자리에 평평하게 놓인다. 비어 있으면
+    /// 직렬화에도 나타나지 않으므로 기존 파일의 모양은 바뀌지 않는다.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl ProjectFile {
@@ -706,6 +733,7 @@ impl ProjectFile {
         Self {
             format_version: FORMAT_VERSION,
             project,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -713,8 +741,11 @@ impl ProjectFile {
         serde_json::to_string_pretty(self).expect("ProjectFile 직렬화")
     }
 
-    /// 옛 버전 문서의 마이그레이션은 여기서 한다. 버전이 더 높은 문서도 `serde(default)` 덕에 읽히지만
-    /// 모르는 필드는 버려지므로 호출자가 경고를 띄우는 것이 좋다(`newer_than_app`).
+    /// 옛 버전 문서의 마이그레이션은 여기서 한다.
+    ///
+    /// 버전이 더 높은 문서도 읽힌다. 이 버전이 모르는 필드는 각 구조체의 `extra` 에 담겨 저장할 때
+    /// 그대로 되돌아간다 — 새 버전이 만든 문서를 열었다 저장해도 그쪽 설정이 사라지지 않는다.
+    /// 다만 **이 앱이 그 값을 해석하지는 않으므로** 호출자는 `newer_than_app` 으로 알려 주는 것이 좋다.
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         let f: ProjectFile = serde_json::from_str(s)?;
         Ok(f)
@@ -728,6 +759,50 @@ impl ProjectFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 이 버전이 모르는 필드는 열고 저장해도 살아남는다 (보안 리뷰 L3).
+    ///
+    /// 새 버전이 만든 문서를 옛 빌더로 한 번 열었다 저장하면 그쪽 설정이 통째로 날아가던 문제다.
+    #[test]
+    fn unknown_fields_survive_a_load_and_save() {
+        let mut base: serde_json::Value = serde_json::from_str(&ProjectFile::new(Project::new("p")).to_json()).unwrap();
+        // 미래 버전이 최상위·프로젝트·모델·노드에 각각 무언가를 더한 문서를 흉내 낸다.
+        base["미래_최상위"] = serde_json::json!({"a": 1});
+        base["project"]["미래_프로젝트"] = serde_json::json!("값");
+        let mut m = ModelDef::new("m");
+        let node = Node::new(LayerKind::Output, [0.0, 0.0]);
+        let (mid, nid) = (m.id, node.id);
+        m.graph.nodes.insert(nid, node);
+        base["project"]["models"] = serde_json::json!({ mid.to_string(): serde_json::to_value(&m).unwrap() });
+        base["project"]["models"][mid.to_string()]["미래_모델"] = serde_json::json!(true);
+        base["project"]["models"][mid.to_string()]["graph"]["nodes"][nid.to_string()]["미래_노드"] =
+            serde_json::json!([1, 2]);
+
+        let text = serde_json::to_string(&base).unwrap();
+        let loaded = ProjectFile::from_json(&text).expect("읽기");
+        // 아는 필드는 평소대로 읽힌다.
+        assert_eq!(loaded.project.name, "p");
+        assert!(loaded.project.models.contains_key(&mid));
+
+        let back: serde_json::Value = serde_json::from_str(&loaded.to_json()).unwrap();
+        assert_eq!(back["미래_최상위"], serde_json::json!({"a": 1}));
+        assert_eq!(back["project"]["미래_프로젝트"], "값");
+        assert_eq!(back["project"]["models"][mid.to_string()]["미래_모델"], true);
+        assert_eq!(
+            back["project"]["models"][mid.to_string()]["graph"]["nodes"][nid.to_string()]["미래_노드"],
+            serde_json::json!([1, 2])
+        );
+    }
+
+    /// 모르는 필드가 없으면 파일 모양이 예전과 같다 — `extra` 가 빈 객체로 새어 나오면 안 된다.
+    #[test]
+    fn a_plain_document_gains_no_extra_keys() {
+        let text = ProjectFile::new(Project::new("p")).to_json();
+        assert!(!text.contains("extra"), "{text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let top: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(top, vec!["format_version", "project"], "{top:?}");
+    }
 
     fn lin(g: &mut Graph, out: usize) -> NodeId {
         g.add_node(Node::new(
