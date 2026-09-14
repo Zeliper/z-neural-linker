@@ -31,17 +31,21 @@
 
 - [`docs/reviews/security-2026-09-14.md`](reviews/security-2026-09-14.md) — 맨 위 "처리 현황" 표가 항목별 상태·담당 크레이트·근거·남은 한계
 - [`docs/reviews/engine-2026-09-14.md`](reviews/engine-2026-09-14.md) — 같은 자리에 현황표(아직 전부 열려 있다)
+- [`docs/RELEASE.md`](RELEASE.md) — 릴리스 체크리스트와 롤백 절차. 키·공개키·배포 서버가 여기에 묶여 있다
 
-높음 11건 중 9건, 전체 58건 중 37건을 고쳤다. 남은 것은 nl-engine(M15~M19·L21)과
-nl-app(H5·H9·M21·M22·L1~L3·L22) 담당이고, 낮음 6건은 영향이 낮아 미룬 것이다.
+높음 11건 중 9건, 전체 58건 중 37건을 고쳤고 3건은 부분 처리다. 남은 것은 nl-engine(M15~M19·L21)과
+nl-app(H5·H9·M21·M22·L1~L3·L22) 담당이다. 미처리 4건(L5·L14·L23·L25)은 내 크레이트 밖이거나
+상위 크레이트가 고정한 것이다.
 
 신뢰 모델이 한 줄로 바뀌었다. **서명 공개키가 없으면 자동 업데이트 기능 자체가 켜지지 않는다.**
 예전처럼 "키가 없으면 검증을 건너뛰고 경고만" 하지 않는다.
 
 릴리스 전에 끝내야 하는 일:
 
-- [ ] **서명 키 발급** — minisign 키 쌍을 만들고 비밀키를 보관할 곳을 정한다.
-      절차는 `packaging/README.md` 의 "서명" 절에 있다
+- [x] **키 생성·서명 도구** — `cargo run -p nl-update --example nl-keygen -- keygen|sign|verify`.
+      `minisign` CLI 를 깔지 않아도 되고 CI 러너에도 설치 단계가 없다
+- [ ] **서명 키 발급** — 위 도구로 키 쌍을 만들고 `MINISIGN_KEY` 시크릿·`UPDATE_PUBLIC_KEY` 변수를 등록한다.
+      절차는 [`docs/RELEASE.md`](RELEASE.md) 의 "첫 릴리스 전에 반드시 끝낼 것" 에 있다
 - [ ] **공개키를 코드에 박기** — 빌더는 `crates/nl-app/src/update_key.rs` 의 `PUBLIC_KEY`(지금 `None` → 업데이트 꺼짐),
       배포 앱은 빌더 UI 가 번들 매니페스트의 `update_public_key` 에 채워 넣는다
 - [ ] **실제 배포 서버** — https 로만 서빙하고 `latest.json` 옆에 `latest.json.minisig` 를 같이 올린다.

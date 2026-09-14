@@ -207,11 +207,22 @@ fail-closed) 따옴표가 든 **정상** 이름도 빌드가 깨졌다. 그래�
 
 매니페스트가 바꿔치기되면 앱이 엉뚱한 파일을 내려받는다. detached 서명으로 막는다.
 
+`minisign` CLI 는 필요 없다. `nl-update` 의 예제 도구가 같은 형식을 만든다 — CI 러너에도 설치 단계가 없다.
+
+```sh
+# 키 쌍 한 번 만들기 → packaging/keys/neural-linker.{key,pub}
+cargo run -p nl-update --example nl-keygen -- keygen
+
+# 서명 (MINISIGN_KEY 환경 변수로 키 내용을 넘겨도 된다 — CI 가 그렇게 쓴다)
+cargo run -p nl-update --example nl-keygen -- sign dist/latest.json --key packaging/keys/neural-linker.key
+
+# 검증 — 배포 앱이 쓰는 nl_update::verify_manifest 를 그대로 부른다
+cargo run -p nl-update --example nl-keygen -- verify dist/latest.json --pubkey packaging/keys/neural-linker.pub
 ```
-minisign -G -p minisign.pub -s minisign.key      # 키 쌍 한 번 만들기
-MINISIGN_KEY=~/.minisign/nl.key ./make-manifest.sh 0.2.0 <URL> <자산...>
-# 또는 직접:  minisign -Sm latest.json -s ~/.minisign/nl.key
-```
+
+비밀키는 **비밀번호가 없다**(`minisign -G -W` 와 같다). CI 는 대화형 입력을 받을 수 없기 때문이다.
+그래서 키 파일 자체가 곧 비밀이다 — `.gitignore` 가 `packaging/keys/*.key` 를 막고,
+CI 에는 `MINISIGN_KEY` 시크릿으로만 넣는다. 릴리스 절차 전체는 [`docs/RELEASE.md`](../docs/RELEASE.md) 에 있다.
 
 `latest.json` 옆에 `latest.json.minisig` 를 같이 올린다. 앱은 매니페스트를 검증한 **뒤에야** 읽는다.
 

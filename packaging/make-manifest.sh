@@ -32,14 +32,21 @@ printf '{\n  "version": "%s",\n  "notes": "%s",\n  "published_at": "%s",\n  "ass
 echo "latest.json 생성:"; cat latest.json
 
 # 선택: 매니페스트 서명. nl-update 의 verify_manifest 가 latest.json 옆의 latest.json.minisig 를 검증한다.
-#   minisign -Sm latest.json                        # 비밀키 암호를 대화형으로 묻는다
-#   minisign -Sm latest.json -s ~/.minisign/nl.key  # 키 파일 지정
-# 공개키(minisign.pub 의 둘째 줄)는 **필수다.** 없으면 배포 앱이 업데이트 기능 자체를 켜지 않는다
+#
+# 공개키는 **필수다.** 없으면 배포 앱이 업데이트 기능 자체를 켜지 않는다
 # (Updater 가 Disabled 상태로 남고 런타임은 업데이트 UI 를 감춘다).
 # 배포 서버가 뚫려도 바꿔치기된 매니페스트로 자산을 내려받지 않게 하는 것이 이 키의 목적이다.
-# MINISIGN_KEY 를 지정하면 여기서 바로 서명한다.
+#
+# MINISIGN_KEY 는 **키 파일 경로**나 **키 파일 내용** 둘 다 받는다 (CI 시크릿은 내용으로 온다).
+# minisign CLI 는 필요 없다 — nl-update 의 예제 도구가 같은 형식을 만든다.
+#   cargo run -p nl-update --example nl-keygen -- keygen     # 키 쌍 만들기
 if [[ -n "${MINISIGN_KEY:-}" ]]; then
-  command -v minisign >/dev/null || { echo "minisign 이 없습니다 — MINISIGN_KEY 를 지정했지만 서명할 수 없습니다"; exit 1; }
-  minisign -Sm latest.json -s "$MINISIGN_KEY"
-  echo "서명 생성: latest.json.minisig"
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if [[ -f "$MINISIGN_KEY" ]]; then
+    cargo run -q --manifest-path "$ROOT/Cargo.toml" -p nl-update --example nl-keygen -- \
+      sign latest.json --key "$MINISIGN_KEY"
+  else
+    # 내용이 그대로 들어온 경우. 도구가 MINISIGN_KEY 환경 변수를 직접 읽는다.
+    cargo run -q --manifest-path "$ROOT/Cargo.toml" -p nl-update --example nl-keygen -- sign latest.json
+  fi
 fi

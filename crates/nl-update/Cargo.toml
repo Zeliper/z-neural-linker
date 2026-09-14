@@ -23,3 +23,10 @@ libc.workspace = true
 [dev-dependencies]
 minisign.workspace = true
 tiny_http.workspace = true
+
+# 서명 키 도구. 예제 대상이라 `minisign` 이 배포 바이너리의 의존성 트리에 들어가지 않는다
+# (minisign 은 scrypt·rpassword 를 끌어온다 — 런타임에 필요 없는 것들이다).
+# `test = true` 라야 `cargo test -p nl-update` 가 이 파일의 시험까지 돌린다.
+[[example]]
+name = "nl-keygen"
+test = true
