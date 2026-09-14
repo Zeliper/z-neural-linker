@@ -233,16 +233,23 @@ impl<B: Backend> DynTensor<B> {
             DynTensor::R5(t) => t.mean(),
         }
     }
-    /// 모든 원소 제곱합 (그래디언트 노름 계산용).
-    pub fn sum_squares(&self) -> f64 {
-        let s = self.clone().square();
-        match s {
-            DynTensor::R1(t) => t.sum().into_scalar().elem::<f64>(),
-            DynTensor::R2(t) => t.sum().into_scalar().elem::<f64>(),
-            DynTensor::R3(t) => t.sum().into_scalar().elem::<f64>(),
-            DynTensor::R4(t) => t.sum().into_scalar().elem::<f64>(),
-            DynTensor::R5(t) => t.sum().into_scalar().elem::<f64>(),
+    /// 모든 원소 제곱합을 **장치 텐서로** 돌려준다.
+    ///
+    /// 값을 읽지 않으므로 장치 동기화가 없다. 파라미터마다 스칼라를 읽으면 GPU 에서는 그 동기화가
+    /// 스텝 비용을 지배한다 — 여러 개를 텐서로 더한 뒤 한 번만 읽는다.
+    pub fn sum_squares_tensor(&self) -> Tensor<B, 1> {
+        match self.clone().square() {
+            DynTensor::R1(t) => t.sum(),
+            DynTensor::R2(t) => t.sum(),
+            DynTensor::R3(t) => t.sum(),
+            DynTensor::R4(t) => t.sum(),
+            DynTensor::R5(t) => t.sum(),
         }
+    }
+
+    /// 모든 원소 제곱합 (호스트 값). **장치를 동기화한다** — 루프 안에서 반복하지 말 것.
+    pub fn sum_squares(&self) -> f64 {
+        self.sum_squares_tensor().into_scalar().elem::<f64>()
     }
 
     pub fn to_host(&self) -> HostTensor {
@@ -353,9 +360,7 @@ impl<B: Backend> Model<B> {
         let graph = def.graph.clone();
         let report = shape::infer(&graph);
         if !report.errors.is_empty() {
-            let (id, err) = report.errors.iter().next().expect("errors 비어 있지 않음");
-            let name = graph.nodes.get(id).map(|n| n.display_name()).unwrap_or_else(|| "?".into());
-            bail!("그래프에 오류가 있어 실행할 수 없습니다 — 레이어 '{name}': {err}");
+            bail!("{}", describe_graph_errors(&graph, &report));
         }
         let input_nodes = graph.input_nodes();
         let output_nodes = graph.output_nodes();
@@ -816,6 +821,50 @@ fn layer_norm<B: Backend>(
 }
 
 // ───────────────────────────── 작은 도우미 ─────────────────────────────
+
+/// 그래프 오류를 사람이 읽을 한 덩어리로 만든다.
+///
+/// 출력에서 **거꾸로 도달할 수 있는** 노드를 먼저 보여 준다. 캔버스에 떠 있는 연결되지 않은 노드는
+/// 실행을 막는 진짜 원인이 아닌데, id 순으로 아무거나 고르면 그런 노드가 지목되곤 했다.
+fn describe_graph_errors(graph: &Graph, report: &ShapeReport) -> String {
+    let contributing = contributing_nodes(graph);
+    let name_of = |id: &NodeId| graph.nodes.get(id).map(|n| n.display_name()).unwrap_or_else(|| "?".into());
+
+    let mut rows: Vec<(bool, NodeId, String)> = report
+        .errors
+        .iter()
+        .map(|(id, e)| (!contributing.contains(id), *id, format!("레이어 '{}': {e}", name_of(id))))
+        .collect();
+    // 출력에 기여하는 노드가 앞, 그다음 id 순 (결정적).
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    const SHOW: usize = 3;
+    let shown: Vec<&str> = rows.iter().take(SHOW).map(|r| r.2.as_str()).collect();
+    let mut msg = format!("그래프에 오류가 있어 실행할 수 없습니다 — {}", shown.join("; "));
+    if rows.len() > shown.len() {
+        msg.push_str(&format!(" (그 밖에 {} 개 더)", rows.len() - shown.len()));
+    }
+    let stray = rows.iter().filter(|r| r.0).count();
+    if stray > 0 && stray < rows.len() {
+        msg.push_str(&format!(" — 이 중 {stray} 개는 출력에 이어지지 않은 노드입니다"));
+    }
+    msg
+}
+
+/// Output 에서 엣지를 거꾸로 따라가 도달하는 노드 집합 (= 결과에 기여하는 노드).
+fn contributing_nodes(graph: &Graph) -> BTreeSet<NodeId> {
+    let mut seen = BTreeSet::new();
+    let mut stack: Vec<NodeId> = graph.output_nodes();
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n) {
+            continue;
+        }
+        for (_, from) in graph.inputs_of(n) {
+            stack.push(from);
+        }
+    }
+    seen
+}
 
 /// Embedding 인덱스가 `0..vocab` 안의 정수인지 확인한다.
 ///

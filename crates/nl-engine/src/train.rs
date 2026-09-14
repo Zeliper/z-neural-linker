@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub enum TrainEvent {
@@ -53,6 +54,78 @@ pub struct TrainRequest {
 
 const RUNNING: u8 = 0;
 const PAUSED: u8 = 1;
+
+/// 이벤트 채널 용량.
+///
+/// `Step` 은 스텝마다 나가므로 무한 채널이면 UI 가 늦게 비울 때 메모리가 계속 는다.
+/// 유계로 두고 **`Step` 만** 넘칠 때 버린다 (최신 것이 다음에 다시 온다).
+/// 나머지 이벤트(Started·Epoch·Checkpoint·Log·Finished·Failed)는 버리지 않는다.
+const EVENT_CAPACITY: usize = 1024;
+
+/// 소비자가 아예 읽지 않을 때 중요한 이벤트를 기다리는 한계.
+/// 이걸 넘기면 포기하고 로그를 남긴다 — 학습 스레드가 영영 멈춰 있는 편이 더 나쁘다.
+const CRITICAL_SEND_LIMIT: Duration = Duration::from_secs(30);
+
+/// `Step` 이벤트의 최소 간격. `NL_STEP_EVENT_MS` 로 바꿀 수 있다 (0 = 매 스텝).
+fn step_event_gap() -> Duration {
+    let ms = std::env::var("NL_STEP_EVENT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(50);
+    Duration::from_millis(ms)
+}
+
+/// 이벤트 송신을 한 곳에 모은다. `Step` 은 솎아 내고 버릴 수 있지만 나머지는 그렇지 않다.
+struct Emitter {
+    tx: Sender<TrainEvent>,
+    gap: Duration,
+    last_step: Option<Instant>,
+    dropped: usize,
+    throttled: usize,
+}
+
+impl Emitter {
+    fn new(tx: Sender<TrainEvent>) -> Self {
+        Self { tx, gap: step_event_gap(), last_step: None, dropped: 0, throttled: 0 }
+    }
+
+    /// 지금 `Step` 을 내보낼 때가 되었는가. 손실 readback 도 이 주기에 맞춘다.
+    fn step_due(&self) -> bool {
+        self.gap.is_zero() || self.last_step.is_none_or(|t| t.elapsed() >= self.gap)
+    }
+
+    fn step(&mut self, ev: TrainEvent) {
+        self.last_step = Some(Instant::now());
+        if self.tx.try_send(ev).is_err() {
+            self.dropped += 1;
+        }
+    }
+
+    fn skip_step(&mut self) {
+        self.throttled += 1;
+    }
+
+    /// 진단 메시지. 버리지 않는다.
+    fn log(&self, msg: String) {
+        self.critical(TrainEvent::Log(msg), None);
+    }
+
+    /// 버리지 않는다. 소비자가 멈춰 있으면 기다리되, 중지 요청이나 한계 시간에는 그만둔다.
+    fn critical(&self, ev: TrainEvent, ctl: Option<&TrainControl>) {
+        let started = Instant::now();
+        let mut pending = ev;
+        loop {
+            match self.tx.send_timeout(pending, Duration::from_millis(200)) {
+                Ok(()) => return,
+                Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => return,
+                Err(crossbeam_channel::SendTimeoutError::Timeout(back)) => {
+                    if started.elapsed() >= CRITICAL_SEND_LIMIT || ctl.is_some_and(|c| c.should_stop()) {
+                        log::error!("이벤트 수신자가 비우지 않아 이벤트를 보내지 못했습니다: {back:?}");
+                        return;
+                    }
+                    pending = back;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TrainHandle {
@@ -114,7 +187,7 @@ impl TrainControl {
 
 /// 학습을 시작한다. 즉시 돌아오며, 실패도 `TrainEvent::Failed` 로 온다(스레드 생성 실패만 Err).
 pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
-    let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, rx) = crossbeam_channel::bounded(EVENT_CAPACITY);
     let (handle, ctl) = TrainHandle::new(req.run_id, rx);
     std::thread::Builder::new().name("nl-train".into()).spawn(move || {
         let mut run = RunRecord {
@@ -134,8 +207,9 @@ pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
         };
         // 백엔드(특히 GPU 드라이버)가 패닉하면 채널이 조용히 끊긴다. 그러면 UI 가 영원히 기다리므로
         // 패닉을 잡아 `Failed` 이벤트로 바꾼다. 다른 스레드에서 나는 패닉까지 잡을 수는 없다.
+        let mut emit = Emitter::new(tx);
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_training(&req, &tx, &ctl, &mut run)
+            run_training(&req, &mut emit, &ctl, &mut run)
         })) {
             Ok(r) => r,
             Err(e) => Err(anyhow::anyhow!("학습 스레드가 패닉했습니다: {}", panic_message(e.as_ref()))),
@@ -148,16 +222,16 @@ pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
                 }
                 // run.json 은 최종 상태까지 담아 다시 쓴다 (실패해도 이벤트는 보낸다).
                 if let Err(e) = write_run_json(&req.run_dir, &run) {
-                    let _ = tx.send(TrainEvent::Log(format!("run.json 쓰기 실패: {e:#}")));
+                    emit.critical(TrainEvent::Log(format!("run.json 쓰기 실패: {e:#}")), Some(&ctl));
                 }
-                let _ = tx.send(TrainEvent::Finished { run });
+                emit.critical(TrainEvent::Finished { run }, Some(&ctl));
             }
             Err(e) => {
                 run.status = RunStatus::Failed;
                 let msg = format!("{e:#}");
                 run.error = Some(msg.clone());
                 let _ = write_run_json(&req.run_dir, &run);
-                let _ = tx.send(TrainEvent::Failed { run, error: msg });
+                emit.critical(TrainEvent::Failed { run, error: msg }, Some(&ctl));
             }
         }
         ctl.mark_done();
@@ -189,11 +263,11 @@ fn write_run_json(run_dir: &Path, run: &RunRecord) -> Result<()> {
     Ok(())
 }
 
-fn run_training(req: &TrainRequest, tx: &Sender<TrainEvent>, ctl: &TrainControl, run: &mut RunRecord) -> Result<()> {
+fn run_training(req: &TrainRequest, emit: &mut Emitter, ctl: &TrainControl, run: &mut RunRecord) -> Result<()> {
     let (info, handle) = device::resolve_entry(req.model.train.device);
     run.device_name = info.name.clone();
     let gpu = handle.is_gpu();
-    dispatch_autodiff!(handle, train_on, req, tx, ctl, run, &info.name, gpu)
+    dispatch_autodiff!(handle, train_on, req, emit, ctl, run, &info.name, gpu)
 }
 
 // ───────────────────────────── 학습 본체 ─────────────────────────────
@@ -221,7 +295,7 @@ const RESIDENT_MIN_SAMPLE_BYTES: usize = 256;
 fn train_on<B: AutodiffBackend>(
     device: &B::Device,
     req: &TrainRequest,
-    tx: &Sender<TrainEvent>,
+    emit: &mut Emitter,
     ctl: &TrainControl,
     run: &mut RunRecord,
     device_name: &str,
@@ -234,29 +308,29 @@ fn train_on<B: AutodiffBackend>(
     let outs = model.output_nodes().to_vec();
     if outs.len() > 1 {
         let first = model.graph().nodes[&outs[0]].display_name();
-        let _ = tx.send(TrainEvent::Log(format!(
+        emit.log(format!(
             "Output 레이어가 {} 개입니다 — 손실과 지표는 첫 번째 Output '{first}' 만 씁니다. 나머지는 추론에서만 쓰입니다.",
             outs.len()
-        )));
+        ));
     }
     if in_shapes.len() > 1 {
         let names: Vec<String> =
             model.input_nodes().iter().map(|id| model.graph().nodes[id].display_name()).collect();
         let counts: Vec<usize> = in_shapes.iter().map(|s| s.iter().product()).collect();
-        let _ = tx.send(TrainEvent::Log(format!(
+        emit.log(format!(
             "Input 레이어가 {} 개입니다 — 샘플을 {names:?} 순서로 {counts:?} 개씩 잘라 넣습니다.",
             in_shapes.len()
-        )));
+        ));
     }
 
     // 이어서 학습 — 가중치만 복원한다. 옵티마이저 모멘트·스텝 수는 새로 시작한다.
     if let Some(p) = &req.resume_from {
         let loaded = weights::load_for(p, Some(req.model.id))?;
         model.load_host_params(&loaded).with_context(|| format!("체크포인트 적용 실패: {}", p.display()))?;
-        let _ = tx.send(TrainEvent::Log(format!(
+        emit.log(format!(
             "체크포인트에서 이어서 학습: {} (가중치만 복원 — 옵티마이저 상태와 워밍업은 처음부터입니다)",
             p.display()
-        )));
+        ));
     }
     model.require_grad_all();
 
@@ -268,7 +342,7 @@ fn train_on<B: AutodiffBackend>(
     }
     check_dataset_inputs(&info.input_shape, &in_shapes)?;
     if let Some(w) = info.empty_class_warning() {
-        let _ = tx.send(TrainEvent::Log(w));
+        emit.log(w);
     }
     let out_width: usize = model.output_sample_shapes().first().map(|s| s.iter().product()).unwrap_or(0);
     check_target_range(&train_set, &info, cfg.loss, out_width, &model.graph().nodes[&outs[0]].display_name())?;
@@ -294,16 +368,19 @@ fn train_on<B: AutodiffBackend>(
     }
 
     // 데이터셋을 장치에 상주시킨다 — 매 스텝 호스트에서 올리는 비용을 없앤다.
-    let resident_train = resident(&train_set, device, tx, gpu, "학습");
-    let resident_val = resident(&val_set, device, tx, gpu, "검증");
+    let resident_train = resident(&train_set, device, emit, gpu, "학습");
+    let resident_val = resident(&val_set, device, emit, gpu, "검증");
 
     let batch_size = cfg.batch_size.max(1);
     let batches = train_set.len().div_ceil(batch_size);
-    let _ = tx.send(TrainEvent::Started {
-        device: device_name.to_string(),
-        batches_per_epoch: batches,
-        params: model.trainable_count(),
-    });
+    emit.critical(
+        TrainEvent::Started {
+            device: device_name.to_string(),
+            batches_per_epoch: batches,
+            params: model.trainable_count(),
+        },
+        Some(ctl),
+    );
 
     let mut opt = Opt::<B>::new(cfg.optimizer);
     let mut lrc = LrController::new(&cfg);
@@ -331,8 +408,11 @@ fn train_on<B: AutodiffBackend>(
 
         let epoch_lr = lrc.epoch_lr(epoch);
         let mut last_lr = epoch_lr;
-        let mut epoch_loss = 0.0f64;
+        // 손실 합은 장치에 쌓아 두고 에포크 끝에 한 번만 읽는다 — 스텝마다 읽으면 GPU 에서
+        // 그 동기화가 스텝 비용을 지배한다.
+        let mut epoch_loss_dev: Option<Tensor<B::InnerBackend, 1>> = None;
         let mut seen = 0usize;
+        let total_steps = order.len().div_ceil(batch_size);
 
         for (step, chunk) in order.chunks(batch_size).enumerate() {
             if ctl.wait_if_paused() || ctl.should_stop() {
@@ -349,28 +429,43 @@ fn train_on<B: AutodiffBackend>(
             };
             let out = forward_first::<B>(&mut model, x, &in_shapes, true)?;
             let loss = device_loss::<B>(&out, &y, cfg.loss)?;
-            let value: f64 = loss.clone().into_scalar().elem::<f64>();
-            if !value.is_finite() {
-                bail!("손실이 발산했습니다 (epoch {epoch}, step {step}) — 학습률을 낮춰 보세요");
+
+            // 값은 이벤트를 내보낼 때만 읽는다 (발산 검사도 그때 함께). 마지막 스텝은 항상 읽는다.
+            let last_step = step + 1 == total_steps;
+            if emit.step_due() || last_step {
+                let value: f64 = loss.clone().into_scalar().elem::<f64>();
+                if !value.is_finite() {
+                    bail!("손실이 발산했습니다 (epoch {epoch}, step {step}) — 학습률을 낮춰 보세요");
+                }
+                emit.step(TrainEvent::Step { epoch, step, loss: value });
+            } else {
+                emit.skip_step();
             }
+
+            let weighted = loss.clone().detach().inner().mul_scalar(chunk.len() as f64);
+            epoch_loss_dev = Some(match epoch_loss_dev {
+                Some(acc) => acc + weighted,
+                None => weighted,
+            });
 
             let grads = loss.backward();
             if opt.step(&mut model, grads, cfg.grad_clip)? == StepOutcome::Skipped {
                 skipped_steps += 1;
                 if skipped_steps <= 3 {
-                    let _ = tx.send(TrainEvent::Log(format!(
+                    emit.log(format!(
                         "epoch {epoch} step {step}: 그래디언트 노름이 유한하지 않아 이 스텝을 건너뜁니다"
-                    )));
+                    ));
                 }
                 continue;
             }
 
-            epoch_loss += value * chunk.len() as f64;
             seen += chunk.len();
-            let _ = tx.send(TrainEvent::Step { epoch, step, loss: value });
         }
 
-        let train_loss = if seen > 0 { epoch_loss / seen as f64 } else { 0.0 };
+        let train_loss = match (&epoch_loss_dev, seen) {
+            (Some(acc), n) if n > 0 => acc.clone().into_scalar().elem::<f64>() / n as f64,
+            _ => 0.0,
+        };
         let (val_loss, val_metric) = if val_set.is_empty() {
             (None, None)
         } else {
@@ -395,13 +490,13 @@ fn train_on<B: AutodiffBackend>(
             lr: Some(last_lr),
         };
         run.epochs.push(em);
-        let _ = tx.send(TrainEvent::Epoch(em));
+        emit.critical(TrainEvent::Epoch(em), Some(ctl));
         lrc.on_epoch_end(val_loss);
 
         if cfg.checkpoint_every > 0 && epoch % cfg.checkpoint_every == 0 {
             let path = req.run_dir.join(format!("epoch-{epoch:04}.safetensors"));
             weights::save(&path, req.model.id, &model.host_params())?;
-            let _ = tx.send(TrainEvent::Checkpoint { path });
+            emit.critical(TrainEvent::Checkpoint { path }, Some(ctl));
         }
 
         // 검증 손실이 갱신되면 그 시점의 가중치를 따로 남긴다.
@@ -415,7 +510,7 @@ fn train_on<B: AutodiffBackend>(
                 since_improve = 0;
                 let path = req.run_dir.join("best.safetensors");
                 weights::save(&path, req.model.id, &model.host_params())?;
-                let _ = tx.send(TrainEvent::Checkpoint { path: path.clone() });
+                emit.critical(TrainEvent::Checkpoint { path: path.clone() }, Some(ctl));
                 best_path = Some(path);
                 best_epoch = epoch;
             } else {
@@ -424,11 +519,11 @@ fn train_on<B: AutodiffBackend>(
 
             // 조기 종료 — 중지(Stopped)가 아니라 정상 종료(Finished)다.
             if cfg.early_stop_patience > 0 && since_improve >= cfg.early_stop_patience {
-                let _ = tx.send(TrainEvent::Log(format!(
+                emit.log(format!(
                     "조기 종료: 검증 손실이 {since_improve} 에포크 동안 나아지지 않았습니다 \
                      (최저 {:.6}, 에포크 {best_epoch}). 그 에포크의 가중치를 best.safetensors 로 남겼습니다",
                     best_val.unwrap_or(v)
-                )));
+                ));
                 early_stopped = true;
                 break;
             }
@@ -438,7 +533,7 @@ fn train_on<B: AutodiffBackend>(
     // 중지되었어도 마지막 가중치는 남긴다.
     let final_path = req.run_dir.join("final.safetensors");
     weights::save(&final_path, req.model.id, &model.host_params())?;
-    let _ = tx.send(TrainEvent::Checkpoint { path: final_path.clone() });
+    emit.critical(TrainEvent::Checkpoint { path: final_path.clone() }, Some(ctl));
 
     run.best_checkpoint = best_path.as_ref().map(|p| relative_to(&req.base_dir, p));
     // 조기 종료로 끝났으면 결과물은 마지막이 아니라 최적 가중치여야 한다.
@@ -447,9 +542,14 @@ fn train_on<B: AutodiffBackend>(
         _ => Some(relative_to(&req.base_dir, &final_path)),
     };
     if skipped_steps > 0 {
-        let _ = tx.send(TrainEvent::Log(format!(
-            "그래디언트가 유한하지 않아 건너뛴 스텝: {skipped_steps} 개"
-        )));
+        emit.log(format!("그래디언트가 유한하지 않아 건너뛴 스텝: {skipped_steps} 개"));
+    }
+    if emit.throttled > 0 || emit.dropped > 0 {
+        emit.log(format!(
+            "진행 이벤트 {} 개는 주기에 맞춰 솎아 냈고 {} 개는 수신자가 밀려 버렸습니다 \
+             (학습 자체에는 영향이 없습니다)",
+            emit.throttled, emit.dropped
+        ));
     }
     run.status = if stopped { RunStatus::Stopped } else { RunStatus::Finished };
     Ok(())
@@ -625,7 +725,7 @@ fn dataset_bytes(set: &[Sample]) -> usize {
 fn resident<B: burn::tensor::backend::Backend>(
     set: &[Sample],
     device: &B::Device,
-    tx: &Sender<TrainEvent>,
+    emit: &Emitter,
     gpu: bool,
     what: &str,
 ) -> Option<DeviceSet<B>> {
@@ -634,7 +734,7 @@ fn resident<B: burn::tensor::backend::Backend>(
     }
     // 문제 진단용 탈출구 — 드라이버가 select/narrow 에서 말썽이면 호스트 경로로 되돌린다.
     if std::env::var("NL_NO_RESIDENT").as_deref() == Ok("1") {
-        let _ = tx.send(TrainEvent::Log(format!("NL_NO_RESIDENT=1 — {what} 데이터를 배치마다 올립니다")));
+        emit.log(format!("NL_NO_RESIDENT=1 — {what} 데이터를 배치마다 올립니다"));
         return None;
     }
     let sample_bytes = sample_bytes(set);
@@ -644,16 +744,16 @@ fn resident<B: burn::tensor::backend::Backend>(
     }
     let bytes = dataset_bytes(set);
     if bytes > RESIDENT_LIMIT_BYTES {
-        let _ = tx.send(TrainEvent::Log(format!(
+        emit.log(format!(
             "{what} 데이터가 {:.0} MiB 라 장치에 상주시키지 않고 배치마다 올립니다",
             bytes as f64 / (1024.0 * 1024.0)
-        )));
+        ));
         return None;
     }
     match DeviceSet::upload(set, device) {
         Ok(d) => Some(d),
         Err(e) => {
-            let _ = tx.send(TrainEvent::Log(format!("{what} 데이터 상주 실패, 배치마다 올립니다: {e:#}")));
+            emit.log(format!("{what} 데이터 상주 실패, 배치마다 올립니다: {e:#}"));
             None
         }
     }
@@ -861,12 +961,13 @@ fn evaluate<B: AutodiffBackend>(
             Some(d) => d.batch(step * batch_size.max(1), chunk.len())?,
             None => stack_generic::<B>(set, chunk, device)?,
         };
-        let out = forward_first::<B>(model, x, in_shapes, false)?;
-        let oh = out.to_host();
-        let th = y.to_host();
-        loss_sum += host_loss(&oh, &th, loss)? * chunk.len() as f64;
+        // 손실 정의는 학습과 **같은 함수** 하나뿐이다. 검증만 따로 구현하면 한쪽에만 검사가 들어가
+        // 서로 다르게 동작한다(실제로 B2 가 그렇게 생겼다). `detach` 로 autodiff 그래프는 남기지 않는다.
+        let out = forward_first::<B>(model, x, in_shapes, false)?.detach();
+        let l = device_loss::<B>(&out, &y, loss)?.into_scalar().elem::<f64>();
+        loss_sum += l * chunk.len() as f64;
         if metric != Metric::None {
-            hit += host_metric(&oh, &th, metric)? * chunk.len() as f64;
+            hit += host_metric(&out.to_host(), &y.to_host(), metric)? * chunk.len() as f64;
         }
         n += chunk.len();
     }
@@ -876,52 +977,6 @@ fn evaluate<B: AutodiffBackend>(
     let m = if metric == Metric::None { None } else { Some(hit / n as f64) };
     Ok((loss_sum / n as f64, m))
 }
-
-/// 호스트 손실 — 장치 손실과 같은 정의. 검증에만 쓴다.
-pub(crate) fn host_loss(out: &HostTensor, target: &HostTensor, loss: Loss) -> Result<f64> {
-    match loss {
-        Loss::Mse | Loss::Mae | Loss::BceWithLogits => {
-            if out.data.len() != target.data.len() {
-                bail!("출력 {} 개와 타깃 {} 개의 수가 다릅니다", out.data.len(), target.data.len());
-            }
-            let mut sum = 0.0f64;
-            for (o, t) in out.data.iter().zip(&target.data) {
-                let (o, t) = (*o as f64, *t as f64);
-                sum += match loss {
-                    Loss::Mse => (o - t) * (o - t),
-                    Loss::Mae => (o - t).abs(),
-                    _ => o.max(0.0) - o * t + (1.0 + (-o.abs()).exp()).ln(),
-                };
-            }
-            Ok(sum / out.data.len() as f64)
-        }
-        Loss::CrossEntropy => {
-            let (b, c) = rows_cols(out)?;
-            let tc = target.data.len() / b.max(1);
-            let mut sum = 0.0f64;
-            for i in 0..b {
-                let row = &out.data[i * c..(i + 1) * c];
-                let logp = log_softmax_row(row);
-                if tc == 1 {
-                    let k = target.data[i] as usize;
-                    if k >= c {
-                        bail!("클래스 인덱스 {k} 가 클래스 수 {c} 를 넘습니다");
-                    }
-                    sum -= logp[k];
-                } else if tc == c {
-                    let row_t = &target.data[i * c..(i + 1) * c];
-                    sum -= row_t.iter().zip(&logp).map(|(t, lp)| *t as f64 * lp).sum::<f64>();
-                } else {
-                    bail!("CrossEntropy 타깃 폭 {tc} 이 클래스 수 {c} 도 1 도 아닙니다");
-                }
-            }
-            Ok(sum / b as f64)
-        }
-    }
-}
-
-// (아래는 옛 분기 잔재를 지우기 위한 표식)
-
 
 fn host_metric(out: &HostTensor, target: &HostTensor, metric: Metric) -> Result<f64> {
     match metric {
@@ -972,12 +1027,6 @@ fn argmax(v: &[f32]) -> usize {
     v.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m }).0
 }
 
-fn log_softmax_row(row: &[f32]) -> Vec<f64> {
-    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
-    let sum: f64 = row.iter().map(|v| (*v as f64 - max).exp()).sum();
-    let lse = max + sum.ln();
-    row.iter().map(|v| *v as f64 - lse).collect()
-}
 
 // ───────────────────────────── 옵티마이저 ─────────────────────────────
 
@@ -1029,7 +1078,17 @@ impl<B: AutodiffBackend> Opt<B> {
 
         // 2) 전역 노름 클리핑.
         if grad_clip > 0.0 {
-            let total: f64 = collected.iter().map(|(_, g)| g.sum_squares()).sum::<f64>().sqrt();
+            // 파라미터마다 스칼라를 읽으면 동기화가 파라미터 수만큼 걸린다.
+            // 제곱합을 장치 텐서로 더한 뒤 **한 번만** 읽는다.
+            let mut acc: Option<Tensor<B::InnerBackend, 1>> = None;
+            for (_, g) in &collected {
+                let s = g.sum_squares_tensor();
+                acc = Some(match acc {
+                    Some(a) => a + s,
+                    None => s,
+                });
+            }
+            let total: f64 = acc.map_or(0.0, |a| a.into_scalar().elem::<f64>()).sqrt();
             if !total.is_finite() {
                 // 클리핑이 있는 이유가 바로 이 경우다. 그대로 넣으면 파라미터가 NaN 으로 오염된다.
                 return Ok(StepOutcome::Skipped);

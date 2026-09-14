@@ -22,6 +22,18 @@ fn temp_dir(tag: &str) -> PathBuf {
     p
 }
 
+/// 학습·추론 테스트가 쓸 장치.
+///
+/// 기본은 CPU 다. `NL_TEST_DEVICE=gpu` 를 주면 `Auto` 로 바꿔 **상주 배치 경로**(GPU 는 크기와
+/// 무관하게 데이터셋을 장치에 올린다)를 타게 한다. 그래야 B1~B7 수정이 GPU 경로에서도 유효한지
+/// 확인할 수 있다: `NL_TEST_GPU=1 NL_TEST_DEVICE=gpu cargo test -p nl-engine`.
+fn test_device() -> DevicePref {
+    match std::env::var("NL_TEST_DEVICE").as_deref() {
+        Ok("gpu") => DevicePref::Auto,
+        _ => DevicePref::Cpu,
+    }
+}
+
 fn add(g: &mut Graph, k: LayerKind) -> nl_core::NodeId {
     g.add_node(Node::new(k, [0.0, 0.0]))
 }
@@ -142,7 +154,7 @@ fn inferred_output_shape(def: &ModelDef) -> Vec<usize> {
 }
 
 fn run_once(def: &ModelDef, input: HostTensor) -> Vec<HostTensor> {
-    let mut s = Session::load(def, None, DevicePref::Cpu).expect("세션 생성");
+    let mut s = Session::load(def, None, test_device()).expect("세션 생성");
     s.run(&[input]).expect("추론")
 }
 
@@ -259,7 +271,7 @@ fn xor_run() -> &'static XorRun {
         def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
         def.train.epochs = 40;
         def.train.batch_size = 64;
-        def.train.device = DevicePref::Cpu;
+        def.train.device = test_device();
         def.train.seed = 7;
         let run = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
         XorRun { dir, def, run }
@@ -290,8 +302,8 @@ fn checkpoint_round_trip_gives_identical_outputs() {
     b.train.seed = 999;
 
     let x = HostTensor::new(vec![4, 2], vec![0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, -0.5]);
-    let mut sa = Session::load(&a, Some(&ckpt), DevicePref::Cpu).unwrap();
-    let mut sb = Session::load(&b, Some(&ckpt), DevicePref::Cpu).unwrap();
+    let mut sa = Session::load(&a, Some(&ckpt), test_device()).unwrap();
+    let mut sb = Session::load(&b, Some(&ckpt), test_device()).unwrap();
     let inputs = [x];
     let oa = sa.run(&inputs).unwrap();
     let ob = sb.run(&inputs).unwrap();
@@ -306,7 +318,7 @@ fn checkpoint_round_trip_gives_identical_outputs() {
 fn session_infers_with_trained_checkpoint() {
     let r = xor_run();
     let ckpt = r.dir.join(r.run.checkpoint.as_ref().unwrap());
-    let mut s = Session::load(&r.def, Some(&ckpt), DevicePref::Cpu).unwrap();
+    let mut s = Session::load(&r.def, Some(&ckpt), test_device()).unwrap();
     assert!(!s.device_name().is_empty());
     assert_eq!(s.input_sample_shapes(), &[vec![2]]);
     assert_eq!(s.output_sample_shapes(), &[vec![2]]);
@@ -329,7 +341,7 @@ fn linear_regression_converges_below_mse_005() {
     def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
     def.train.epochs = 80;
     def.train.batch_size = 64;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     let run = train_to_end(def, synthetic(SyntheticKind::LinearRegression, 2048), &dir);
     let last = run.last().unwrap();
     let val = last.val_loss.expect("검증 손실");
@@ -354,7 +366,7 @@ fn every_optimizer_reduces_the_loss() {
         def.train.optimizer = opt;
         def.train.epochs = 8;
         def.train.batch_size = 64;
-        def.train.device = DevicePref::Cpu;
+        def.train.device = test_device();
         def.train.grad_clip = 1.0;
         let run = train_to_end(def, synthetic(SyntheticKind::Xor, 1024), &dir);
         let first = run.epochs.first().unwrap().train_loss;
@@ -374,7 +386,7 @@ fn pause_and_stop_control_the_run() {
     def.train.metric = Metric::Accuracy;
     def.train.epochs = 500; // 중지가 없으면 한참 돈다
     def.train.batch_size = 32;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let req = TrainRequest {
         run_id: RunId::new(),
@@ -438,7 +450,7 @@ fn separate_validation_source_is_used() {
     def.train.metric = Metric::Accuracy;
     def.train.epochs = 5;
     def.train.batch_size = 64;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.val_split = 0.0; // 비율 분할은 끄고 별도 소스만 쓴다
 
     let mut ds = synthetic(SyntheticKind::Xor, 512);
@@ -462,7 +474,7 @@ fn resume_from_checkpoint_starts_from_a_lower_loss() {
     def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
     def.train.epochs = 15;
     def.train.batch_size = 64;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.seed = 3;
 
     let first = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
@@ -526,7 +538,7 @@ fn two_input_model_trains_with_columns_split_in_node_order() {
     def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
     def.train.epochs = 60;
     def.train.batch_size = 32;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let (run, logs) = train_collecting_logs(def, ds, &dir);
     assert_eq!(run.status, RunStatus::Finished);
@@ -559,7 +571,7 @@ fn mismatched_column_count_is_rejected_with_a_clear_message() {
     link(g, l, o);
     def.train.loss = Loss::Mse;
     def.train.epochs = 1;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let req = TrainRequest {
         run_id: RunId::new(),
@@ -610,7 +622,7 @@ fn two_output_model_trains_on_the_first_output() {
     def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
     def.train.epochs = 40;
     def.train.batch_size = 64;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.seed = 7;
 
     let (run, logs) = train_collecting_logs(def.clone(), synthetic(SyntheticKind::Xor, 1024), &dir);
@@ -624,7 +636,7 @@ fn two_output_model_trains_on_the_first_output() {
 
     // 추론은 두 출력을 모두 돌려준다.
     let ckpt = dir.join(run.checkpoint.as_ref().unwrap());
-    let mut s = Session::load(&def, Some(&ckpt), DevicePref::Cpu).unwrap();
+    let mut s = Session::load(&def, Some(&ckpt), test_device()).unwrap();
     let out = s.run(&[HostTensor::new(vec![2, 2], vec![0.8, 0.8, -0.8, 0.8])]).unwrap();
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].shape, vec![2, 2]);
@@ -644,7 +656,7 @@ fn step_schedule_is_reported_per_epoch() {
     def.train.schedule = nl_core::LrSchedule::Step { every: 2, gamma: 0.5 };
     def.train.epochs = 6;
     def.train.batch_size = 128;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let run = train_to_end(def, synthetic(SyntheticKind::Xor, 256), &dir);
     let lrs: Vec<f64> = run.epochs.iter().map(|e| e.lr.expect("lr 이 기록되어야 합니다")).collect();
@@ -662,7 +674,7 @@ fn cosine_schedule_and_warmup_shape_the_learning_rate() {
     def.train.epochs = 5;
     def.train.batch_size = 256; // 에포크당 1 스텝
     def.train.warmup_steps = 2;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let run = train_to_end(def, synthetic(SyntheticKind::Xor, 256), &dir);
     let lrs: Vec<f64> = run.epochs.iter().map(|e| e.lr.unwrap()).collect();
@@ -686,7 +698,7 @@ fn early_stopping_ends_the_run_as_finished() {
     def.train.batch_size = 64;
     def.train.val_split = 0.25;
     def.train.early_stop_patience = 2;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let (run, logs) = train_collecting_logs(def, synthetic(SyntheticKind::Xor, 256), &dir);
     assert_eq!(run.status, RunStatus::Finished, "조기 종료는 정상 종료여야 합니다");
@@ -704,7 +716,7 @@ fn resume_restores_weights_only_and_says_so() {
     def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
     def.train.epochs = 10;
     def.train.batch_size = 64;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.seed = 3;
 
     let first = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 512), &dir);
@@ -763,7 +775,7 @@ fn image_sized_samples_train_through_the_resident_path() {
     def.train.optimizer = Optimizer::Adam { lr: 5e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
     def.train.epochs = 8;
     def.train.batch_size = 32;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.seed = 5;
 
     let run = train_to_end(def, synthetic(SyntheticKind::Quadrants, 512), &dir);
@@ -804,7 +816,7 @@ fn training_warns_about_classes_with_no_samples() {
     def.train.metric = Metric::Accuracy;
     def.train.epochs = 3;
     def.train.batch_size = 32;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let (run, logs) = train_collecting_logs(def, ds, &dir);
     assert_eq!(run.status, RunStatus::Finished);
@@ -855,7 +867,7 @@ fn tokenized_text_feeds_an_embedding_model() {
     ]);
     assert_eq!(inferred_output_shape(&def), vec![3]);
 
-    let mut session = Session::load(&def, None, DevicePref::Cpu).unwrap();
+    let mut session = Session::load(&def, None, test_device()).unwrap();
     let out = session.run(&[encoded]).unwrap();
     assert_eq!(out[0].shape, vec![1, 3]);
     assert!(out[0].data.iter().all(|v| v.is_finite()));
@@ -907,7 +919,7 @@ fn b1_accuracy_is_real_for_single_unit_binary_output() {
     def.train.epochs = 60;
     def.train.batch_size = 64;
     def.train.val_split = 0.3;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.seed = 7;
 
     let run = train_to_end(def, synthetic(SyntheticKind::Xor, 600), &dir);
@@ -925,7 +937,7 @@ fn b2_too_few_output_units_is_reported_before_training() {
     let mut def = mlp(2, 8, 2); // Quadrants 는 클래스 4 개인데 출력 2 유닛
     def.train.loss = Loss::CrossEntropy;
     def.train.epochs = 1;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     // 입력 형상을 Quadrants 에 맞춘다.
     let mut d2 = ModelDef::new("b2");
@@ -964,7 +976,7 @@ fn b3_embedding_rejects_out_of_range_and_fractional_indices() {
         LayerKind::Flatten,
         LayerKind::Linear { out_features: 2, bias: true },
     ]);
-    let mut s = Session::load(&def, None, DevicePref::Cpu).unwrap();
+    let mut s = Session::load(&def, None, test_device()).unwrap();
 
     // 범위 밖.
     let e = run_err(&mut s, &[0.0, 9.0]);
@@ -987,7 +999,7 @@ fn b4_single_class_cross_entropy_is_rejected() {
     let mut def = mlp(2, 8, 1);
     def.train.loss = Loss::CrossEntropy;
     def.train.epochs = 3;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     let e = train_expect_failure(def, synthetic(SyntheticKind::Xor, 200), &dir);
     assert!(e.contains("1 유닛"), "출력 폭을 짚어 주지 않습니다: {e}");
     assert!(e.contains("클래스"), "{e}");
@@ -1013,7 +1025,7 @@ fn b4_single_class_cross_entropy_is_rejected() {
     let mut def = mlp(2, 8, 1);
     def.train.loss = Loss::CrossEntropy;
     def.train.epochs = 3;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     let e = train_expect_failure(def, ds, &dir);
     assert!(e.contains("2 개 이상"), "{e}");
     assert!(e.contains("BCE"), "대안을 알려 주지 않습니다: {e}");
@@ -1039,7 +1051,7 @@ fn b5_rank_above_the_limit_is_caught_by_validation_not_at_train_time() {
     assert!(!issues.is_empty(), "검증기가 랭크 상한을 놓쳤습니다");
 
     // 엔진도 같은 이유로 거절한다 (계약이 한 곳에서 맞물린다).
-    assert!(Session::load(&def, None, DevicePref::Cpu).is_err());
+    assert!(Session::load(&def, None, test_device()).is_err());
 }
 
 /// B7: 조기 종료는 최적 에포크의 가중치를 남기고 `checkpoint` 가 그것을 가리켜야 한다.
@@ -1055,7 +1067,7 @@ fn b7_early_stopping_keeps_the_best_weights() {
     def.train.batch_size = 64;
     def.train.val_split = 0.25;
     def.train.early_stop_patience = 2;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let (run, logs) = train_collecting_logs(def, synthetic(SyntheticKind::Xor, 256), &dir);
     assert_eq!(run.status, RunStatus::Finished);
@@ -1077,7 +1089,7 @@ fn b7_early_stopping_keeps_the_best_weights() {
     d2.train.loss = Loss::CrossEntropy;
     d2.train.epochs = 3;
     d2.train.batch_size = 64;
-    d2.train.device = DevicePref::Cpu;
+    d2.train.device = test_device();
     let run2 = train_to_end(d2, synthetic(SyntheticKind::Xor, 256), &dir2);
     assert!(run2.checkpoint.as_deref().unwrap().ends_with("final.safetensors"));
     std::fs::remove_dir_all(&dir).ok();
@@ -1091,11 +1103,146 @@ fn s4_checkpoint_from_another_model_is_refused() {
     let ckpt = r.dir.join(r.run.checkpoint.as_ref().unwrap());
     // 같은 구조지만 id 가 다른 모델.
     let other = mlp(2, 16, 2);
-    let e = match Session::load(&other, Some(&ckpt), DevicePref::Cpu) {
+    let e = match Session::load(&other, Some(&ckpt), test_device()) {
         Ok(_) => panic!("다른 모델의 체크포인트를 받아들였습니다"),
         Err(e) => format!("{e:#}"),
     };
     assert!(e.contains("다른 모델"), "{e}");
+}
+
+// ───────────────────────────── 리뷰 "개선" 항목 ─────────────────────────────
+
+/// 그래프 오류 메시지는 출력에 기여하는 노드를 먼저 지목해야 한다.
+#[test]
+fn graph_errors_point_at_the_node_that_blocks_the_output() {
+    let mut def = ModelDef::new("오류");
+    let g = &mut def.graph;
+    // 실제 원인: Conv2d 가 [4] 벡터를 받는다.
+    let i = add(g, LayerKind::Input { shape: vec![4] });
+    let conv = named(
+        g,
+        LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [0, 0], bias: true },
+        "진짜원인",
+    );
+    let o = add(g, LayerKind::Output);
+    link(g, i, conv);
+    link(g, conv, o);
+    // 캔버스에 떠 있는, 출력과 이어지지 않은 노드. id 순으로는 이쪽이 먼저 걸릴 수 있다.
+    named(g, LayerKind::Linear { out_features: 2, bias: true }, "떠있는노드");
+
+    let e = match Session::load(&def, None, test_device()) {
+        Ok(_) => panic!("오류 그래프를 받아들였습니다"),
+        Err(e) => format!("{e:#}"),
+    };
+    let real = e.find("진짜원인").expect("진짜 원인을 지목하지 않습니다");
+    if let Some(stray) = e.find("떠있는노드") {
+        assert!(real < stray, "떠 있는 노드가 먼저 나옵니다: {e}");
+    }
+    assert!(e.contains("이어지지 않은"), "떠 있는 노드가 있다는 사실을 알려야 합니다: {e}");
+}
+
+/// `Step` 은 솎아 내도 되지만 `Epoch`·`Finished` 는 한 개도 빠지면 안 된다.
+#[test]
+fn epoch_and_finished_events_are_never_dropped() {
+    let dir = temp_dir("events");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.epochs = 12;
+    def.train.batch_size = 8; // 에포크당 스텝을 많이 만들어 Step 이 솎이게 한다
+    def.train.device = test_device();
+
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: synthetic(SyntheticKind::Xor, 512),
+        base_dir: dir.clone(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let h = nl_engine::start(req).unwrap();
+
+    let mut epochs = 0usize;
+    let mut steps = 0usize;
+    let mut finished = None;
+    while let Ok(ev) = h.events.recv() {
+        match ev {
+            TrainEvent::Epoch(_) => epochs += 1,
+            TrainEvent::Step { .. } => steps += 1,
+            TrainEvent::Finished { run } => {
+                finished = Some(run);
+                break;
+            }
+            TrainEvent::Failed { error, .. } => panic!("학습 실패: {error}"),
+            _ => {}
+        }
+    }
+    let run = finished.expect("Finished 가 와야 합니다");
+    assert_eq!(epochs, 12, "Epoch 이 빠졌습니다");
+    assert_eq!(run.epochs.len(), 12);
+    // 총 스텝은 12 × 64 = 768 인데 이벤트는 주기에 맞춰 훨씬 적게 온다.
+    assert!(steps <= 768, "Step 이 총 스텝보다 많습니다: {steps}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `NL_STEP_EVENT_MS=0` 이면 모든 스텝이 이벤트로 나온다 (주기 옵션 확인).
+#[test]
+fn step_event_interval_can_be_disabled() {
+    let dir = temp_dir("events-all");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 2;
+    def.train.batch_size = 64;
+    def.train.val_split = 0.0;
+    def.train.device = test_device();
+
+    // SAFETY: 이 테스트만 이 변수를 쓰고, 학습 스레드가 뜨기 전에 설정한다.
+    unsafe { std::env::set_var("NL_STEP_EVENT_MS", "0") };
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: synthetic(SyntheticKind::Xor, 256),
+        base_dir: dir.clone(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let h = nl_engine::start(req).unwrap();
+    let mut steps = 0usize;
+    while let Ok(ev) = h.events.recv() {
+        match ev {
+            TrainEvent::Step { .. } => steps += 1,
+            TrainEvent::Finished { .. } => break,
+            TrainEvent::Failed { error, .. } => panic!("학습 실패: {error}"),
+            _ => {}
+        }
+    }
+    unsafe { std::env::remove_var("NL_STEP_EVENT_MS") };
+    // 256 샘플 / 배치 64 = 4 스텝 × 2 에포크.
+    assert_eq!(steps, 8, "주기를 0 으로 두면 모든 스텝이 나와야 합니다");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 검증 손실이 학습 손실과 같은 구현에서 나온다 — 같은 데이터면 같은 값이어야 한다.
+#[test]
+fn validation_loss_uses_the_same_definition_as_training() {
+    let dir = temp_dir("loss-one");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::None;
+    // 학습률 0 → 가중치가 변하지 않으므로 학습 손실과 검증 손실이 같은 모델에서 나온다.
+    def.train.optimizer = Optimizer::Sgd { lr: 0.0, momentum: 0.0 };
+    def.train.epochs = 1;
+    def.train.batch_size = 512;
+    def.train.val_split = 0.5;
+    def.train.device = test_device();
+    def.train.seed = 11;
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 512), &dir);
+    let e = run.last().unwrap();
+    let v = e.val_loss.expect("검증 손실");
+    // XOR 은 두 분할의 분포가 같으므로 두 손실이 크게 벌어질 이유가 없다.
+    assert!((e.train_loss - v).abs() < 0.15, "학습 {} vs 검증 {v}", e.train_loss);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 // ───────────────────────────── 성능 측정 (NL_BENCH=1) ─────────────────────────────
@@ -1115,7 +1262,7 @@ fn bench_xor_1000_samples_200_epochs() {
     def.train.epochs = 200;
     def.train.batch_size = 32;
     def.train.val_split = 0.0;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
     def.train.seed = 7;
 
     let t0 = std::time::Instant::now();
@@ -1154,7 +1301,7 @@ fn bench_quadrants_cnn() {
     def.train.epochs = 8;
     def.train.batch_size = 32;
     def.train.val_split = 0.0;
-    def.train.device = DevicePref::Cpu;
+    def.train.device = test_device();
 
     let t0 = std::time::Instant::now();
     let run = train_to_end(def, synthetic(SyntheticKind::Quadrants, 1000), &dir);
