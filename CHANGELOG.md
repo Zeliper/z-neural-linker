@@ -20,6 +20,12 @@
 - `Transform::Tokenize` — 문자 단위 토크나이저(Embedding 입력용)
 
 **엔진 (`nl-engine`)**
+- 순환·어텐션 레이어 `Lstm`·`Gru`·`MultiHeadAttention` (`f085770`).
+  `Lstm`/`Gru { hidden, bidirectional, return_sequence }` 는 `[L, D]` 를 받아 `return_sequence` 면 `[L, H]`,
+  아니면 마지막 상태 `[H]` 를 낸다(양방향이면 `H` 가 두 배). `MultiHeadAttention { heads, dropout }` 은
+  셀프 어텐션으로 `[L, D] → [L, D]` 다(`D % heads == 0`). 셋 다 burn 의 `nn` 모듈 대신 파라미터 텐서와
+  게이트 수식으로 직접 구현했다 — 그래프가 런타임에 정해져 `Module` 파생을 쓸 수 없기 때문이다.
+  빌더 인스펙터 편집기와 팔레트 분류도 함께 들어왔다 (`91fecd2`)
 - burn 0.21 기반 **런타임 정의 그래프** 인터프리터. CPU(ndarray)·GPU(wgpu) 모두 CUDA 설치 없이 돈다
 - `probe` 로 실제 동작을 확인해 고르는 `Auto` 장치 선택. UI 스레드용 비차단 짝 `resolve_cached`·`probe_cached`
 - 학습 루프(SGD/Adam/AdamW × MSE/CrossEntropy/BCE/MAE), safetensors 체크포인트, 추론 세션
@@ -53,6 +59,16 @@
 - 앱 아이콘 일습: 손으로 쓴 SVG 원본에서 PNG·ICO 를 만들고 실행 파일·설치 프로그램·데스크톱 항목에 연결
 - 로컬 릴리스 드라이런 `packaging/release-local.sh` — CI 와 같은 함수(`packaging/lib.sh`)를 쓴다
 
+**서버형 배포**
+- **`--work-dir <경로>`**(`NL_WORK_DIR`) — 번들을 고정 폴더에 풀고 그대로 둔다 (`d45abdf`).
+  기본은 끝나면 지워지는 임시 폴더다. 같은 번들이면 다시 풀지 않아 재시작이 빠르고,
+  `<작업 폴더>/local/` 에 둔 인증서 같은 파일은 번들을 갈아 끼워도 남는다.
+  같은 번들인지는 **내용의 지문**으로 본다 — zip 바이트가 아니라 매니페스트·프로젝트·가중치·에셋의
+  내용만 해싱하므로 압축 시각 같은 것에 흔들리지 않는다
+- **systemd 사용자 유닛 템플릿**과 `install.sh --service` (`e7a5a12`). 토큰은 `EnvironmentFile=` 로
+  분리하고(유닛은 0644 에 `systemctl cat` 으로 드러난다), `Restart=on-failure` 와 재시작 폭주 가드,
+  최소 권한 옵션을 켜 둔다. 가이드에 "서버로 운영하기" 절이 생겼다
+
 **명령줄 (`nl-cli`)**
 - `nl` 명령 — `inspect`·`devices`·`train`·`infer`·`run`·`record`·`build`·`sample`.
   스크립트·CI 용이라 종료 코드가 계약이다
@@ -61,6 +77,11 @@
 - 인바운드 HTTP 서버에 **TLS 옵션** — `Source::HttpServer` 에 인증서를 주면 https 로 연다(`TlsConfig { cert_pem, key_pem }`).
   rustls + ring 이라 시스템 OpenSSL 이 필요 없고, 핸드셰이크 위쪽 HTTP 처리는 평문과 같은 코드다.
   토큰 규칙은 TLS 와 무관하게 그대로다 — TLS 는 도청을 막고 토큰은 호출자를 가린다 (`1e87de1`)
+- **`nl tls-cert`** — 자체 서명 인증서를 만드는 하위 명령(rcgen, SAN 지정). `nl run`·`nl build` 는
+  `--tls-cert`/`--tls-key` 로 프로젝트 파일을 고치지 않고 붙일 수 있다. 개인키는 0600 으로
+  **만들면서** 권한을 준다 — 만든 뒤 조이면 그 사이에 열릴 틈이 있다 (`3bc25a8`)
+- 배포판의 인증서 탐색이 두 곳으로 늘었다: 실행기 작업 폴더 → 실행 파일이 있는 폴더.
+  둘 다 담장 검사를 지난다. 번들에는 개인키를 담지 않으므로 설치한 기계에 따로 두고 쓴다 (`3bc25a8`)
 
 **시험·CI**
 - `egui_kittest` 인프로세스 스냅샷 골든(컴포지터 불필요)
@@ -82,6 +103,18 @@
 - 릴리스 단계의 실제 내용을 `packaging/lib.sh` 한 곳으로 모아 워크플로와 로컬 스크립트가 같은 함수를 쓴다
 - 릴리스 프로필에서 `nl-*` 패키지의 `overflow-checks` 를 켰다(보안 리뷰 권고)
 - 전 크레이트 포맷을 정리하고 **CI 의 `cargo fmt --check` 를 강제로 바꿨다**(`continue-on-error` 제거) (`6149b01`)
+
+### 확인한 것
+
+- 배포판 설치 한 바퀴: tar.gz 를 임시 HOME 에 풀어 `install.sh` → `nl-app`·`nl-runtime`·`nl` 실행 →
+  `.desktop`·MIME 설치 확인 → `--uninstall` 로 잔여물 없이 제거
+- systemd 사용자 서비스로 헤드리스 앱 기동 → `curl` 추론 200 → 재시작 뒤에도 응답 → `SIGTERM` 정상 종료
+- `--work-dir` 재사용·갱신: 같은 번들이면 "이미 풀려 있어 그대로 씁니다", 다른 번들이면 다시 풀고
+  `local/` 은 보존
+- `local/server.crt` 로 https 기동 후 `curl --cacert` 로 200, 평문 호출은 거부
+- **Windows 런타임을 wine 에서 헤드리스로 띄워 HTTP 추론 200 확인** — 자체 HTTP 서버(`httpd.rs`)가
+  Windows 대상에서도 도는 것을 처음 확인했다. wgpu 의 DXGI 경고는 나지만 CPU 경로는 영향이 없다
+- Inno Setup 6.7.3 실컴파일·실설치 (wine)
 
 ### 보안
 
@@ -114,19 +147,6 @@
 - `:0` 으로 바인드할 때 `Host` 검사가 400 을 내던 것
 - 헤드리스 스모크 테스트가 무한 대기하던 것(`--run-for`)
 
-## 병합 대기
-
-아직 `main` 에 들어오지 않았지만 곧 합쳐질 것들이다. 릴리스 전에 이 절을 비우고 위로 옮긴다.
-
-- **순환·어텐션 레이어** `Lstm`·`Gru`·`MultiHeadAttention` — `agent/engine` `360f26e`.
-  `Lstm`/`Gru { hidden, bidirectional, return_sequence }` 는 `[L, D]` 를 받아 `return_sequence` 면 `[L, H]`,
-  아니면 마지막 상태 `[H]` 를 낸다(양방향이면 `H` 가 두 배). `MultiHeadAttention { heads, dropout }` 은
-  셀프 어텐션으로 `[L, D] → [L, D]` 다(`D % heads == 0`). 셋 다 burn 의 `nn` 모듈 대신 파라미터 텐서와
-  게이트 수식으로 직접 구현했다 — 그래프가 런타임에 정해져 `Module` 파생을 쓸 수 없기 때문이다.
-  형상 규칙·safetensors 왕복·학습 시험이 함께 들어온다
-- **`nl tls-cert`** — 자체 서명 인증서를 만드는 CLI 하위 명령. io 담당 **진행 중**.
-  지금은 인증서·개인키 PEM 을 손으로 준비해 `TlsConfig` 에 넣어야 한다
-
 ## 알려진 제한
 
 첫 릴리스 시점에 남아 있는 것들이다. 고칠 계획이 있는 것과 환경 탓인 것을 함께 적는다.
@@ -139,5 +159,6 @@
 | NVK 드라이버 GPU | 오픈소스 NVK(nouveau) 드라이버의 NVIDIA GPU 는 wgpu 컴퓨트가 죽는다. `Auto` 가 `probe` 로 걸러 다른 장치를 고른다. 공식 드라이버를 깔면 잡힌다 |
 | Windows 자동 업데이트 | `latest.json` 에 Windows 자산을 아직 넣지 않는다. 자기 자신을 바꿔칠 수 없어 설치 프로그램이 필요한데 CI 러너에 Inno Setup 이 없다. 그때까지 Windows 사용자는 zip 을 받아 덮어쓴다 |
 | 서명 키 미발급 | 공개키가 아직 코드에 박혀 있지 않아 자동 업데이트가 꺼진 상태다. 발급 절차는 `docs/RELEASE.md` |
+| Windows 개인키 권한 | `nl tls-cert` 가 만드는 개인키에 Windows 에서는 권한 비트를 걸지 않는다. 유닉스 권한이 없어 ACL 을 건드리는 대신 "파일이 사용자 폴더 안에 있다" 는 전제에 기댄다. 여러 사람이 쓰는 Windows 기계라면 ACL 을 직접 조이라 |
 | 순환 레이어 성능 | `Lstm`·`Gru` 는 시퀀스 길이에 **선형인 커널 호출**을 낸다. 시점마다 게이트를 한 번씩 계산하므로 길이가 수백이면 눈에 띄게 느리다. 짧은 시퀀스를 먼저 써 보라 |
 | 미처리 낮음 2건 | unmaintained 의존성 3건(L23)과 `Cargo.lock` 의 도달 불가 항목(L25). 둘 다 상위 크레이트가 버전을 고정한 것이라 손댈 수 없다 |
