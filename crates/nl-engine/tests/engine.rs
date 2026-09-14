@@ -62,6 +62,8 @@ fn train_collecting_logs(def: ModelDef, ds: DatasetSpec, dir: &Path) -> (RunReco
         base_dir: dir.to_path_buf(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let handle = nl_engine::start(req).expect("학습 스레드 시작");
     let mut logs = Vec::new();
@@ -147,6 +149,8 @@ fn train_to_end(def: ModelDef, ds: DatasetSpec, dir: &Path) -> RunRecord {
         base_dir: dir.to_path_buf(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let handle = nl_engine::start(req).expect("학습 스레드 시작");
     while let Ok(ev) = handle.events.recv() {
@@ -475,6 +479,8 @@ fn pause_and_stop_control_the_run() {
         base_dir: dir.clone(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).unwrap();
 
@@ -580,6 +586,8 @@ fn resume_from_checkpoint_starts_from_a_lower_loss() {
         base_dir: dir.clone(),
         run_dir: dir.join("run2"),
         resume_from: Some(ckpt),
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).unwrap();
     let mut second = None;
@@ -702,6 +710,8 @@ fn mismatched_column_count_is_rejected_with_a_clear_message() {
         base_dir: dir.clone(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).unwrap();
     let mut err = None;
@@ -896,6 +906,8 @@ fn resume_restores_weights_only_and_says_so() {
         base_dir: dir.clone(),
         run_dir: dir.join("run2"),
         resume_from: Some(ckpt),
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).unwrap();
     let mut logs = Vec::new();
@@ -1100,6 +1112,8 @@ fn train_expect_failure(def: ModelDef, ds: DatasetSpec, dir: &Path) -> String {
         base_dir: dir.to_path_buf(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).expect("학습 스레드 시작");
     while let Ok(ev) = h.events.recv() {
@@ -1411,6 +1425,8 @@ fn epoch_and_finished_events_are_never_dropped() {
         base_dir: dir.clone(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).unwrap();
 
@@ -1457,6 +1473,8 @@ fn step_event_interval_can_be_disabled() {
         base_dir: dir.clone(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let h = nl_engine::start(req).unwrap();
     let mut steps = 0usize;
@@ -2163,6 +2181,8 @@ fn try_train(def: ModelDef, ds: DatasetSpec, dir: &Path) -> Result<RunRecord, St
         base_dir: dir.to_path_buf(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let handle = nl_engine::start(req).map_err(|e| e.to_string())?;
     while let Ok(ev) = handle.events.recv() {
