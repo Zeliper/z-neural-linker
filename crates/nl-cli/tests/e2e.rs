@@ -431,6 +431,281 @@ fn rebind_http_server(proj: &Path, from: &str) -> String {
     addr
 }
 
+/// 다입력·다출력 시나리오: Input 2개(`[2]`,`[3]`) · Output 2개(`a`,`b`) 인 모델을
+/// **테스트가 직접 만든 프로젝트**로 학습·빌드해 배포판에 두 형식으로 POST 한다.
+///
+/// 샘플에는 넣지 않는다 — 샘플은 처음 쓰는 사람이 여는 것이라 단순해야 한다.
+#[test]
+fn a_multi_input_multi_output_model_answers_through_the_deployed_app() {
+    if !enabled() {
+        eprintln!("NL_E2E 가 없어 다입출력 종단 테스트를 건너뛴다 (켜려면 NL_E2E=1)");
+        return;
+    }
+    let Some(runtime) = find_runtime() else {
+        panic!("런타임 실행 파일을 찾지 못했다. `cargo build --release -p nl-runtime` 을 먼저 돌려라");
+    };
+
+    let dir = temp_dir("multi");
+    let proj = dir.join("multi.nlproj");
+    let bind = {
+        // 다른 종단 시험과 포트를 다투지 않게 빈 포트를 받아 둔다.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("빈 포트");
+        format!("127.0.0.1:{}", l.local_addr().expect("주소").port())
+    };
+    write_multi_project(&proj, &dir, &bind);
+
+    // ── 1. 검사: 순서 계약이 표로 보이는지 ──
+    let out = run("nl inspect", Command::new(NL).arg("inspect").arg(&proj));
+    let text = stdout(&out);
+    assert!(text.contains("입출력 순서"), "순서 표가 없다:\n{text}");
+    assert!(text.contains("x1") && text.contains("x2"), "입력 순서가 없다:\n{text}");
+    assert!(
+        text.contains("벡터[2]") && text.contains("벡터[3]"),
+        "필드 종류가 없다:\n{text}"
+    );
+    assert!(
+        text.contains("첫 출력") || text.contains("손실"),
+        "다출력 학습 규칙 안내가 없다:\n{text}"
+    );
+
+    // ── 2. 학습 (3 에포크) ──
+    let out = run(
+        "nl train",
+        Command::new(NL)
+            .args(["train"])
+            .arg(&proj)
+            .args(["--model", "두 갈래", "--device", "cpu", "--epochs", "3"]),
+    );
+    let text = stdout(&out);
+    assert!(text.contains("가중치"), "학습이 가중치를 남기지 않았다:\n{text}");
+
+    // ── 3. 빌드 ──
+    let dist = dir.join("dist");
+    run(
+        "nl build",
+        Command::new(NL)
+            .args(["build"])
+            .arg(&proj)
+            .args(["--target", "linux", "--out"])
+            .arg(&dist)
+            .args([
+                "--name",
+                "다입출력 데모",
+                "--version",
+                "1.0.0",
+                "--pipeline",
+                "추론",
+                "--runtime",
+            ])
+            .arg(&runtime),
+    );
+
+    // ── 4. 배포판에 두 형식으로 POST ──
+    let exe = unpack_app(&dist, &dir);
+    let mut child = Command::new(&exe)
+        .args(["--headless", "--run-for", "30", "--device", "cpu"])
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("배포판을 띄우지 못했다");
+
+    let served = wait_until_serving(&bind, Duration::from_secs(20));
+    let url = format!("http://{bind}/infer");
+    let mut object_reply = None;
+    let mut array_reply = None;
+    if served {
+        // 객체 형식: 키가 곧 입력 필드 이름이다.
+        object_reply = post_json_until_ok(&url, br#"{"x1":[0.5,-0.5],"x2":[1.0,0.0,-1.0]}"#);
+        // 배열 형식: 입력 필드 **순서**대로 채운다.
+        array_reply = post_json_until_ok(&url, br#"[[0.5,-0.5],[1.0,0.0,-1.0]]"#);
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(served, "배포판이 {bind} 에서 듣지 않았다");
+    for (label, reply) in [("객체", object_reply), ("배열", array_reply)] {
+        let r = reply.unwrap_or_else(|| panic!("{label} 형식이 답을 받지 못했다"));
+        assert_eq!(r.status, 200, "{label}: {}", r.body);
+        let v: serde_json::Value = serde_json::from_str(&r.body).expect("JSON 이 아니다");
+        let obj = v
+            .as_object()
+            .unwrap_or_else(|| panic!("{label} 응답이 객체가 아니다: {v}"));
+        assert_eq!(obj.len(), 2, "{label}: 키가 둘이어야 한다 — {v}");
+        let a = obj.get("a").unwrap_or_else(|| panic!("{label}: a 키가 없다 — {v}"));
+        let b = obj.get("b").unwrap_or_else(|| panic!("{label}: b 키가 없다 — {v}"));
+        assert_eq!(a.as_array().expect("a 는 배열").len(), 2, "{label}: a 길이");
+        assert_eq!(b.as_array().expect("b 는 배열").len(), 3, "{label}: b 길이");
+        eprintln!("{label} 형식 응답: {v}");
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 모델이 올라올 때까지 503 을 넘기며 다시 보낸다.
+fn post_json_until_ok(url: &str, body: &[u8]) -> Option<Reply> {
+    let mut headers = std::collections::BTreeMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    let mut last = None;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        match post_bytes(url, &headers, body) {
+            Ok(r) if r.status == 200 => return Some(r),
+            Ok(r) => last = Some(r),
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    last
+}
+
+/// Input 2개·Output 2개짜리 프로젝트와 그 학습용 CSV 를 만든다.
+///
+/// **이름이 순서를 정한다**: `Graph::input_nodes()`/`output_nodes()` 가 노드 이름순으로 정렬하고,
+/// 페이로드 필드도 같은 순서여야 한다. 그래서 노드에 `x1`·`x2`·`a`·`b` 를 준다.
+fn write_multi_project(path: &Path, dir: &Path, bind: &str) {
+    use nl_core::dataset::{DataSource, DatasetSpec};
+    use nl_core::model::{Node, Port};
+    use nl_core::payload::{Field, FieldKind, PayloadSpec};
+    use nl_core::pipeline::{PNode, PNodeKind, Pipeline, Sink, Source};
+    use nl_core::train::Loss;
+    use nl_core::{Act, LayerKind, ModelDef, Project, ProjectFile};
+
+    // CSV: x1 두 열 + x2 세 열 = 입력 다섯 열, 타깃 두 열.
+    // 엔진은 `input_cols` 를 Input 노드 순서대로 2개·3개씩 앞에서부터 잘라 넣는다.
+    let csv = dir.join("train.csv");
+    let mut text = String::from("i1,i2,i3,i4,i5,t1,t2\n");
+    for n in 0..200 {
+        let f = n as f32;
+        let (a, b, c, d, e) = (f * 0.01, f * -0.02, f * 0.03, f * 0.005, f * -0.01);
+        // 타깃은 입력에서 결정되는 값이라 3 에포크로도 손실이 내려간다.
+        let (t1, t2) = (a + c, b + e);
+        text.push_str(&format!("{a},{b},{c},{d},{e},{t1},{t2}\n"));
+    }
+    std::fs::write(&csv, text).expect("CSV 쓰기");
+
+    let mut payload = PayloadSpec::new("둘입출력");
+    payload.inputs.push(Field::new("x1", FieldKind::Vector { len: 2 }));
+    payload.inputs.push(Field::new("x2", FieldKind::Vector { len: 3 }));
+    payload.outputs.push(Field::new("a", FieldKind::Vector { len: 2 }));
+    payload.outputs.push(Field::new("b", FieldKind::Vector { len: 3 }));
+
+    let mut dataset = DatasetSpec::new(
+        "다입력 CSV",
+        DataSource::Csv {
+            path: "train.csv".into(),
+            input_cols: ["i1", "i2", "i3", "i4", "i5"].iter().map(|s| s.to_string()).collect(),
+            target_cols: ["t1", "t2"].iter().map(|s| s.to_string()).collect(),
+            header: true,
+        },
+    );
+    dataset.payload = None;
+
+    let mut def = ModelDef::new("두 갈래");
+    let named = |kind: LayerKind, name: &str, pos: [f32; 2]| {
+        let mut n = Node::new(kind, pos);
+        n.name = name.into();
+        n
+    };
+    let in1 = def
+        .graph
+        .add_node(named(LayerKind::Input { shape: vec![2] }, "x1", [0.0, -1.0]));
+    let in2 = def
+        .graph
+        .add_node(named(LayerKind::Input { shape: vec![3] }, "x2", [0.0, 1.0]));
+    let l1 = def.graph.add_node(Node::new(
+        LayerKind::Linear {
+            out_features: 4,
+            bias: true,
+        },
+        [1.0, -1.0],
+    ));
+    let l2 = def.graph.add_node(Node::new(
+        LayerKind::Linear {
+            out_features: 4,
+            bias: true,
+        },
+        [1.0, 1.0],
+    ));
+    let cat = def.graph.add_node(Node::new(LayerKind::Concat { dim: 0 }, [2.0, 0.0]));
+    let act = def
+        .graph
+        .add_node(Node::new(LayerKind::Activation { act: Act::Relu }, [3.0, 0.0]));
+    let head_a = def.graph.add_node(Node::new(
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+        [4.0, -1.0],
+    ));
+    let head_b = def.graph.add_node(Node::new(
+        LayerKind::Linear {
+            out_features: 3,
+            bias: true,
+        },
+        [4.0, 1.0],
+    ));
+    let out_a = def.graph.add_node(named(LayerKind::Output, "a", [5.0, -1.0]));
+    let out_b = def.graph.add_node(named(LayerKind::Output, "b", [5.0, 1.0]));
+
+    for (from, to, slot) in [
+        (in1, l1, 0),
+        (in2, l2, 0),
+        (l1, cat, 0),
+        (l2, cat, 1),
+        (cat, act, 0),
+        (act, head_a, 0),
+        (head_a, out_a, 0),
+        (act, head_b, 0),
+        (head_b, out_b, 0),
+    ] {
+        def.graph.add_edge(from, Port::new(to, slot)).expect("연결");
+    }
+    def.payload = Some(payload.id);
+    // 회귀라 MSE. 기본값인 CrossEntropy 는 타깃을 클래스 인덱스로 본다.
+    def.train.loss = Loss::Mse;
+    def.train.dataset = Some(dataset.id);
+    def.train.epochs = 3;
+    def.train.batch_size = 32;
+
+    let mut pl = Pipeline::new("추론");
+    pl.tick_hz = 60.0;
+    let server = pl.add_node(PNode::new(
+        PNodeKind::Source {
+            source: Source::HttpServer {
+                bind: bind.to_string(),
+                path: "/infer".into(),
+                token: None,
+                tls: None,
+            },
+        },
+        [0.0, 0.0],
+    ));
+    let model_node = pl.add_node(PNode::new(
+        PNodeKind::Model {
+            model: def.id,
+            payload: Some(payload.id),
+        },
+        [1.0, 0.0],
+    ));
+    let reply = pl.add_node(PNode::new(
+        PNodeKind::Sink {
+            sink: Sink::HttpReply { server },
+        },
+        [2.0, 0.0],
+    ));
+    pl.add_link(server, model_node).unwrap();
+    pl.add_link(model_node, reply).unwrap();
+
+    let mut project = Project::new("다입출력");
+    project.payloads.insert(payload.id, payload);
+    project.datasets.insert(dataset.id, dataset);
+    project.models.insert(def.id, def);
+    project.pipelines.insert(pl.id, pl);
+
+    std::fs::write(path, ProjectFile::new(project).to_json()).expect("프로젝트 쓰기");
+}
+
 fn which_curl() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
