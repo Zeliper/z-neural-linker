@@ -306,7 +306,10 @@ fn run_probe(pref: DevicePref) -> Result<Duration, String> {
             // 안전하게 죽일 방법이 없다. 스레드 하나와 그 장치 컨텍스트가 프로세스 끝까지 남는
             // 것을 감수하고, 대신 호출자는 기다리지 않는다. 결과가 뒤늦게 와도 이미 캐시된
             // 타임아웃 결과를 덮지 않는다(`OnceLock` 은 한 번만 채워진다).
-            log::warn!("장치 검사가 {}초 안에 끝나지 않았습니다 — 검사 스레드는 그대로 남습니다", PROBE_TIMEOUT.as_secs());
+            log::warn!(
+                "장치 검사가 {}초 안에 끝나지 않았습니다 — 검사 스레드는 그대로 남습니다",
+                PROBE_TIMEOUT.as_secs()
+            );
             Err(format!("{}초 안에 응답하지 않았습니다", PROBE_TIMEOUT.as_secs()))
         }
     }
@@ -324,7 +327,9 @@ fn probe_workload<B: AutodiffBackend>(device: &B::Device) -> Result<(), String> 
         return Err(format!("순전파 결과가 유한하지 않습니다 ({value})"));
     }
     let grads = out.backward();
-    let g = a.grad(&grads).ok_or_else(|| "그래디언트를 얻지 못했습니다".to_string())?;
+    let g = a
+        .grad(&grads)
+        .ok_or_else(|| "그래디언트를 얻지 못했습니다".to_string())?;
     let data = g
         .into_data()
         .convert::<f32>()
@@ -388,7 +393,11 @@ fn auto_pick() -> DevicePref {
         for p in auto_candidates() {
             match probe(p) {
                 Ok(t) => {
-                    log::info!("자동 장치 선택: {} 검사 통과 ({:.0} ms)", label_of(p), t.as_secs_f64() * 1000.0);
+                    log::info!(
+                        "자동 장치 선택: {} 검사 통과 ({:.0} ms)",
+                        label_of(p),
+                        t.as_secs_f64() * 1000.0
+                    );
                     return p;
                 }
                 Err(e) => log::warn!("자동 장치 선택: {} 를 건너뜁니다 — {e}", label_of(p)),
@@ -430,7 +439,10 @@ pub fn resolve_cached(pref: DevicePref) -> Option<Resolved> {
         _ => None,
     };
     let (info, _) = pick.unwrap_or(list.first()?);
-    Some(Resolved { pref: info.pref, info: info.clone() })
+    Some(Resolved {
+        pref: info.pref,
+        info: info.clone(),
+    })
 }
 
 pub(crate) fn resolve_entry(pref: DevicePref) -> (DeviceInfo, Handle) {
@@ -451,7 +463,9 @@ pub(crate) fn resolve_entry(pref: DevicePref) -> (DeviceInfo, Handle) {
 fn auto_candidates() -> Vec<DevicePref> {
     let list = cache();
     let by = |k: DeviceKind| list.iter().filter(move |(d, _)| d.kind == k).map(|(d, _)| d.pref);
-    by(DeviceKind::DiscreteGpu).chain(by(DeviceKind::IntegratedGpu)).collect()
+    by(DeviceKind::DiscreteGpu)
+        .chain(by(DeviceKind::IntegratedGpu))
+        .collect()
 }
 
 fn label_of(pref: DevicePref) -> String {
@@ -519,7 +533,11 @@ mod tests {
         let again = probe(DevicePref::Cpu).unwrap();
         assert_eq!(first, again);
         assert_eq!(probe_cached(DevicePref::Cpu), Some(Ok(first)));
-        assert!(describe(DevicePref::Cpu).contains("정상"), "{}", describe(DevicePref::Cpu));
+        assert!(
+            describe(DevicePref::Cpu).contains("정상"),
+            "{}",
+            describe(DevicePref::Cpu)
+        );
     }
 
     #[test]
@@ -548,7 +566,10 @@ mod tests {
         assert_eq!(cached.pref, DevicePref::Cpu);
 
         // 없는 GPU 는 resolve 와 똑같이 CPU 로 떨어진다.
-        assert_eq!(resolve_cached(DevicePref::Gpu { index: 99 }), Some(resolve(DevicePref::Gpu { index: 99 })));
+        assert_eq!(
+            resolve_cached(DevicePref::Gpu { index: 99 }),
+            Some(resolve(DevicePref::Gpu { index: 99 }))
+        );
     }
 
     #[test]
@@ -562,7 +583,11 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(resolve(DevicePref::Auto), first);
         }
-        assert_eq!(AUTO_DECISIONS.load(Ordering::SeqCst), after_first, "Auto 탐색이 반복되었습니다");
+        assert_eq!(
+            AUTO_DECISIONS.load(Ordering::SeqCst),
+            after_first,
+            "Auto 탐색이 반복되었습니다"
+        );
 
         // 결정된 뒤에는 비차단 조회가 같은 답을 준다.
         assert_eq!(resolve_cached(DevicePref::Auto), Some(first));

@@ -27,16 +27,31 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub enum TrainEvent {
-    Started { device: String, batches_per_epoch: usize, params: usize },
-    Step { epoch: usize, step: usize, loss: f64 },
+    Started {
+        device: String,
+        batches_per_epoch: usize,
+        params: usize,
+    },
+    Step {
+        epoch: usize,
+        step: usize,
+        loss: f64,
+    },
     Epoch(EpochMetrics),
-    Checkpoint { path: PathBuf },
+    Checkpoint {
+        path: PathBuf,
+    },
     /// 진단 메시지 (도크 로그 탭).
     Log(String),
     /// 마지막 이벤트. `run` 은 최종 상태(Finished/Stopped)·지표·체크포인트 경로를 담는다.
-    Finished { run: RunRecord },
+    Finished {
+        run: RunRecord,
+    },
     /// 마지막 이벤트.
-    Failed { run: RunRecord, error: String },
+    Failed {
+        run: RunRecord,
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +83,10 @@ const CRITICAL_SEND_LIMIT: Duration = Duration::from_secs(30);
 
 /// `Step` 이벤트의 최소 간격. `NL_STEP_EVENT_MS` 로 바꿀 수 있다 (0 = 매 스텝).
 fn step_event_gap() -> Duration {
-    let ms = std::env::var("NL_STEP_EVENT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(50);
+    let ms = std::env::var("NL_STEP_EVENT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(50);
     Duration::from_millis(ms)
 }
 
@@ -83,7 +101,13 @@ struct Emitter {
 
 impl Emitter {
     fn new(tx: Sender<TrainEvent>) -> Self {
-        Self { tx, gap: step_event_gap(), last_step: None, dropped: 0, throttled: 0 }
+        Self {
+            tx,
+            gap: step_event_gap(),
+            last_step: None,
+            dropped: 0,
+            throttled: 0,
+        }
     }
 
     /// 지금 `Step` 을 내보낼 때가 되었는가. 손실 readback 도 이 주기에 맞춘다.
@@ -141,8 +165,21 @@ impl TrainHandle {
         let state = Arc::new(AtomicU8::new(RUNNING));
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        let ctl = TrainControl { state: state.clone(), stop: stop.clone(), done: done.clone() };
-        (Self { run_id, events, state, stop, done }, ctl)
+        let ctl = TrainControl {
+            state: state.clone(),
+            stop: stop.clone(),
+            done: done.clone(),
+        };
+        (
+            Self {
+                run_id,
+                events,
+                state,
+                stop,
+                done,
+            },
+            ctl,
+        )
     }
     pub fn pause(&self) {
         self.state.store(PAUSED, Ordering::SeqCst);
@@ -212,7 +249,10 @@ pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
             run_training(&req, &mut emit, &ctl, &mut run)
         })) {
             Ok(r) => r,
-            Err(e) => Err(anyhow::anyhow!("학습 스레드가 패닉했습니다: {}", panic_message(e.as_ref()))),
+            Err(e) => Err(anyhow::anyhow!(
+                "학습 스레드가 패닉했습니다: {}",
+                panic_message(e.as_ref())
+            )),
         };
         run.finished = Some(chrono::Utc::now());
         match result {
@@ -314,8 +354,11 @@ fn train_on<B: AutodiffBackend>(
         ));
     }
     if in_shapes.len() > 1 {
-        let names: Vec<String> =
-            model.input_nodes().iter().map(|id| model.graph().nodes[id].display_name()).collect();
+        let names: Vec<String> = model
+            .input_nodes()
+            .iter()
+            .map(|id| model.graph().nodes[id].display_name())
+            .collect();
         let counts: Vec<usize> = in_shapes.iter().map(|s| s.iter().product()).collect();
         emit.log(format!(
             "Input 레이어가 {} 개입니다 — 샘플을 {names:?} 순서로 {counts:?} 개씩 잘라 넣습니다.",
@@ -326,7 +369,9 @@ fn train_on<B: AutodiffBackend>(
     // 이어서 학습 — 가중치만 복원한다. 옵티마이저 모멘트·스텝 수는 새로 시작한다.
     if let Some(p) = &req.resume_from {
         let loaded = weights::load_for(p, Some(req.model.id))?;
-        model.load_host_params(&loaded).with_context(|| format!("체크포인트 적용 실패: {}", p.display()))?;
+        model
+            .load_host_params(&loaded)
+            .with_context(|| format!("체크포인트 적용 실패: {}", p.display()))?;
         emit.log(format!(
             "체크포인트에서 이어서 학습: {} (가중치만 복원 — 옵티마이저 상태와 워밍업은 처음부터입니다)",
             p.display()
@@ -335,7 +380,11 @@ fn train_on<B: AutodiffBackend>(
     model.require_grad_all();
 
     // 데이터. 이미지 리사이즈 힌트는 Input 이 하나일 때만 의미가 있다.
-    let hint = if in_shapes.len() == 1 { Some(in_shapes[0].clone()) } else { None };
+    let hint = if in_shapes.len() == 1 {
+        Some(in_shapes[0].clone())
+    } else {
+        None
+    };
     let (mut train_set, info) = data::load_all(&req.dataset, &req.base_dir, hint.as_deref())?;
     if train_set.is_empty() {
         bail!("데이터셋이 비어 있습니다");
@@ -344,8 +393,18 @@ fn train_on<B: AutodiffBackend>(
     if let Some(w) = info.empty_class_warning() {
         emit.log(w);
     }
-    let out_width: usize = model.output_sample_shapes().first().map(|s| s.iter().product()).unwrap_or(0);
-    check_target_range(&train_set, &info, cfg.loss, out_width, &model.graph().nodes[&outs[0]].display_name())?;
+    let out_width: usize = model
+        .output_sample_shapes()
+        .first()
+        .map(|s| s.iter().product())
+        .unwrap_or(0);
+    check_target_range(
+        &train_set,
+        &info,
+        cfg.loss,
+        out_width,
+        &model.graph().nodes[&outs[0]].display_name(),
+    )?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
     if req.dataset.shuffle {
@@ -437,7 +496,11 @@ fn train_on<B: AutodiffBackend>(
                 if !value.is_finite() {
                     bail!("손실이 발산했습니다 (epoch {epoch}, step {step}) — 학습률을 낮춰 보세요");
                 }
-                emit.step(TrainEvent::Step { epoch, step, loss: value });
+                emit.step(TrainEvent::Step {
+                    epoch,
+                    step,
+                    loss: value,
+                });
             } else {
                 emit.skip_step();
             }
@@ -533,7 +596,12 @@ fn train_on<B: AutodiffBackend>(
     // 중지되었어도 마지막 가중치는 남긴다.
     let final_path = req.run_dir.join("final.safetensors");
     weights::save(&final_path, req.model.id, &model.host_params())?;
-    emit.critical(TrainEvent::Checkpoint { path: final_path.clone() }, Some(ctl));
+    emit.critical(
+        TrainEvent::Checkpoint {
+            path: final_path.clone(),
+        },
+        Some(ctl),
+    );
 
     run.best_checkpoint = best_path.as_ref().map(|p| relative_to(&req.base_dir, p));
     // 조기 종료로 끝났으면 결과물은 마지막이 아니라 최적 가중치여야 한다.
@@ -551,7 +619,11 @@ fn train_on<B: AutodiffBackend>(
             emit.throttled, emit.dropped
         ));
     }
-    run.status = if stopped { RunStatus::Stopped } else { RunStatus::Finished };
+    run.status = if stopped {
+        RunStatus::Stopped
+    } else {
+        RunStatus::Finished
+    };
     Ok(())
 }
 
@@ -563,7 +635,11 @@ fn forward_first<B: AutodiffBackend>(
     train: bool,
 ) -> Result<DynTensor<B>> {
     let inputs = split_inputs(x, in_shapes)?;
-    model.forward(inputs, train)?.into_iter().next().context("출력이 없습니다")
+    model
+        .forward(inputs, train)?
+        .into_iter()
+        .next()
+        .context("출력이 없습니다")
 }
 
 /// 분류 타깃이 출력 폭 안에 있는지 **학습 시작 전에** 확인한다.
@@ -580,9 +656,15 @@ fn check_target_range(
     if loss != Loss::CrossEntropy || out_width == 0 {
         return Ok(());
     }
-    // 타깃이 one-hot 이면 폭이 곧 클래스 수라 gather 를 타지 않는다.
     let target_width: usize = set.first().map(|s| s.target.data.len()).unwrap_or(0);
     if target_width != 1 {
+        // one-hot 타깃. `gather` 를 타지는 않지만 폭이 출력과 다르면 손실 자체를 계산할 수 없다.
+        // 학습을 시작하고 첫 배치에서 터지는 대신 여기서 막는다.
+        if target_width != out_width {
+            bail!(
+                "타깃이 one-hot {target_width} 폭인데 Output '{out_name}' 은 {out_width} 유닛입니다 —                  CrossEntropy 는 둘이 같아야 합니다 (클래스 인덱스 타깃이면 폭이 1 이어야 합니다)"
+            );
+        }
         return Ok(());
     }
     let mut max = 0.0f32;
@@ -618,7 +700,10 @@ fn check_target_range(
 fn check_dataset_inputs(ds: &[usize], model_inputs: &[Vec<usize>]) -> Result<()> {
     if model_inputs.len() == 1 {
         if ds != model_inputs[0].as_slice() {
-            bail!("데이터 입력 형상 {ds:?} 이 모델 Input 형상 {:?} 과 다릅니다", model_inputs[0]);
+            bail!(
+                "데이터 입력 형상 {ds:?} 이 모델 Input 형상 {:?} 과 다릅니다",
+                model_inputs[0]
+            );
         }
         return Ok(());
     }
@@ -686,7 +771,10 @@ impl<B: burn::tensor::backend::Backend> DeviceSet<B> {
     /// `order` 순서로 행을 재배열한 사본. 순서가 원래대로면 복사하지 않는다.
     fn permuted(&self, order: &[usize], device: &B::Device) -> Result<Self> {
         if order.iter().enumerate().all(|(i, &v)| i == v) {
-            return Ok(Self { x: self.x.clone(), y: self.y.clone() });
+            return Ok(Self {
+                x: self.x.clone(),
+                y: self.y.clone(),
+            });
         }
         let data = TensorData::new(
             order.iter().map(|&i| i as i64).collect::<Vec<i64>>(),
@@ -714,7 +802,8 @@ impl<B: burn::tensor::backend::Backend> DeviceSet<B> {
 
 /// 샘플 하나가 차지하는 바이트 (f32 기준).
 fn sample_bytes(set: &[Sample]) -> usize {
-    set.first().map_or(0, |s| (s.input.data.len() + s.target.data.len()) * 4)
+    set.first()
+        .map_or(0, |s| (s.input.data.len() + s.target.data.len()) * 4)
 }
 
 fn dataset_bytes(set: &[Sample]) -> usize {
@@ -858,7 +947,13 @@ fn stack_generic<B: burn::tensor::backend::Backend>(
     for &i in idx {
         let s = &set[i];
         if s.input.shape != in_shape || s.target.shape != tg_shape {
-            bail!("샘플 형상이 서로 다릅니다: {:?}/{:?} vs {:?}/{:?}", in_shape, tg_shape, s.input.shape, s.target.shape);
+            bail!(
+                "샘플 형상이 서로 다릅니다: {:?}/{:?} vs {:?}/{:?}",
+                in_shape,
+                tg_shape,
+                s.input.shape,
+                s.target.shape
+            );
         }
         xs.extend_from_slice(&s.input.data);
         ys.extend_from_slice(&s.target.data);
@@ -900,7 +995,10 @@ fn device_loss<B: burn::tensor::backend::Backend>(
             Ok(a.try_sub(b)?.try_add(c)?.mean_all())
         }
         Loss::CrossEntropy => {
-            let logits = out.clone().into_r2().context("CrossEntropy 는 [B, C] 출력이 필요합니다")?;
+            let logits = out
+                .clone()
+                .into_r2()
+                .context("CrossEntropy 는 [B, C] 출력이 필요합니다")?;
             let classes = logits.dims()[1];
             // 클래스가 하나면 log_softmax 가 항상 0 이라 손실도 그래디언트도 0 이다.
             // 학습이 아무 일도 하지 않고 "성공" 으로 끝나므로 여기서 막는다.
@@ -923,19 +1021,23 @@ fn device_loss<B: burn::tensor::backend::Backend>(
                 let t2 = target.clone().into_r2()?;
                 Ok((logp * t2).sum_dim(1).mean().neg())
             } else {
-                bail!("CrossEntropy 타깃 마지막 차원 {} 이 클래스 수 {} 도 1 도 아닙니다", td[1], classes)
+                bail!(
+                    "CrossEntropy 타깃 마지막 차원 {} 이 클래스 수 {} 도 1 도 아닙니다",
+                    td[1],
+                    classes
+                )
             }
         }
     }
 }
 
-fn check_same_shape<B: burn::tensor::backend::Backend>(
-    a: &DynTensor<B>,
-    b: &DynTensor<B>,
-    what: &str,
-) -> Result<()> {
+fn check_same_shape<B: burn::tensor::backend::Backend>(a: &DynTensor<B>, b: &DynTensor<B>, what: &str) -> Result<()> {
     if a.dims() != b.dims() {
-        bail!("{what} 는 출력과 타깃 형상이 같아야 합니다: {:?} vs {:?}", a.dims(), b.dims());
+        bail!(
+            "{what} 는 출력과 타깃 형상이 같아야 합니다: {:?} vs {:?}",
+            a.dims(),
+            b.dims()
+        );
     }
     Ok(())
 }
@@ -974,7 +1076,11 @@ fn evaluate<B: AutodiffBackend>(
     if n == 0 {
         return Ok((0.0, None));
     }
-    let m = if metric == Metric::None { None } else { Some(hit / n as f64) };
+    let m = if metric == Metric::None {
+        None
+    } else {
+        Some(hit / n as f64)
+    };
     Ok((loss_sum / n as f64, m))
 }
 
@@ -985,7 +1091,12 @@ fn host_metric(out: &HostTensor, target: &HostTensor, metric: Metric) -> Result<
             if out.data.len() != target.data.len() {
                 bail!("MAE 지표는 출력과 타깃 원소 수가 같아야 합니다");
             }
-            let s: f64 = out.data.iter().zip(&target.data).map(|(o, t)| (*o as f64 - *t as f64).abs()).sum();
+            let s: f64 = out
+                .data
+                .iter()
+                .zip(&target.data)
+                .map(|(o, t)| (*o as f64 - *t as f64).abs())
+                .sum();
             Ok(s / out.data.len() as f64)
         }
         Metric::Accuracy => {
@@ -1024,9 +1135,14 @@ fn rows_cols(t: &HostTensor) -> Result<(usize, usize)> {
 }
 
 fn argmax(v: &[f32]) -> usize {
-    v.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m }).0
+    v.iter()
+        .enumerate()
+        .fold(
+            (0usize, f32::NEG_INFINITY),
+            |m, (i, &x)| if x > m.1 { (i, x) } else { m },
+        )
+        .0
 }
-
 
 // ───────────────────────────── 옵티마이저 ─────────────────────────────
 
@@ -1053,7 +1169,11 @@ struct Opt<B: AutodiffBackend> {
 
 impl<B: AutodiffBackend> Opt<B> {
     fn new(kind: Optimizer) -> Self {
-        Self { kind, state: BTreeMap::new(), t: 0 }
+        Self {
+            kind,
+            state: BTreeMap::new(),
+            t: 0,
+        }
     }
 
     /// 스케줄이 정한 학습률로 바꾼다 (모멘트 상태는 그대로).
@@ -1121,18 +1241,22 @@ impl<B: AutodiffBackend> Opt<B> {
                 if momentum <= 0.0 {
                     return p.try_sub(g.mul_scalar(lr));
                 }
-                let st = self
-                    .state
-                    .entry(name.to_string())
-                    .or_insert_with(|| OptState { m: g.zeros_like(), v: None });
+                let st = self.state.entry(name.to_string()).or_insert_with(|| OptState {
+                    m: g.zeros_like(),
+                    v: None,
+                });
                 let buf = st.m.clone().mul_scalar(momentum).try_add(g)?;
                 st.m = buf.clone();
                 p.try_sub(buf.mul_scalar(lr))
             }
             Optimizer::Adam { lr, beta1, beta2, eps } => self.adam(name, p, g, lr, beta1, beta2, eps, 0.0),
-            Optimizer::AdamW { lr, beta1, beta2, eps, weight_decay } => {
-                self.adam(name, p, g, lr, beta1, beta2, eps, weight_decay)
-            }
+            Optimizer::AdamW {
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => self.adam(name, p, g, lr, beta1, beta2, eps, weight_decay),
         }
     }
 
@@ -1148,21 +1272,23 @@ impl<B: AutodiffBackend> Opt<B> {
         eps: f64,
         weight_decay: f64,
     ) -> Result<DynTensor<B::InnerBackend>> {
-        let st = self
-            .state
-            .entry(name.to_string())
-            .or_insert_with(|| OptState { m: g.zeros_like(), v: Some(g.zeros_like()) });
+        let st = self.state.entry(name.to_string()).or_insert_with(|| OptState {
+            m: g.zeros_like(),
+            v: Some(g.zeros_like()),
+        });
         if st.v.is_none() {
             st.v = Some(g.zeros_like());
         }
 
-        let m = st.m.clone().mul_scalar(beta1).try_add(g.clone().mul_scalar(1.0 - beta1))?;
-        let v = st
-            .v
-            .clone()
-            .expect("바로 위에서 채웠다")
-            .mul_scalar(beta2)
-            .try_add(g.square().mul_scalar(1.0 - beta2))?;
+        let m =
+            st.m.clone()
+                .mul_scalar(beta1)
+                .try_add(g.clone().mul_scalar(1.0 - beta1))?;
+        let v =
+            st.v.clone()
+                .expect("바로 위에서 채웠다")
+                .mul_scalar(beta2)
+                .try_add(g.square().mul_scalar(1.0 - beta2))?;
         st.m = m.clone();
         st.v = Some(v.clone());
 
@@ -1172,7 +1298,11 @@ impl<B: AutodiffBackend> Opt<B> {
         let v_hat = v.mul_scalar(1.0 / bc2);
 
         // AdamW: 가중치 감쇠를 그래디언트가 아니라 파라미터에 직접 (decoupled).
-        let p = if weight_decay > 0.0 { p.mul_scalar(1.0 - lr * weight_decay) } else { p };
+        let p = if weight_decay > 0.0 {
+            p.mul_scalar(1.0 - lr * weight_decay)
+        } else {
+            p
+        };
         let step = m_hat.try_div(v_hat.sqrt().add_scalar(eps))?.mul_scalar(lr);
         p.try_sub(step)
     }
@@ -1213,10 +1343,16 @@ mod tests {
     fn dataset_input_rules() {
         // Input 하나면 형상이 정확히 같아야 한다.
         assert!(check_dataset_inputs(&[1, 8, 8], &[vec![1, 8, 8]]).is_ok());
-        assert!(check_dataset_inputs(&[64], &[vec![1, 8, 8]]).is_err(), "원소 수만 같아도 거절해야 한다");
+        assert!(
+            check_dataset_inputs(&[64], &[vec![1, 8, 8]]).is_err(),
+            "원소 수만 같아도 거절해야 한다"
+        );
         // 여럿이면 원소 수 합이 맞으면 된다 (형상은 자유).
         assert!(check_dataset_inputs(&[5], &[vec![2], vec![3]]).is_ok());
-        assert!(check_dataset_inputs(&[2, 3], &[vec![2], vec![4]]).is_ok(), "6 = 2 + 4 이므로 통과");
+        assert!(
+            check_dataset_inputs(&[2, 3], &[vec![2], vec![4]]).is_ok(),
+            "6 = 2 + 4 이므로 통과"
+        );
         assert!(check_dataset_inputs(&[2, 3], &[vec![2], vec![5]]).is_err(), "6 ≠ 2 + 5");
         let e = check_dataset_inputs(&[4], &[vec![2], vec![3]]).unwrap_err().to_string();
         assert!(e.contains("[2, 3]"), "오류에 노드별 원소 수가 없습니다: {e}");
@@ -1250,7 +1386,15 @@ mod tests {
 
     #[test]
     fn plateau_schedule_decays_after_patience() {
-        let mut c = LrController::new(&cfg_with(LrSchedule::Plateau { patience: 2, factor: 0.5 }, 1.0, 10, 0));
+        let mut c = LrController::new(&cfg_with(
+            LrSchedule::Plateau {
+                patience: 2,
+                factor: 0.5,
+            },
+            1.0,
+            10,
+            0,
+        ));
         assert_eq!(c.epoch_lr(1), 1.0);
         c.on_epoch_end(Some(1.0)); // 첫 기록
         c.on_epoch_end(Some(1.0)); // 정체 1

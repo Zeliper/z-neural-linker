@@ -13,7 +13,9 @@ pub enum DevicePref {
     Auto,
     Cpu,
     /// wgpu 어댑터 번호.
-    Gpu { index: usize },
+    Gpu {
+        index: usize,
+    },
 }
 
 impl DevicePref {
@@ -29,9 +31,23 @@ impl DevicePref {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Optimizer {
-    Sgd { lr: f64, momentum: f64 },
-    Adam { lr: f64, beta1: f64, beta2: f64, eps: f64 },
-    AdamW { lr: f64, beta1: f64, beta2: f64, eps: f64, weight_decay: f64 },
+    Sgd {
+        lr: f64,
+        momentum: f64,
+    },
+    Adam {
+        lr: f64,
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+    },
+    AdamW {
+        lr: f64,
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        weight_decay: f64,
+    },
 }
 
 impl Optimizer {
@@ -53,13 +69,27 @@ impl Optimizer {
         }
     }
     pub fn default_sgd() -> Self {
-        Optimizer::Sgd { lr: 1e-2, momentum: 0.9 }
+        Optimizer::Sgd {
+            lr: 1e-2,
+            momentum: 0.9,
+        }
     }
     pub fn default_adam() -> Self {
-        Optimizer::Adam { lr: 1e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8 }
+        Optimizer::Adam {
+            lr: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        }
     }
     pub fn default_adamw() -> Self {
-        Optimizer::AdamW { lr: 1e-3, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 1e-2 }
+        Optimizer::AdamW {
+            lr: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 1e-2,
+        }
     }
 }
 
@@ -128,7 +158,10 @@ impl LrSchedule {
         LrSchedule::None,
         LrSchedule::Step { every: 10, gamma: 0.5 },
         LrSchedule::Cosine { min_lr: 1e-5 },
-        LrSchedule::Plateau { patience: 5, factor: 0.5 },
+        LrSchedule::Plateau {
+            patience: 5,
+            factor: 0.5,
+        },
     ];
 
     pub fn label(&self) -> &'static str {
@@ -280,7 +313,10 @@ pub struct RunRecord {
 
 impl RunRecord {
     pub fn best_val_loss(&self) -> Option<f64> {
-        self.epochs.iter().filter_map(|e| e.val_loss).fold(None, |m, v| Some(m.map_or(v, |m: f64| m.min(v))))
+        self.epochs
+            .iter()
+            .filter_map(|e| e.val_loss)
+            .fold(None, |m, v| Some(m.map_or(v, |m: f64| m.min(v))))
     }
     pub fn last(&self) -> Option<&EpochMetrics> {
         self.epochs.last()

@@ -17,7 +17,13 @@ use serde::{Deserialize, Serialize};
 pub enum DataSource {
     /// CSV. 열 이름(헤더) 또는 0 기반 번호 문자열.
     /// 다입력 모델에서는 `input_cols` 순서가 Input 노드 순서로 매핑된다(위 설명 참고).
-    Csv { path: String, input_cols: Vec<String>, target_cols: Vec<String>, #[serde(default = "yes")] header: bool },
+    Csv {
+        path: String,
+        input_cols: Vec<String>,
+        target_cols: Vec<String>,
+        #[serde(default = "yes")]
+        header: bool,
+    },
     /// `path/<class>/*.png|jpg`. 클래스 = 하위 폴더 이름(정렬 순).
     ImageFolder { path: String },
     /// 빌더의 녹화 기능이 만든 폴더(`frames/*.png` + `labels.jsonl`).
@@ -39,8 +45,12 @@ pub enum SyntheticKind {
 }
 
 impl SyntheticKind {
-    pub const ALL: [SyntheticKind; 4] =
-        [SyntheticKind::Xor, SyntheticKind::Spirals, SyntheticKind::LinearRegression, SyntheticKind::Quadrants];
+    pub const ALL: [SyntheticKind; 4] = [
+        SyntheticKind::Xor,
+        SyntheticKind::Spirals,
+        SyntheticKind::LinearRegression,
+        SyntheticKind::Quadrants,
+    ];
     pub fn label(&self) -> &'static str {
         match self {
             SyntheticKind::Xor => "XOR",
@@ -98,6 +108,12 @@ pub struct DatasetInfo {
     pub target_shape: Vec<usize>,
     #[serde(default)]
     pub classes: Vec<String>,
+    /// `samples` 가 실제로 센 값이 아니라 **추정치**인가.
+    ///
+    /// 큰 CSV 는 스캔할 때 전부 읽지 않고 앞부분과 파일 크기로 행 수를 어림한다. 정확한 값이
+    /// 필요하면 적재(`load_all`)를 거쳐야 한다. UI 는 이 값이 참이면 "약" 을 붙여 보여 주면 된다.
+    #[serde(default)]
+    pub samples_estimated: bool,
     /// `classes` 중 샘플이 하나도 없는 클래스의 인덱스 (오름차순).
     ///
     /// 녹화 폴더는 라벨을 `0..=max` 로 잡기 때문에 중간이 비어 있을 수 있고, 이미지 폴더는 빈 클래스
@@ -120,12 +136,23 @@ impl DatasetInfo {
                 None => i.to_string(),
             })
             .collect();
-        Some(format!("샘플이 하나도 없는 클래스: {} — 이 클래스는 학습되지 않습니다", names.join(", ")))
+        Some(format!(
+            "샘플이 하나도 없는 클래스: {} — 이 클래스는 학습되지 않습니다",
+            names.join(", ")
+        ))
     }
 }
 
 impl DatasetSpec {
     pub fn new(name: impl Into<String>, source: DataSource) -> Self {
-        Self { id: DatasetId::new(), name: name.into(), source, payload: None, split: Split::Ratio, shuffle: true, cached_info: None }
+        Self {
+            id: DatasetId::new(),
+            name: name.into(),
+            source,
+            payload: None,
+            split: Split::Ratio,
+            shuffle: true,
+            cached_info: None,
+        }
     }
 }

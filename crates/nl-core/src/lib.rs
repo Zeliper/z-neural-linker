@@ -8,8 +8,8 @@ pub mod ids;
 pub mod model;
 pub mod ops;
 pub mod payload;
-pub mod sample;
 pub mod pipeline;
+pub mod sample;
 pub mod shape;
 pub mod train;
 pub mod validate;
@@ -24,9 +24,11 @@ pub use model::{
 };
 pub use ops::{apply_op, apply_ops, diff_ops, inverse_ops, Op};
 pub use payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
-pub use sample::{api_pipeline, new_project, quadrants_cnn_project, xor_project, SampleFactory, API_BIND, API_PATH, SAMPLES};
-pub use pipeline::{Link, Logic, PNode, PNodeKind, Pipeline, Sink, Source, InputAction, Region};
 pub use pipeline::{host_of_bind, is_loopback_bind, new_token, TOKEN_LEN};
+pub use pipeline::{InputAction, Link, Logic, PNode, PNodeKind, Pipeline, Region, Sink, Source};
+pub use sample::{
+    api_pipeline, new_project, quadrants_cnn_project, xor_project, SampleFactory, API_BIND, API_PATH, SAMPLES,
+};
 pub use shape::{infer, Dim, GraphError, Shape, ShapeReport, MAX_RANK};
 pub use train::{DevicePref, EpochMetrics, Loss, LrSchedule, Metric, Optimizer, RunRecord, RunStatus, TrainConfig};
 pub use validate::{validate, Issue, Severity};

@@ -3,9 +3,7 @@
 //! 저장 형식은 `"{node_id}.{part}"` 이름의 f32 텐서 모음이고, 헤더 메타데이터에 모델 id 와 포맷 표시를 남긴다.
 //! burn 의 `Record` 파생을 쓰지 않는 이유는 그래프가 런타임에 정의되어 정적 모듈 타입이 없기 때문이다.
 
-use crate::limits::{
-    check_file_size, checked_elems, MAX_PARAM_NAME_LEN, MAX_WEIGHTS_BYTES, MAX_WEIGHTS_TENSORS,
-};
+use crate::limits::{check_file_size, checked_elems, MAX_PARAM_NAME_LEN, MAX_WEIGHTS_BYTES, MAX_WEIGHTS_TENSORS};
 use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
 use nl_core::ModelId;
@@ -67,28 +65,36 @@ pub fn load(path: &Path) -> Result<BTreeMap<String, HostTensor>> {
 /// [`load`] 에 모델 id 확인을 더한 것.
 pub fn load_for(path: &Path, expect_model: Option<ModelId>) -> Result<BTreeMap<String, HostTensor>> {
     check_file_size(path, MAX_WEIGHTS_BYTES, "체크포인트")?;
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("체크포인트 열기 실패: {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("체크포인트 열기 실패: {}", path.display()))?;
     // SAFETY: 읽기 전용 매핑. 읽는 동안 다른 프로세스가 파일을 줄이면 SIGBUS 가 날 수 있는데,
     // 이는 `std::fs::read` 로도 막을 수 없는 동시 수정이며 우리 쓰기는 tmp + rename 으로 원자적이다.
-    let mapped = unsafe { memmap2::Mmap::map(&file) }
-        .with_context(|| format!("체크포인트 매핑 실패: {}", path.display()))?;
+    let mapped =
+        unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("체크포인트 매핑 실패: {}", path.display()))?;
     let buf: &[u8] = &mapped;
 
     let st = safetensors::SafeTensors::deserialize(buf)
         .map_err(|e| anyhow::anyhow!("safetensors 파싱 실패 ({}): {e}", path.display()))?;
     if st.len() > MAX_WEIGHTS_TENSORS {
-        bail!("체크포인트의 텐서 {} 개가 상한 {MAX_WEIGHTS_TENSORS} 를 넘습니다", st.len());
+        bail!(
+            "체크포인트의 텐서 {} 개가 상한 {MAX_WEIGHTS_TENSORS} 를 넘습니다",
+            st.len()
+        );
     }
     check_header(buf, path, expect_model)?;
 
     let mut out = BTreeMap::new();
     for (name, view) in st.iter() {
         if name.len() > MAX_PARAM_NAME_LEN {
-            bail!("파라미터 이름이 {} 바이트로 상한 {MAX_PARAM_NAME_LEN} 를 넘습니다", name.len());
+            bail!(
+                "파라미터 이름이 {} 바이트로 상한 {MAX_PARAM_NAME_LEN} 를 넘습니다",
+                name.len()
+            );
         }
         if view.dtype() != Dtype::F32 {
-            bail!("파라미터 '{name}' 의 dtype 이 {:?} 입니다 — f32 만 지원합니다", view.dtype());
+            bail!(
+                "파라미터 '{name}' 의 dtype 이 {:?} 입니다 — f32 만 지원합니다",
+                view.dtype()
+            );
         }
         let shape = view.shape().to_vec();
         let want = checked_elems(&shape, &format!("파라미터 '{name}'"))?;
@@ -116,7 +122,10 @@ fn check_header(buf: &[u8], path: &Path, expect_model: Option<ModelId>) -> Resul
     };
     if let Some(fmt) = map.get("format") {
         if fmt != WEIGHTS_FORMAT {
-            log::warn!("{}: format 이 '{fmt}' 입니다 (기대값 '{WEIGHTS_FORMAT}') — 그대로 읽습니다", path.display());
+            log::warn!(
+                "{}: format 이 '{fmt}' 입니다 (기대값 '{WEIGHTS_FORMAT}') — 그대로 읽습니다",
+                path.display()
+            );
         }
     }
     let (Some(want), Some(got)) = (expect_model, map.get("model")) else {
@@ -126,7 +135,10 @@ fn check_header(buf: &[u8], path: &Path, expect_model: Option<ModelId>) -> Resul
         return Ok(());
     }
     if std::env::var("NL_WEIGHTS_FORCE").as_deref() == Ok("1") {
-        log::warn!("{}: 다른 모델({got})의 체크포인트지만 NL_WEIGHTS_FORCE=1 이라 그대로 읽습니다", path.display());
+        log::warn!(
+            "{}: 다른 모델({got})의 체크포인트지만 NL_WEIGHTS_FORCE=1 이라 그대로 읽습니다",
+            path.display()
+        );
         return Ok(());
     }
     bail!(
@@ -141,14 +153,16 @@ pub fn summary(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
     check_file_size(path, MAX_WEIGHTS_BYTES, "체크포인트")?;
     // mmap 으로 매핑만 한다 — 헤더 페이지만 실제로 읽히므로 3 GB 파일도 통째로 메모리에 올리지 않는다.
     // (safetensors 의 `read_metadata` 는 마지막 오프셋이 파일 끝과 맞는지 확인하므로 전체 슬라이스가 필요하다.)
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("체크포인트 열기 실패: {}", path.display()))?;
-    let mapped = unsafe { memmap2::Mmap::map(&file) }
-        .with_context(|| format!("체크포인트 매핑 실패: {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("체크포인트 열기 실패: {}", path.display()))?;
+    let mapped =
+        unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("체크포인트 매핑 실패: {}", path.display()))?;
     let (_, meta) = safetensors::SafeTensors::read_metadata(&mapped)
         .map_err(|e| anyhow::anyhow!("safetensors 헤더 파싱 실패 ({}): {e}", path.display()))?;
-    let mut out: Vec<(String, Vec<usize>)> =
-        meta.tensors().into_iter().map(|(name, info)| (name, info.shape.clone())).collect();
+    let mut out: Vec<(String, Vec<usize>)> = meta
+        .tensors()
+        .into_iter()
+        .map(|(name, info)| (name, info.shape.clone()))
+        .collect();
     out.sort();
     Ok(out)
 }
@@ -163,7 +177,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("w.safetensors");
         let mut p = BTreeMap::new();
-        p.insert("a.weight".to_string(), HostTensor::new(vec![2, 3], (0..6).map(|i| i as f32).collect()));
+        p.insert(
+            "a.weight".to_string(),
+            HostTensor::new(vec![2, 3], (0..6).map(|i| i as f32).collect()),
+        );
         p.insert("a.bias".to_string(), HostTensor::new(vec![3], vec![-1.5, 0.0, 2.25]));
         save(&path, ModelId::from_u128(7), &p).unwrap();
 
@@ -177,7 +194,10 @@ mod tests {
         assert!(load_for(&path, Some(ModelId::from_u128(7))).is_ok());
 
         let s = summary(&path).unwrap();
-        assert_eq!(s, vec![("a.bias".to_string(), vec![3]), ("a.weight".to_string(), vec![2, 3])]);
+        assert_eq!(
+            s,
+            vec![("a.bias".to_string(), vec![3]), ("a.weight".to_string(), vec![2, 3])]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

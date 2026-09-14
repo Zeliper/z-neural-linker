@@ -11,8 +11,8 @@ use crate::payload::{FieldKind, PayloadSpec};
 use crate::pipeline::{PNode, PNodeKind, Sink, Source};
 use crate::train::{Loss, Metric, Optimizer, TrainConfig};
 use crate::{
-    Act, BuildSpec, BuildTarget, DatasetId, DevicePref, Edge, EdgeId, LayerKind, Link, LinkId, ModelDef, ModelId,
-    Node, NodeId, PNodeId, PayloadId, Pipeline, PipelineId, Port, Project, ProjectId, Widget, WidgetId, WidgetKind,
+    Act, BuildSpec, BuildTarget, DatasetId, DevicePref, Edge, EdgeId, LayerKind, Link, LinkId, ModelDef, ModelId, Node,
+    NodeId, PNodeId, PayloadId, Pipeline, PipelineId, Port, Project, ProjectId, Widget, WidgetId, WidgetKind,
 };
 
 /// 추론 API 파이프라인이 여는 주소. 배포 앱을 바깥 프로그램이 호출하는 입구다.
@@ -49,11 +49,23 @@ fn chain(model: &mut ModelDef, base: u128, layers: &[(LayerKind, &str)]) {
         let id = NodeId::from_u128(base + i as u128);
         model.graph.nodes.insert(
             id,
-            Node { id, name: (*name).to_string(), kind: kind.clone(), pos: [80.0 + i as f32 * 260.0, 160.0] },
+            Node {
+                id,
+                name: (*name).to_string(),
+                kind: kind.clone(),
+                pos: [80.0 + i as f32 * 260.0, 160.0],
+            },
         );
         if let Some(from) = prev {
             let eid = EdgeId::from_u128(base + 1000 + i as u128);
-            model.graph.edges.insert(eid, Edge { id: eid, from, to: Port::new(id, 0) });
+            model.graph.edges.insert(
+                eid,
+                Edge {
+                    id: eid,
+                    from,
+                    to: Port::new(id, 0),
+                },
+            );
         }
         prev = Some(id);
     }
@@ -76,7 +88,11 @@ fn pnode(id: u128, kind: PNodeKind, name: &str, col: usize, row: f32) -> PNode {
 }
 
 fn link(pl: &mut Pipeline, id: u128, from: PNodeId, to: PNodeId) {
-    let l = Link { id: LinkId::from_u128(id), from, to };
+    let l = Link {
+        id: LinkId::from_u128(id),
+        from,
+        to,
+    };
     pl.links.insert(l.id, l);
 }
 
@@ -97,19 +113,50 @@ pub fn api_pipeline(base: u128, bind: &str, model: ModelId, payload: PayloadId) 
         PNodeKind::Source {
             // 샘플은 루프백(127.0.0.1)에만 묶으므로 토큰 없이도 열린다. 바깥에서 닿는 주소로 바꾸려면
             // 토큰을 함께 넣어야 한다 — 그러지 않으면 실행기가 거부한다.
-            source: Source::HttpServer { bind: bind.into(), path: API_PATH.into(), token: None },
+            source: Source::HttpServer {
+                bind: bind.into(),
+                path: API_PATH.into(),
+                token: None,
+            },
         },
         "요청",
         0,
         120.0,
     );
-    let infer = pnode(base + 2, PNodeKind::Model { model, payload: Some(payload) }, "추론", 1, 120.0);
-    let reply = pnode(base + 3, PNodeKind::Sink { sink: Sink::HttpReply { server: server.id } }, "응답", 2, 120.0);
+    let infer = pnode(
+        base + 2,
+        PNodeKind::Model {
+            model,
+            payload: Some(payload),
+        },
+        "추론",
+        1,
+        120.0,
+    );
+    let reply = pnode(
+        base + 3,
+        PNodeKind::Sink {
+            sink: Sink::HttpReply { server: server.id },
+        },
+        "응답",
+        2,
+        120.0,
+    );
     for n in [server, infer, reply] {
         pl.nodes.insert(n.id, n);
     }
-    link(&mut pl, base + 0x100, PNodeId::from_u128(base + 1), PNodeId::from_u128(base + 2));
-    link(&mut pl, base + 0x101, PNodeId::from_u128(base + 2), PNodeId::from_u128(base + 3));
+    link(
+        &mut pl,
+        base + 0x100,
+        PNodeId::from_u128(base + 1),
+        PNodeId::from_u128(base + 2),
+    );
+    link(
+        &mut pl,
+        base + 0x101,
+        PNodeId::from_u128(base + 2),
+        PNodeId::from_u128(base + 3),
+    );
     pl
 }
 
@@ -127,8 +174,13 @@ pub fn xor_project() -> Project {
     let mut payload = PayloadSpec::tabular("XOR 표", 2, 2);
     payload.id = PayloadId::from_u128(0x2_0001);
 
-    let mut dataset =
-        DatasetSpec::new("XOR 합성 1000", DataSource::Synthetic { kind: SyntheticKind::Xor, samples: 1000 });
+    let mut dataset = DatasetSpec::new(
+        "XOR 합성 1000",
+        DataSource::Synthetic {
+            kind: SyntheticKind::Xor,
+            samples: 1000,
+        },
+    );
     dataset.id = DatasetId::from_u128(0x2_0002);
     dataset.payload = Some(payload.id);
 
@@ -141,9 +193,21 @@ pub fn xor_project() -> Project {
         0x2_1000,
         &[
             (LayerKind::Input { shape: vec![2] }, "입력"),
-            (LayerKind::Linear { out_features: 16, bias: true }, "은닉"),
+            (
+                LayerKind::Linear {
+                    out_features: 16,
+                    bias: true,
+                },
+                "은닉",
+            ),
             (LayerKind::Activation { act: Act::Relu }, ""),
-            (LayerKind::Linear { out_features: 2, bias: true }, "분류"),
+            (
+                LayerKind::Linear {
+                    out_features: 2,
+                    bias: true,
+                },
+                "분류",
+            ),
             (LayerKind::Output, "출력"),
         ],
     );
@@ -165,22 +229,35 @@ pub fn xor_project() -> Project {
     p.gui.window.height = 240.0;
     p.gui.add(with_id(
         WidgetId::from_u128(0x2_2000),
-        WidgetKind::Label { text: "XOR 분류기".into() },
+        WidgetKind::Label {
+            text: "XOR 분류기".into(),
+        },
         [24.0, 20.0, 240.0, 28.0],
         None,
     ));
-    p.gui.add(with_id(value_widget, WidgetKind::Value { prefix: "출력 ".into() }, [24.0, 64.0, 240.0, 48.0], None));
+    p.gui.add(with_id(
+        value_widget,
+        WidgetKind::Value {
+            prefix: "출력 ".into()
+        },
+        [24.0, 64.0, 240.0, 48.0],
+        None,
+    ));
     p.gui.add(with_id(
         WidgetId::from_u128(0x2_2002),
         WidgetKind::Button { text: "시작".into() },
         [24.0, 136.0, 110.0, 32.0],
-        Some(Binding::Action { action: BuiltinAction::StartPipeline }),
+        Some(Binding::Action {
+            action: BuiltinAction::StartPipeline,
+        }),
     ));
     p.gui.add(with_id(
         WidgetId::from_u128(0x2_2003),
         WidgetKind::Button { text: "정지".into() },
         [152.0, 136.0, 110.0, 32.0],
-        Some(Binding::Action { action: BuiltinAction::StopPipeline }),
+        Some(Binding::Action {
+            action: BuiltinAction::StopPipeline,
+        }),
     ));
 
     // ── 파이프라인 ①: Manual → 모델 → 로그, 그리고 타이머 → 위젯 ──
@@ -188,12 +265,31 @@ pub fn xor_project() -> Project {
     pl.id = PipelineId::from_u128(0x2_3000);
     pl.tick_hz = 20.0;
     let manual = pnode(0x2_3001, PNodeKind::Source { source: Source::Manual }, "입력", 0, 120.0);
-    let infer = pnode(0x2_3002, PNodeKind::Model { model: m.id, payload: Some(payload.id) }, "추론", 1, 120.0);
+    let infer = pnode(
+        0x2_3002,
+        PNodeKind::Model {
+            model: m.id,
+            payload: Some(payload.id),
+        },
+        "추론",
+        1,
+        120.0,
+    );
     let logsink = pnode(0x2_3003, PNodeKind::Sink { sink: Sink::Log }, "로그", 2, 120.0);
-    let timer = pnode(0x2_3004, PNodeKind::Source { source: Source::Timer { interval_ms: 500 } }, "박자", 0, 300.0);
+    let timer = pnode(
+        0x2_3004,
+        PNodeKind::Source {
+            source: Source::Timer { interval_ms: 500 },
+        },
+        "박자",
+        0,
+        300.0,
+    );
     let widget_sink = pnode(
         0x2_3005,
-        PNodeKind::Sink { sink: Sink::GuiWidget { widget: value_widget } },
+        PNodeKind::Sink {
+            sink: Sink::GuiWidget { widget: value_widget },
+        },
         "화면 표시",
         1,
         300.0,
@@ -201,9 +297,24 @@ pub fn xor_project() -> Project {
     for n in [manual, infer, logsink, timer, widget_sink] {
         pl.nodes.insert(n.id, n);
     }
-    link(&mut pl, 0x2_3100, PNodeId::from_u128(0x2_3001), PNodeId::from_u128(0x2_3002));
-    link(&mut pl, 0x2_3101, PNodeId::from_u128(0x2_3002), PNodeId::from_u128(0x2_3003));
-    link(&mut pl, 0x2_3102, PNodeId::from_u128(0x2_3004), PNodeId::from_u128(0x2_3005));
+    link(
+        &mut pl,
+        0x2_3100,
+        PNodeId::from_u128(0x2_3001),
+        PNodeId::from_u128(0x2_3002),
+    );
+    link(
+        &mut pl,
+        0x2_3101,
+        PNodeId::from_u128(0x2_3002),
+        PNodeId::from_u128(0x2_3003),
+    );
+    link(
+        &mut pl,
+        0x2_3102,
+        PNodeId::from_u128(0x2_3004),
+        PNodeId::from_u128(0x2_3005),
+    );
 
     // ── 파이프라인 ②: HTTP 요청 → 모델 → HTTP 응답 ──
     let api = api_pipeline(0x2_4000, API_BIND, m.id, payload.id);
@@ -249,11 +360,20 @@ pub fn quadrants_cnn_project() -> Project {
     payload.id = PayloadId::from_u128(0x3_0001);
     // 합성 데이터는 이미 1채널이다 — 인코더도 흑백으로 맞춘다.
     if let Some(f) = payload.inputs.first_mut() {
-        f.kind = FieldKind::Image { width: 8, height: 8, channels: 1 };
+        f.kind = FieldKind::Image {
+            width: 8,
+            height: 8,
+            channels: 1,
+        };
     }
 
-    let mut dataset =
-        DatasetSpec::new("사분면 합성 2000", DataSource::Synthetic { kind: SyntheticKind::Quadrants, samples: 2000 });
+    let mut dataset = DatasetSpec::new(
+        "사분면 합성 2000",
+        DataSource::Synthetic {
+            kind: SyntheticKind::Quadrants,
+            samples: 2000,
+        },
+    );
     dataset.id = DatasetId::from_u128(0x3_0002);
     dataset.payload = Some(payload.id);
 
@@ -267,13 +387,31 @@ pub fn quadrants_cnn_project() -> Project {
         &[
             (LayerKind::Input { shape: vec![1, 8, 8] }, "입력"),
             (
-                LayerKind::Conv2d { out_channels: 8, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true },
+                LayerKind::Conv2d {
+                    out_channels: 8,
+                    kernel: [3, 3],
+                    stride: [1, 1],
+                    padding: [1, 1],
+                    bias: true,
+                },
                 "특징",
             ),
             (LayerKind::Activation { act: Act::Relu }, ""),
-            (LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] }, ""),
+            (
+                LayerKind::MaxPool2d {
+                    kernel: [2, 2],
+                    stride: [2, 2],
+                },
+                "",
+            ),
             (LayerKind::Flatten, ""),
-            (LayerKind::Linear { out_features: 4, bias: true }, "분류"),
+            (
+                LayerKind::Linear {
+                    out_features: 4,
+                    bias: true,
+                },
+                "분류",
+            ),
             (LayerKind::Output, "출력"),
         ],
     );
@@ -299,15 +437,24 @@ pub fn quadrants_cnn_project() -> Project {
 pub type SampleFactory = fn() -> Project;
 
 /// "샘플 열기" 메뉴 항목: (이름, 만드는 함수).
-pub const SAMPLES: [(&str, SampleFactory); 2] =
-    [("XOR 분류 (MLP)", xor_project), ("사분면 분류 (CNN)", quadrants_cnn_project)];
+pub const SAMPLES: [(&str, SampleFactory); 2] = [
+    ("XOR 분류 (MLP)", xor_project),
+    ("사분면 분류 (CNN)", quadrants_cnn_project),
+];
 
 /// "새로 만들기" 가 주는 빈 뼈대: 모델 하나에 Input → Output 만.
 /// (레이어는 캔버스 빈 곳 우클릭 → 팔레트로 사이에 끼워 넣는다)
 pub fn new_project() -> Project {
     let mut p = Project::new("새 프로젝트");
     let mut m = ModelDef::new("모델");
-    chain(&mut m, 0x1_0000, &[(LayerKind::Input { shape: vec![4] }, "입력"), (LayerKind::Output, "출력")]);
+    chain(
+        &mut m,
+        0x1_0000,
+        &[
+            (LayerKind::Input { shape: vec![4] }, "입력"),
+            (LayerKind::Output, "출력"),
+        ],
+    );
     // 사이에 레이어를 넣을 자리를 비워 둔다.
     if let Some(n) = m.graph.nodes.get_mut(&NodeId::from_u128(0x1_0001)) {
         n.pos = [700.0, 160.0];
@@ -329,8 +476,10 @@ mod tests {
                 let rep = shape::infer(&m.graph);
                 assert!(rep.is_ok(), "{name}/{}: {:?}", m.name, rep.errors);
             }
-            let errors: Vec<_> =
-                validate(&p).into_iter().filter(|i| i.severity == Severity::Error).collect();
+            let errors: Vec<_> = validate(&p)
+                .into_iter()
+                .filter(|i| i.severity == Severity::Error)
+                .collect();
             assert!(errors.is_empty(), "{name}: {errors:?}");
         }
     }
@@ -409,7 +558,11 @@ mod tests {
         let pay = &p.payloads[&PayloadId::from_u128(0x3_0001)];
         assert_eq!(pay.name, "사분면 이미지");
         match &pay.inputs[0].kind {
-            FieldKind::Image { width, height, channels } => {
+            FieldKind::Image {
+                width,
+                height,
+                channels,
+            } => {
                 assert_eq!((*width, *height, *channels), (8, 8, 1));
             }
             other => panic!("이미지 필드가 아니다: {other:?}"),
@@ -432,11 +585,23 @@ mod tests {
             let server = api
                 .nodes
                 .values()
-                .find(|n| matches!(n.kind, PNodeKind::Source { source: Source::HttpServer { .. } }))
+                .find(|n| {
+                    matches!(
+                        n.kind,
+                        PNodeKind::Source {
+                            source: Source::HttpServer { .. }
+                        }
+                    )
+                })
                 .unwrap_or_else(|| panic!("{name}: HTTP 서버 노드가 없다"));
             match &server.kind {
-                PNodeKind::Source { source: Source::HttpServer { bind, path, token } } => {
-                    assert!([API_BIND, API_BIND_CNN].contains(&bind.as_str()), "{name}: 모르는 주소 {bind}");
+                PNodeKind::Source {
+                    source: Source::HttpServer { bind, path, token },
+                } => {
+                    assert!(
+                        [API_BIND, API_BIND_CNN].contains(&bind.as_str()),
+                        "{name}: 모르는 주소 {bind}"
+                    );
                     assert_eq!(path, API_PATH);
                     assert!(token.is_none(), "샘플은 루프백이라 토큰 없이 연다");
                     assert!(crate::pipeline::is_loopback_bind(bind), "샘플 주소가 루프백이 아니다");
@@ -447,10 +612,19 @@ mod tests {
             let reply = api
                 .nodes
                 .values()
-                .find(|n| matches!(n.kind, PNodeKind::Sink { sink: Sink::HttpReply { .. } }))
+                .find(|n| {
+                    matches!(
+                        n.kind,
+                        PNodeKind::Sink {
+                            sink: Sink::HttpReply { .. }
+                        }
+                    )
+                })
                 .unwrap_or_else(|| panic!("{name}: HTTP 응답 노드가 없다"));
             match &reply.kind {
-                PNodeKind::Sink { sink: Sink::HttpReply { server: target } } => assert_eq!(*target, server.id),
+                PNodeKind::Sink {
+                    sink: Sink::HttpReply { server: target },
+                } => assert_eq!(*target, server.id),
                 _ => unreachable!(),
             }
         }
@@ -465,7 +639,9 @@ mod tests {
             api.nodes
                 .values()
                 .find_map(|n| match &n.kind {
-                    PNodeKind::Source { source: Source::HttpServer { bind, .. } } => Some(bind.clone()),
+                    PNodeKind::Source {
+                        source: Source::HttpServer { bind, .. },
+                    } => Some(bind.clone()),
                     _ => None,
                 })
                 .expect("HTTP 서버 노드")

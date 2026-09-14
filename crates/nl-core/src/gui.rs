@@ -15,25 +15,52 @@ pub struct WindowSpec {
 
 impl Default for WindowSpec {
     fn default() -> Self {
-        Self { title: "Neural Linker App".into(), width: 800.0, height: 600.0, dark: true }
+        Self {
+            title: "Neural Linker App".into(),
+            width: 800.0,
+            height: 600.0,
+            dark: true,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WidgetKind {
-    Label { text: String },
-    Button { text: String },
-    Toggle { text: String },
-    Slider { min: f32, max: f32, #[serde(default)] value: f32 },
-    TextInput { #[serde(default)] hint: String },
+    Label {
+        text: String,
+    },
+    Button {
+        text: String,
+    },
+    Toggle {
+        text: String,
+    },
+    Slider {
+        min: f32,
+        max: f32,
+        #[serde(default)]
+        value: f32,
+    },
+    TextInput {
+        #[serde(default)]
+        hint: String,
+    },
     /// 바인딩된 이미지(화면 캡처·모델 입력 미리보기) 표시.
     Image,
     /// 바인딩된 시계열 값 플롯.
-    Plot { #[serde(default = "d_pts")] max_points: usize },
+    Plot {
+        #[serde(default = "d_pts")]
+        max_points: usize,
+    },
     /// 바인딩된 값을 큰 글씨로 (분류 결과 등).
-    Value { #[serde(default)] prefix: String },
-    Group { title: String },
+    Value {
+        #[serde(default)]
+        prefix: String,
+    },
+    Group {
+        title: String,
+    },
 }
 
 fn d_pts() -> usize {
@@ -46,7 +73,11 @@ impl WidgetKind {
             WidgetKind::Label { text: "라벨".into() },
             WidgetKind::Button { text: "버튼".into() },
             WidgetKind::Toggle { text: "토글".into() },
-            WidgetKind::Slider { min: 0.0, max: 1.0, value: 0.5 },
+            WidgetKind::Slider {
+                min: 0.0,
+                max: 1.0,
+                value: 0.5,
+            },
             WidgetKind::TextInput { hint: String::new() },
             WidgetKind::Image,
             WidgetKind::Plot { max_points: 300 },
@@ -107,7 +138,14 @@ pub struct Widget {
 
 impl Widget {
     pub fn new(kind: WidgetKind, rect: [f32; 4]) -> Self {
-        Self { id: WidgetId::new(), kind, rect, binding: None, parent: None, z: 0 }
+        Self {
+            id: WidgetId::new(),
+            kind,
+            rect,
+            binding: None,
+            parent: None,
+            z: 0,
+        }
     }
 }
 

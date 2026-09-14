@@ -42,17 +42,24 @@ impl Shape {
     }
     /// 샘플 형상(배치 제외).
     pub fn sample(&self) -> Vec<usize> {
-        self.0.iter().skip(1).map(|d| match d {
-            Dim::Fixed(n) => *n,
-            Dim::Batch => 1,
-        }).collect()
+        self.0
+            .iter()
+            .skip(1)
+            .map(|d| match d {
+                Dim::Fixed(n) => *n,
+                Dim::Batch => 1,
+            })
+            .collect()
     }
     /// 배치 크기를 넣은 구체 형상.
     pub fn concrete(&self, batch: usize) -> Vec<usize> {
-        self.0.iter().map(|d| match d {
-            Dim::Fixed(n) => *n,
-            Dim::Batch => batch,
-        }).collect()
+        self.0
+            .iter()
+            .map(|d| match d {
+                Dim::Fixed(n) => *n,
+                Dim::Batch => batch,
+            })
+            .collect()
     }
     pub fn rank(&self) -> usize {
         self.0.len()
@@ -135,7 +142,12 @@ pub fn topo_order(graph: &Graph) -> (Vec<NodeId>, BTreeSet<NodeId>) {
     let mut order = Vec::with_capacity(graph.nodes.len());
     while let Some(n) = queue.pop_front() {
         order.push(n);
-        let mut outs: Vec<NodeId> = graph.edges.values().filter(|e| e.from == n).map(|e| e.to.node).collect();
+        let mut outs: Vec<NodeId> = graph
+            .edges
+            .values()
+            .filter(|e| e.from == n)
+            .map(|e| e.to.node)
+            .collect();
         outs.sort();
         for o in outs {
             if let Some(d) = indeg.get_mut(&o) {
@@ -153,7 +165,10 @@ pub fn topo_order(graph: &Graph) -> (Vec<NodeId>, BTreeSet<NodeId>) {
 
 pub fn infer(graph: &Graph) -> ShapeReport {
     let (order, cycle_nodes) = topo_order(graph);
-    let mut rep = ShapeReport { cycle_nodes: cycle_nodes.clone(), ..Default::default() };
+    let mut rep = ShapeReport {
+        cycle_nodes: cycle_nodes.clone(),
+        ..Default::default()
+    };
     for &n in &cycle_nodes {
         rep.errors.insert(n, GraphError::Cycle);
     }
@@ -235,10 +250,9 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             }
             checked(Shape::from_sample(shape))
         }
-        LayerKind::Output
-        | LayerKind::Activation { .. }
-        | LayerKind::Dropout { .. }
-        | LayerKind::LayerNorm { .. } => one(),
+        LayerKind::Output | LayerKind::Activation { .. } | LayerKind::Dropout { .. } | LayerKind::LayerNorm { .. } => {
+            one()
+        }
         LayerKind::BatchNorm { .. } => {
             let s = one()?;
             if s.rank() < 2 {
@@ -257,7 +271,13 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             *s.0.last_mut().unwrap() = Dim::Fixed(*out_features);
             Ok(s)
         }
-        LayerKind::Conv2d { out_channels, kernel, stride, padding, .. } => {
+        LayerKind::Conv2d {
+            out_channels,
+            kernel,
+            stride,
+            padding,
+            ..
+        } => {
             if *out_channels == 0 {
                 return Err(invalid("out_channels 는 0 일 수 없음"));
             }
@@ -283,7 +303,9 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
         LayerKind::GlobalAvgPool => {
             let s = one()?;
             if s.rank() != 4 {
-                return Err(mismatch(format!("GlobalAvgPool 은 [B, C, H, W] 입력이 필요 (지금 {s})")));
+                return Err(mismatch(format!(
+                    "GlobalAvgPool 은 [B, C, H, W] 입력이 필요 (지금 {s})"
+                )));
             }
             Ok(Shape::from_sample(&[s.sample()[0]]))
         }
@@ -318,11 +340,17 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             let a = inputs[0].sample();
             let b = inputs[1].sample();
             if a.len() != b.len() || *dim >= a.len() {
-                return Err(mismatch(format!("랭크가 다르거나 dim {dim} 이 범위 밖: {} vs {}", inputs[0], inputs[1])));
+                return Err(mismatch(format!(
+                    "랭크가 다르거나 dim {dim} 이 범위 밖: {} vs {}",
+                    inputs[0], inputs[1]
+                )));
             }
             for i in 0..a.len() {
                 if i != *dim && a[i] != b[i] {
-                    return Err(mismatch(format!("dim {dim} 외의 차원이 다름: {} vs {}", inputs[0], inputs[1])));
+                    return Err(mismatch(format!(
+                        "dim {dim} 외의 차원이 다름: {} vs {}",
+                        inputs[0], inputs[1]
+                    )));
                 }
             }
             let mut out = a.clone();
@@ -357,9 +385,21 @@ mod tests {
     fn mlp_chain() {
         let mut g = Graph::default();
         let i = add(&mut g, LayerKind::Input { shape: vec![4] });
-        let l1 = add(&mut g, LayerKind::Linear { out_features: 8, bias: true });
+        let l1 = add(
+            &mut g,
+            LayerKind::Linear {
+                out_features: 8,
+                bias: true,
+            },
+        );
         let a = add(&mut g, LayerKind::Activation { act: Act::Relu });
-        let l2 = add(&mut g, LayerKind::Linear { out_features: 2, bias: true });
+        let l2 = add(
+            &mut g,
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+        );
         let o = add(&mut g, LayerKind::Output);
         link(&mut g, i, l1);
         link(&mut g, l1, a);
@@ -375,10 +415,31 @@ mod tests {
     fn cnn_chain() {
         let mut g = Graph::default();
         let i = add(&mut g, LayerKind::Input { shape: vec![1, 28, 28] });
-        let c = add(&mut g, LayerKind::Conv2d { out_channels: 8, kernel: [3, 3], stride: [1, 1], padding: [1, 1], bias: true });
-        let p = add(&mut g, LayerKind::MaxPool2d { kernel: [2, 2], stride: [2, 2] });
+        let c = add(
+            &mut g,
+            LayerKind::Conv2d {
+                out_channels: 8,
+                kernel: [3, 3],
+                stride: [1, 1],
+                padding: [1, 1],
+                bias: true,
+            },
+        );
+        let p = add(
+            &mut g,
+            LayerKind::MaxPool2d {
+                kernel: [2, 2],
+                stride: [2, 2],
+            },
+        );
         let f = add(&mut g, LayerKind::Flatten);
-        let l = add(&mut g, LayerKind::Linear { out_features: 10, bias: true });
+        let l = add(
+            &mut g,
+            LayerKind::Linear {
+                out_features: 10,
+                bias: true,
+            },
+        );
         link(&mut g, i, c);
         link(&mut g, c, p);
         link(&mut g, p, f);
@@ -395,7 +456,13 @@ mod tests {
     fn residual_add_and_concat() {
         let mut g = Graph::default();
         let i = add(&mut g, LayerKind::Input { shape: vec![8] });
-        let l = add(&mut g, LayerKind::Linear { out_features: 8, bias: true });
+        let l = add(
+            &mut g,
+            LayerKind::Linear {
+                out_features: 8,
+                bias: true,
+            },
+        );
         let s = add(&mut g, LayerKind::Add);
         let c = add(&mut g, LayerKind::Concat { dim: 0 });
         link(&mut g, i, l);
@@ -413,8 +480,23 @@ mod tests {
     fn errors_are_isolated_not_fatal() {
         let mut g = Graph::default();
         let i = add(&mut g, LayerKind::Input { shape: vec![4] });
-        let conv = add(&mut g, LayerKind::Conv2d { out_channels: 4, kernel: [3, 3], stride: [1, 1], padding: [0, 0], bias: true });
-        let lonely = add(&mut g, LayerKind::Linear { out_features: 2, bias: true });
+        let conv = add(
+            &mut g,
+            LayerKind::Conv2d {
+                out_channels: 4,
+                kernel: [3, 3],
+                stride: [1, 1],
+                padding: [0, 0],
+                bias: true,
+            },
+        );
+        let lonely = add(
+            &mut g,
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+        );
         let after = add(&mut g, LayerKind::Activation { act: Act::Relu });
         link(&mut g, i, conv);
         link(&mut g, conv, after);
@@ -429,11 +511,20 @@ mod tests {
     fn cycle_nodes_are_reported() {
         let mut g = Graph::default();
         let i = add(&mut g, LayerKind::Input { shape: vec![4] });
-        let a = add(&mut g, LayerKind::Linear { out_features: 4, bias: true });
+        let a = add(
+            &mut g,
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
+        );
         let b = add(&mut g, LayerKind::Add);
         link(&mut g, i, a);
         g.add_edge(a, Port::new(b, 0)).unwrap();
-        assert!(g.add_edge(b, Port::new(a, 0)).is_none(), "a 의 슬롯 0 은 i 가 점유 → 거부됨");
+        assert!(
+            g.add_edge(b, Port::new(a, 0)).is_none(),
+            "a 의 슬롯 0 은 i 가 점유 → 거부됨"
+        );
         // 진짜 순환: b → a 대신 a ↔ b 를 새 노드로
         let c = add(&mut g, LayerKind::Activation { act: Act::Relu });
         g.add_edge(b, Port::new(c, 0)).unwrap();
@@ -449,16 +540,30 @@ mod tests {
         let mut g = Graph::default();
         let i = add(&mut g, LayerKind::Input { shape: vec![1, 8, 8] });
         // 샘플 랭크 5 → 배치 포함 6 → 실행 불가.
-        let r = add(&mut g, LayerKind::Reshape { shape: vec![1, 2, 2, 4, 4] });
+        let r = add(
+            &mut g,
+            LayerKind::Reshape {
+                shape: vec![1, 2, 2, 4, 4],
+            },
+        );
         link(&mut g, i, r);
         let rep = infer(&g);
-        assert!(matches!(rep.errors[&r], GraphError::ShapeMismatch { .. }), "{:?}", rep.errors);
+        assert!(
+            matches!(rep.errors[&r], GraphError::ShapeMismatch { .. }),
+            "{:?}",
+            rep.errors
+        );
         assert!(rep.errors[&r].to_string().contains("최대 랭크"));
 
         // 상한 안(배치 포함 5)은 그대로 통과한다.
         let mut g2 = Graph::default();
         let i2 = add(&mut g2, LayerKind::Input { shape: vec![1, 8, 8] });
-        let r2 = add(&mut g2, LayerKind::Reshape { shape: vec![1, 2, 4, 8] });
+        let r2 = add(
+            &mut g2,
+            LayerKind::Reshape {
+                shape: vec![1, 2, 4, 8],
+            },
+        );
         link(&mut g2, i2, r2);
         assert!(infer(&g2).is_ok());
     }
@@ -467,7 +572,12 @@ mod tests {
     fn embedding_and_concat_respect_the_rank_limit() {
         // Input [a,b,c,d] (랭크 5) → Embedding 이 랭크 6 을 만들려 한다.
         let mut g = Graph::default();
-        let i = add(&mut g, LayerKind::Input { shape: vec![2, 2, 2, 2] });
+        let i = add(
+            &mut g,
+            LayerKind::Input {
+                shape: vec![2, 2, 2, 2],
+            },
+        );
         let e = add(&mut g, LayerKind::Embedding { vocab: 10, dim: 4 });
         link(&mut g, i, e);
         assert!(matches!(infer(&g).errors[&e], GraphError::ShapeMismatch { .. }));

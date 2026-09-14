@@ -95,7 +95,9 @@ pub fn decode_image(bytes: &[u8], what: &str) -> anyhow::Result<image::DynamicIm
         .with_guessed_format()
         .with_context_what(what)?;
     reader.limits(image_limits());
-    let img = reader.decode().map_err(|e| anyhow::anyhow!("{what} 디코드 실패: {e}"))?;
+    let img = reader
+        .decode()
+        .map_err(|e| anyhow::anyhow!("{what} 디코드 실패: {e}"))?;
     check_image_size(img.width(), img.height(), what)?;
     Ok(img)
 }
@@ -108,7 +110,9 @@ pub fn decode_image_file(path: &std::path::Path) -> anyhow::Result<image::Dynami
         .with_guessed_format()
         .map_err(|e| anyhow::anyhow!("이미지 포맷을 알 수 없습니다 ({}): {e}", path.display()))?;
     reader.limits(image_limits());
-    let img = reader.decode().map_err(|e| anyhow::anyhow!("이미지 디코드 실패 ({}): {e}", path.display()))?;
+    let img = reader
+        .decode()
+        .map_err(|e| anyhow::anyhow!("이미지 디코드 실패 ({}): {e}", path.display()))?;
     check_image_size(img.width(), img.height(), &format!("이미지 {}", path.display()))?;
     Ok(img)
 }
