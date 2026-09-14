@@ -74,7 +74,9 @@ nl_pack_linux() {
   cp "$@" "$stage/"
   cp "$NL_ROOT/packaging/linux/install.sh" \
      "$NL_ROOT/packaging/linux/neural-linker.desktop" \
-     "$NL_ROOT/packaging/linux/neural-linker-mime.xml" "$stage/"
+     "$NL_ROOT/packaging/linux/neural-linker-mime.xml" \
+     "$NL_ROOT/packaging/linux/neural-linker.svg" "$stage/"
+  # 아이콘 원본(SVG)이 들어가야 install.sh 가 아이콘 테마에 넣는다.
   tar -czf "$out" -C "$parent" neural-linker
   rm -rf "$stage"
 }

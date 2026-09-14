@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"
+     role="img" aria-label="Neural Linker">
+  <title>Neural Linker</title>
+  <desc>어두운 둥근 사각형 위의 작은 신경망 그래프 — 입력 하나, 은닉 둘, 출력 하나.</desc>
+
+  <!-- 배경. 작은 크기에서 형태가 뭉개지지 않도록 모서리를 넉넉히 둥글린다. -->
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#171C26"/>
+
+  <!-- 연결선. 노드보다 먼저 그려 원 아래로 들어간다. 굵게 둬야 16px 에서도 선이 남는다. -->
+  <g stroke="#3B6FC4" stroke-width="13" stroke-linecap="round" fill="none">
+    <line x1="70" y1="128" x2="128" y2="76"/>
+    <line x1="70" y1="128" x2="128" y2="180"/>
+    <line x1="128" y1="76"  x2="186" y2="128"/>
+    <line x1="128" y1="180" x2="186" y2="128"/>
+  </g>
+
+  <!-- 노드. 입력·은닉은 테마 파랑, 출력만 밝은 파랑이라 방향이 읽힌다. -->
+  <g fill="#4285F4">
+    <circle cx="70"  cy="128" r="25"/>
+    <circle cx="128" cy="76"  r="25"/>
+    <circle cx="128" cy="180" r="25"/>
+  </g>
+  <circle cx="186" cy="128" r="25" fill="#8AB4F8"/>
+</svg>

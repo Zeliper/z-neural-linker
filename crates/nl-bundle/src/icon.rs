@@ -16,6 +16,15 @@ pub const ICO_SIZES: &[u32] = &[16, 32, 48, 64, 128, 256];
 /// Linux 아이콘 테마가 요구하는 크기.
 pub const LINUX_ICON_SIZE: u32 = 256;
 
+/// 저장소에 들어 있는 기본 앱 아이콘(256×256 RGBA PNG).
+///
+/// 원본은 `packaging/linux/neural-linker.svg` 이고 `packaging/make-icon.py` 가 이 PNG 를 만든다.
+/// 빌더가 아이콘을 고르지 않았을 때의 기본값으로 쓸 수 있다 — 배포물이 기본 아이콘으로 나가지 않게.
+/// 래스터라이저를 빌드 의존성으로 들이지 않으려고 산출물을 저장소에 함께 둔다.
+pub fn default_icon_png() -> &'static [u8] {
+    include_bytes!("../../../packaging/linux/neural-linker-256.png")
+}
+
 /// PNG 파일 → `.ico` 파일. 원본보다 큰 크기는 넣지 않는다(억지 확대 방지).
 pub fn png_to_ico(png: &Path, out: &Path) -> anyhow::Result<()> {
     let bytes = std::fs::read(png).with_context(|| format!("아이콘을 읽지 못했습니다: {}", png.display()))?;
@@ -164,5 +173,26 @@ mod tests {
     #[test]
     fn non_png_input_is_rejected() {
         assert!(png_bytes_to_ico(b"not a png").is_err());
+    }
+}
+
+#[cfg(test)]
+mod default_icon_tests {
+    use super::*;
+
+    /// 저장소에 든 기본 아이콘이 실제로 쓸 수 있는 PNG 인지. 파일이 깨지면 여기서 잡힌다.
+    #[test]
+    fn the_default_icon_is_a_square_png_we_can_turn_into_an_ico() {
+        let png = default_icon_png();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "PNG 서명이 아닙니다");
+
+        let img = image::load_from_memory(png).expect("PNG 로 읽혀야 합니다");
+        let (w, h) = image::GenericImageView::dimensions(&img);
+        assert_eq!((w, h), (LINUX_ICON_SIZE, LINUX_ICON_SIZE), "{w}x{h}");
+
+        // Windows 아이콘으로도 변환된다 — 모든 프레임이 들어간다.
+        let ico = png_bytes_to_ico(png).expect("ICO 변환");
+        assert_eq!(&ico[..4], &[0, 0, 1, 0], "ICO 머리말이 아닙니다");
+        assert_eq!(u16::from_le_bytes([ico[4], ico[5]]) as usize, ICO_SIZES.len());
     }
 }

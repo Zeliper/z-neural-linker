@@ -31,6 +31,38 @@ Inno Setup 6 로 `packaging/windows/neural-linker.iss` 를 컴파일한다 (`isc
 
 `nl-app` 은 아직 이 처리를 하지 않는다.
 
+## 아이콘
+
+원본은 손으로 쓴 SVG 하나이고 나머지는 거기서 만든다. 저장소에 산출물까지 함께 두어 **빌드할 때
+SVG 래스터라이저를 요구하지 않는다**.
+
+```
+packaging/linux/neural-linker.svg        원본 (손으로 쓴 SVG, 외부 도구 불필요)
+packaging/linux/neural-linker-256.png    Linux 아이콘 테마·빌더 기본값
+packaging/windows/neural-linker.ico      Windows 실행 파일·설치 프로그램 (16·32·48·64·128·256)
+```
+
+고쳤을 때 다시 만드는 법:
+
+```sh
+packaging/make-icon.py                                   # SVG 와 같은 도형을 PNG 로 (표준 라이브러리만)
+cargo run -p nl-bundle --example nl-icon -- \
+  packaging/linux/neural-linker-256.png packaging/windows/neural-linker.ico
+```
+
+`make-icon.py` 는 SVG 를 파싱하지 않고 **같은 도형 목록을 따로 들고 있다.** 원·선분·둥근 사각형뿐이라
+거리 함수로 정확히 그릴 수 있어서다. SVG 를 고치면 이 스크립트의 도형 목록도 같이 고쳐야 한다.
+
+쓰이는 곳:
+
+| 자리 | 파일 | 연결 |
+| --- | --- | --- |
+| Linux 아이콘 테마 | `.svg` | `install.sh` 가 `~/.local/share/icons/hicolor/scalable/apps/` 에 넣는다 |
+| 데스크톱 항목 | — | `.desktop` 의 `Icon=neural-linker` 가 테마에서 찾는다 |
+| Windows 실행 파일 | `.ico` | `nl-app`·`nl-runtime` 의 `build.rs`(winresource). **Windows 대상일 때만** 동작한다 |
+| Windows 설치 프로그램 | `.ico` | `neural-linker.iss` 의 `SetupIconFile` |
+| 빌더 기본값 | `.png` | `nl_bundle::default_icon_png()` (`include_bytes`) |
+
 ## Windows 산출물을 Linux 에서 만들기
 
 배포 앱의 Windows 산출물은 `nl-runtime.exe` 에 번들을 붙여 만든다. **빌더(`nl-app.exe`)와 런타임 둘 다**

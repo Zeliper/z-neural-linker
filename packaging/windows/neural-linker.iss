@@ -28,6 +28,9 @@ ChangesAssociations=yes
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExe}
+; 설치 마법사와 제어판 항목의 아이콘. 원본은 packaging/linux/neural-linker.svg 이고
+; packaging/make-icon.py → nl-icon 예제로 PNG·ICO 를 만들어 저장소에 둔다.
+SetupIconFile=neural-linker.ico
 WizardStyle=modern
 
 [Languages]

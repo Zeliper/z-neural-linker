@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=Neural Linker
-GenericName=Project Scheduler
-Comment=노드 그래프 기반 프로젝트 일정 관리
+GenericName=Neural Network Builder
+Comment=신경망을 설계·학습하고 GUI 앱으로 빌드한다
 Exec=nl-app %f
 Icon=neural-linker
 Terminal=false
-Categories=Office;ProjectManagement;
+Categories=Development;IDE;
 MimeType=application/x-neural-linker;
 StartupWMClass=neural-linker

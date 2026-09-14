@@ -42,3 +42,6 @@ rfd.workspace = true
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }
+
+[build-dependencies]
+winresource.workspace = true

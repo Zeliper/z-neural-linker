@@ -41,7 +41,7 @@ if [[ -x "$SRC_DIR/nl" ]]; then
   install -m 755 "$SRC_DIR/nl" "$BIN_DIR/nl"
 fi
 install -m 644 "$HERE/neural-linker-mime.xml" "$MIME_DIR/packages/neural-linker-mime.xml"
-# 아이콘은 아직 저장소에 없다. 있으면 넣고 없으면 넘어간다 — set -e 때문에 여기서 설치가 통째로 멈추면 안 된다.
+# 아이콘. 배포 아카이브에는 들어 있지만 빌드 트리에서 바로 돌릴 때는 없을 수 있어 조건부로 둔다.
 if [[ -f "$HERE/neural-linker.svg" ]]; then
   install -m 644 "$HERE/neural-linker.svg" "$ICON_DIR/neural-linker.svg"
 fi
