@@ -85,6 +85,28 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 opt-level = 3
 lto = "thin"
 
+
+# 보안 리뷰 권고: 우리 크레이트는 릴리스에서도 정수 오버플로를 패닉으로 잡는다(외부 입력 파싱 경로).
+# burn/ndarray 같은 의존성은 성능 때문에 제외.
+[profile.release.package.nl-core]
+overflow-checks = true
+[profile.release.package.nl-engine]
+overflow-checks = true
+[profile.release.package.nl-io]
+overflow-checks = true
+[profile.release.package.nl-gui]
+overflow-checks = true
+[profile.release.package.nl-bundle]
+overflow-checks = true
+[profile.release.package.nl-update]
+overflow-checks = true
+[profile.release.package.nl-app]
+overflow-checks = true
+[profile.release.package.nl-runtime]
+overflow-checks = true
+[profile.release.package.nl-cli]
+overflow-checks = true
+
 # 디버그 빌드에서도 텐서 연산은 최적화 (학습 루프가 못 참을 만큼 느려지지 않게)
 [profile.dev.package."*"]
 opt-level = 2
