@@ -2,6 +2,8 @@
 name = "vseat"
 version = "0.1.0"
 edition = "2021"
+# 저장소의 다른 크레이트와 같다. 없으면 `cargo deny check licenses` 가 "unlicensed" 로 잡는다.
+license.workspace = true
 publish = false
 description = "헤드리스 sway 시트에 가상 포인터·키보드를 상시 붙여 두는 테스트 도구"
 

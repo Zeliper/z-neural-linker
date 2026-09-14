@@ -20,7 +20,6 @@ ureq.workspace = true
 tungstenite.workspace = true
 # `Source::HttpServer` 의 tls 옵션. 인증서가 없으면 한 줄도 돌지 않는다.
 rustls.workspace = true
-rustls-pemfile.workspace = true
 sysinfo.workspace = true
 # 녹화 meta.json 의 시작 시각(RFC 3339)
 chrono.workspace = true

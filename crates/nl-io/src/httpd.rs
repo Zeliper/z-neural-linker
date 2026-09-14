@@ -111,15 +111,19 @@ impl TlsAcceptor {
     /// PEM 바이트에서 만든다. **서버를 열기 전에** 불러서, 인증서가 잘못되면
     /// 소켓을 열기도 전에 실패하게 한다 — 반쯤 열린 채로 도는 상태를 만들지 않는다.
     pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, String> {
-        let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
+        // PEM 파서는 rustls 가 이미 끌고 오는 `pki_types` 것을 쓴다. 예전에는 `rustls-pemfile` 을
+        // 따로 의존했는데 그쪽이 보관 처리됐고(RUSTSEC-2025-0134), 사실 같은 코드를 감싼 것이다.
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let certs = CertificateDer::pem_slice_iter(cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("인증서 PEM 을 읽지 못했다: {e}"))?;
         if certs.is_empty() {
             return Err("인증서 PEM 에 인증서가 없다 (`-----BEGIN CERTIFICATE-----` 가 보이는지 확인하라)".into());
         }
-        let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))
-            .map_err(|e| format!("개인키 PEM 을 읽지 못했다: {e}"))?
-            .ok_or_else(|| "개인키 PEM 에 키가 없다 (PKCS#8·PKCS#1·SEC1 중 하나여야 한다)".to_string())?;
+        let key = PrivateKeyDer::from_pem_slice(key_pem)
+            .map_err(|e| format!("개인키 PEM 을 읽지 못했다 (PKCS#8·PKCS#1·SEC1 중 하나여야 한다): {e}"))?;
 
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
