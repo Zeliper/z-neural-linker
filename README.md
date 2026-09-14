@@ -103,3 +103,5 @@ $U stop
 - [배포와 설치](packaging/README.md) — 패키징, Windows 크로스 빌드, 업데이트 매니페스트·서명
 
 UI 구조·문서 상태(op 기반 undo)·GUI 테스트 하네스·패키징 방식은 [trust-pms](../trust-pms) 를 잇는다.
+
+변경 이력은 [CHANGELOG.md](CHANGELOG.md) 를 본다.
