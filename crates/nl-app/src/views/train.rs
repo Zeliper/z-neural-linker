@@ -93,6 +93,7 @@ impl TrainSession {
             best_checkpoint: None,
             error: None,
             note: String::new(),
+            extra: Default::default(),
         };
         let (model, dataset) = (req.model.id, req.dataset.id);
         let handle = nl_engine::start(req)?;
@@ -218,6 +219,7 @@ fn blank_run() -> RunRecord {
         best_checkpoint: None,
         error: None,
         note: String::new(),
+        extra: Default::default(),
     }
 }
 

@@ -538,7 +538,8 @@ impl NlApp {
                 Ok(l) => {
                     if l.newer {
                         startup_error = Some(format!(
-                            "이 파일은 앱보다 새 형식입니다 — 모르는 항목은 보존되지만 여기서 편집할 수는 없습니다: {}",
+                            "이 파일은 앱보다 새 형식입니다 — 모델·설정·학습 설정까지 모르는 항목은 \
+                             그대로 보존되지만 여기서 편집할 수는 없습니다: {}",
                             path.display()
                         ));
                     }
@@ -860,9 +861,10 @@ impl NlApp {
                 self.discard_recovery(now);
                 self.file_autosave_held = false;
                 if self.doc_newer_format {
-                    // 한 번 알렸으면 됐다. 값 자체는 `ProjectFile` 의 `extra` 가 그대로 돌려준다.
+                    // 한 번 알렸으면 됐다. 값 자체는 문서 구조체 18종의 `extra` 가 그대로 돌려준다
+                    // (설정·학습 설정·데이터셋·파이프라인·GUI·빌드 설정까지).
                     self.doc_newer_format = false;
-                    self.toast("새 형식 항목은 그대로 보존해 저장했습니다", now);
+                    self.toast("새 형식 항목은 모델·설정·학습 설정까지 그대로 보존해 저장했습니다", now);
                 }
                 self.recent.push(&path);
                 self.toast(
@@ -899,7 +901,8 @@ impl NlApp {
             Ok(l) => {
                 if l.newer {
                     self.toast(
-                        "이 파일은 앱보다 새 형식입니다 — 모르는 항목은 보존되지만 여기서 편집할 수는 없습니다",
+                        "이 파일은 앱보다 새 형식입니다 — 모델·설정·학습 설정까지 모르는 항목은 \
+                         그대로 보존되지만 여기서 편집할 수는 없습니다",
                         now,
                     );
                 }
@@ -1826,6 +1829,7 @@ impl NlApp {
                     id: LinkId::new(),
                     from,
                     to,
+                    extra: Default::default(),
                 };
                 self.doc.apply_local(vec![Op::UpsertLink { pipeline: pid, link }]);
             }
@@ -3944,6 +3948,7 @@ pub fn duplicate_pnode_ops(
                     id: LinkId::new(),
                     from,
                     to,
+                    extra: Default::default(),
                 },
             });
         }
@@ -4554,6 +4559,7 @@ mod tests {
                 best_checkpoint: None,
                 error: None,
                 note: String::new(),
+                extra: Default::default(),
             }
         }
 

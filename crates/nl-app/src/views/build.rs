@@ -118,6 +118,7 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
         update_public_key: spec.update_public_key.clone().filter(|k| !k.trim().is_empty()),
         auto_update: spec.auto_update,
         arm_input: spec.arm_input,
+        extra: Default::default(),
     };
     let mut bundle = Bundle::new(manifest, bundle_project);
     bundle.weights = weights;
