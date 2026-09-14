@@ -2540,34 +2540,77 @@ fn first_line(s: &str) -> String {
 
 // ───────────────────────────── 모델 ─────────────────────────────
 
+/// 값 하나를 모델에 넣고 결과를 값 하나로 받는다.
+///
+/// 입출력이 여럿이면 페이로드 필드 이름을 키로 쓰는 JSON 객체가 된다. 그 규약은 엔진의
+/// [`nl_engine::encode_inputs`] / [`nl_engine::decode_outputs`] 가 단독으로 정한다 —
+/// 여기서 따로 풀면 HTTP 추론 API 와 파이프라인이 서로 다른 모양을 보게 된다.
+///
+/// **필드가 하나면 예전과 바이트 단위로 같다.** 엔진이 그 경우 값을 감싸지 않고 그대로 내보낸다.
 fn run_model(sess: &mut Session, spec: Option<&PayloadSpec>, v: &Value) -> Result<Value, String> {
-    let input = encode_input(spec, v)?;
-    let outs = sess.run(&[input]).map_err(|e| format!("추론 실패: {e:#}"))?;
-    let first = outs
-        .into_iter()
-        .next()
-        .ok_or_else(|| "모델이 출력을 내지 않았다".to_string())?;
-    match spec.and_then(|s| s.outputs.first()) {
-        Some(field) => nl_engine::decode(field, &first).map_err(|e| format!("출력 디코딩 실패: {e:#}")),
-        None => Ok(Value::Tensor(first)),
+    let inputs = encode_inputs(spec, v)?;
+    let outs = sess.run(&inputs).map_err(|e| format!("추론 실패: {e:#}"))?;
+    if outs.is_empty() {
+        return Err("모델이 출력을 내지 않았다".to_string());
+    }
+    match spec {
+        Some(spec) => nl_engine::decode_outputs(spec, &outs).map_err(|e| format!("출력 디코딩 실패: {e:#}")),
+        // 페이로드가 없으면 디코더도 없다. 텐서를 그대로 내보낸다 (예전과 같다).
+        None => Ok(Value::Tensor(
+            outs.into_iter().next().expect("바로 위에서 비어 있지 않음을 봤다"),
+        )),
     }
 }
 
-/// 페이로드가 있으면 `inputs[0]` 의 인코더를, 없으면 텐서/숫자 값을 배치 1 텐서로 그대로 쓴다.
-fn encode_input(spec: Option<&PayloadSpec>, v: &Value) -> Result<HostTensor, String> {
-    if let Some(field) = spec.and_then(|s| s.inputs.first()) {
-        return nl_engine::encode(field, v).map_err(|e| format!("입력 인코딩 실패: {e:#}"));
+/// 페이로드가 있으면 필드별 인코더를, 없으면 텐서/숫자 값을 배치 1 텐서 하나로 그대로 쓴다.
+///
+/// 입력 필드가 여럿일 때 엔진은 JSON **객체**만 받는다. 파이프라인에서는 배열로 오는 것이
+/// 자연스러운 자리가 있어(예: `[a, b]`), 여기서 필드 순서대로 객체로 바꿔 준다.
+/// 순서 규약은 `payload.inputs` = `Graph::input_nodes()` 다.
+fn encode_inputs(spec: Option<&PayloadSpec>, v: &Value) -> Result<Vec<HostTensor>, String> {
+    if let Some(spec) = spec {
+        let adapted = array_to_object(spec, v)?;
+        let value = adapted.as_ref().unwrap_or(v);
+        return nl_engine::encode_inputs(spec, value).map_err(|e| format!("입력 인코딩 실패: {e:#}"));
     }
-    match v {
+    let one = match v {
         // 이미 배치 차원을 포함한 것으로 본다.
-        Value::Tensor(t) => Ok(t.clone()),
-        Value::Numbers(n) => Ok(HostTensor::new(vec![1, n.len()], n.clone())),
-        Value::Number(x) => Ok(HostTensor::new(vec![1, 1], vec![*x as f32])),
-        other => Err(format!(
-            "페이로드가 없으면 텐서·숫자 값만 모델에 넣을 수 있다 (받은 값: {})",
-            kind_name(other)
-        )),
+        Value::Tensor(t) => t.clone(),
+        Value::Numbers(n) => HostTensor::new(vec![1, n.len()], n.clone()),
+        Value::Number(x) => HostTensor::new(vec![1, 1], vec![*x as f32]),
+        other => {
+            return Err(format!(
+                "페이로드가 없으면 텐서·숫자 값만 모델에 넣을 수 있다 (받은 값: {})",
+                kind_name(other)
+            ))
+        }
+    };
+    Ok(vec![one])
+}
+
+/// 다입력 모델에 배열이 오면 필드 순서대로 객체로 바꾼다. 그럴 일이 아니면 `None`.
+///
+/// 필드가 하나면 손대지 않는다 — 그 하나가 배열 자체를 받는 경우가 훨씬 흔하다.
+fn array_to_object(spec: &PayloadSpec, v: &Value) -> Result<Option<Value>, String> {
+    if spec.inputs.len() < 2 {
+        return Ok(None);
     }
+    let items: Vec<serde_json::Value> = match v {
+        Value::Json(serde_json::Value::Array(a)) => a.clone(),
+        Value::Numbers(n) => n.iter().map(|x| serde_json::json!(f64::from(*x))).collect(),
+        _ => return Ok(None),
+    };
+    if items.len() != spec.inputs.len() {
+        let names: Vec<&str> = spec.inputs.iter().map(|f| f.name.as_str()).collect();
+        return Err(format!(
+            "입력 필드가 {}개인데 값이 {}개다 (필드 순서: {names:?})",
+            spec.inputs.len(),
+            items.len()
+        ));
+    }
+    let map: serde_json::Map<String, serde_json::Value> =
+        spec.inputs.iter().map(|f| f.name.clone()).zip(items).collect();
+    Ok(Some(Value::Json(serde_json::Value::Object(map))))
 }
 
 // ───────────────────────────── 로직 ─────────────────────────────
@@ -3355,6 +3398,229 @@ mod tests {
         assert!(wait_for(&h, Duration::from_secs(1), |e| matches!(e, RunnerEvent::Stopped)).is_some());
     }
 
+    // ── 다입출력 모델 ──────────────────────────────────────────────────
+
+    /// 입력 1개, Output 2개짜리 작은 모델과 출력 필드 2개짜리 페이로드.
+    ///
+    /// 가중치는 주지 않는다 — `Session::load(_, None, _)` 가 무작위로 채운다. 여기서 보는 것은
+    /// 숫자가 아니라 **모양**(필드 이름을 키로 하는 객체)이다.
+    fn two_output_project() -> (Project, nl_core::ModelId, nl_core::PayloadId) {
+        use nl_core::model::{Node, Port};
+        use nl_core::payload::{Field, FieldKind};
+        use nl_core::{Act, LayerKind, ModelDef, PayloadSpec};
+
+        let mut payload = PayloadSpec::new("둘");
+        payload.inputs.push(Field::new("x", FieldKind::Vector { len: 2 }));
+        payload.outputs.push(Field::new("a", FieldKind::Vector { len: 2 }));
+        payload.outputs.push(Field::new("b", FieldKind::Vector { len: 3 }));
+
+        let mut def = ModelDef::new("두 갈래");
+        let input = def
+            .graph
+            .add_node(Node::new(LayerKind::Input { shape: vec![2] }, [0.0, 0.0]));
+        let hidden = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 4,
+                bias: true,
+            },
+            [1.0, 0.0],
+        ));
+        let act = def
+            .graph
+            .add_node(Node::new(LayerKind::Activation { act: Act::Relu }, [2.0, 0.0]));
+        // 두 갈래로 갈라져 각자 Output 으로 간다.
+        let head_a = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+            [3.0, -1.0],
+        ));
+        // **이름이 순서를 정한다.** `Graph::output_nodes()` 가 이름순으로 정렬하므로,
+        // 이름을 비워 두면 무작위 id 순이 되어 페이로드 필드와 어긋난다 (여기서 실제로 겪었다).
+        let mut node_a = Node::new(LayerKind::Output, [4.0, -1.0]);
+        node_a.name = "a".into();
+        let out_a = def.graph.add_node(node_a);
+        let head_b = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 3,
+                bias: true,
+            },
+            [3.0, 1.0],
+        ));
+        let mut node_b = Node::new(LayerKind::Output, [4.0, 1.0]);
+        node_b.name = "b".into();
+        let out_b = def.graph.add_node(node_b);
+        for (from, to) in [
+            (input, hidden),
+            (hidden, act),
+            (act, head_a),
+            (head_a, out_a),
+            (act, head_b),
+            (head_b, out_b),
+        ] {
+            def.graph.add_edge(from, Port::new(to, 0)).expect("연결");
+        }
+        def.payload = Some(payload.id);
+        def.weights = None;
+
+        let mut project = Project::new("p");
+        let (mid, pid) = (def.id, payload.id);
+        project.models.insert(mid, def);
+        project.payloads.insert(pid, payload);
+        (project, mid, pid)
+    }
+
+    /// 출력이 여럿이면 `Manual → Model → Log` 가 필드 이름을 키로 하는 객체를 낸다.
+    #[test]
+    fn a_two_output_model_yields_a_json_object() {
+        let (project, mid, pid) = two_output_project();
+        let mut p = Pipeline::new("둘");
+        p.tick_hz = 60.0;
+        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
+        let m = p.add_node(PNode::new(
+            PNodeKind::Model {
+                model: mid,
+                payload: Some(pid),
+            },
+            [1.0, 0.0],
+        ));
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [2.0, 0.0]));
+        p.add_link(src, m).unwrap();
+        p.add_link(m, log).unwrap();
+
+        let h = Runner::new(project, p, tmp_dir("twoout"), DevicePref::Cpu)
+            .start()
+            .unwrap();
+        h.inputs
+            .send(RunnerInput::Manual {
+                node: src,
+                value: Value::Numbers(vec![0.5, -0.5]),
+            })
+            .unwrap();
+
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(10),
+            |e| matches!(e, RunnerEvent::Value { node, .. } if *node == m),
+        )
+        .expect("모델 값이 오지 않았다");
+        let RunnerEvent::Value { value, .. } = ev else {
+            panic!("값이 아니다")
+        };
+        let Value::Json(serde_json::Value::Object(obj)) = &value else {
+            panic!("객체가 아니다: {value:?}")
+        };
+        assert_eq!(obj.len(), 2, "키가 둘이어야 한다: {obj:?}");
+        let a = obj.get("a").expect("a 키").as_array().expect("a 는 배열");
+        let b = obj.get("b").expect("b 키").as_array().expect("b 는 배열");
+        assert_eq!(a.len(), 2, "a 길이");
+        assert_eq!(b.len(), 3, "b 길이");
+
+        // Log 싱크는 그 객체를 JSON 으로 그대로 찍는다.
+        let logged = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Log(t) if t.contains("\"a\"") && t.contains("\"b\"")),
+        );
+        assert!(logged.is_some(), "Log 가 객체를 찍지 않았다");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// HTTP 로 부르면 같은 객체가 응답 본문이 된다.
+    #[test]
+    fn a_two_output_model_answers_http_with_an_object() {
+        let (project, mid, pid) = two_output_project();
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, ANY_ADDR, "/infer");
+        let m = p.add_node(PNode::new(
+            PNodeKind::Model {
+                model: mid,
+                payload: Some(pid),
+            },
+            [1.0, 0.0],
+        ));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [2.0, 0.0],
+        ));
+        p.add_link(server, m).unwrap();
+        p.add_link(m, reply).unwrap();
+
+        let h = Runner::new(project, p, tmp_dir("twoout-http"), DevicePref::Cpu)
+            .start()
+            .unwrap();
+        let addr = wait_server_up(&h);
+        // 모델이 올라오기 전 요청은 503 이다. 200 이 될 때까지 잠깐 다시 시도한다.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut res = None;
+        while Instant::now() < deadline {
+            match crate::http::call(
+                "POST",
+                &format!("http://{addr}/infer"),
+                &BTreeMap::new(),
+                Some("[0.5, -0.5]"),
+                Duration::from_secs(10),
+            ) {
+                Ok(r) if r.status == 200 => {
+                    res = Some(r);
+                    break;
+                }
+                Ok(r) => res = Some(r),
+                Err(_) => {}
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let res = res.expect("요청이 한 번도 닿지 않았다");
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+        let body = res.json().expect("JSON 이 아니다");
+        let obj = body.as_object().expect("객체가 아니다");
+        assert_eq!(obj.len(), 2, "{body}");
+        assert_eq!(obj["a"].as_array().expect("a").len(), 2);
+        assert_eq!(obj["b"].as_array().expect("b").len(), 3);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 입력 필드가 여럿이면 배열로도 받는다 (필드 순서). 개수가 다르면 노드 오류.
+    #[test]
+    fn multi_input_accepts_an_object_or_an_array_in_field_order() {
+        use nl_core::payload::{Field, FieldKind};
+        use nl_core::PayloadSpec;
+        let mut spec = PayloadSpec::new("둘입력");
+        spec.inputs.push(Field::new("l", FieldKind::Vector { len: 2 }));
+        spec.inputs.push(Field::new("r", FieldKind::Vector { len: 2 }));
+
+        // 배열은 필드 순서대로 객체가 된다.
+        let arr = Value::Json(serde_json::json!([[1.0, 2.0], [3.0, 4.0]]));
+        let made = array_to_object(&spec, &arr).unwrap().expect("바뀌어야 한다");
+        let Value::Json(serde_json::Value::Object(obj)) = &made else {
+            panic!("객체가 아니다")
+        };
+        assert_eq!(obj["l"], serde_json::json!([1.0, 2.0]));
+        assert_eq!(obj["r"], serde_json::json!([3.0, 4.0]));
+
+        // 개수가 다르면 필드 이름을 알려 주며 거절한다.
+        let short = Value::Json(serde_json::json!([[1.0, 2.0]]));
+        let err = array_to_object(&spec, &short).unwrap_err();
+        assert!(err.contains("2개인데 값이 1개"), "{err}");
+        assert!(err.contains("\"l\""), "필드 순서를 안 알려 준다: {err}");
+
+        // 객체로 오면 손대지 않고 엔진에 넘긴다.
+        let objv = Value::Json(serde_json::json!({"l": [1.0, 2.0], "r": [3.0, 4.0]}));
+        assert!(array_to_object(&spec, &objv).unwrap().is_none());
+
+        // 필드가 하나뿐이면 배열을 건드리지 않는다 — 그 하나가 배열을 받는 경우가 흔하다.
+        let one = PayloadSpec::tabular("하나", 2, 2);
+        assert!(array_to_object(&one, &arr).unwrap().is_none());
+    }
+
     #[test]
     fn cyclic_nodes_are_reported_not_executed() {
         let mut p = Pipeline::new("cycle");
@@ -3817,10 +4083,11 @@ mod tests {
 
     #[test]
     fn encode_input_without_payload_accepts_numbers_only() {
-        let t = encode_input(None, &Value::Numbers(vec![1.0, 2.0])).unwrap();
-        assert_eq!(t.shape, vec![1, 2]);
-        assert_eq!(encode_input(None, &Value::Number(3.0)).unwrap().shape, vec![1, 1]);
-        assert!(encode_input(None, &Value::Text("x".into())).is_err());
+        let t = encode_inputs(None, &Value::Numbers(vec![1.0, 2.0])).unwrap();
+        assert_eq!(t.len(), 1, "페이로드가 없으면 텐서 하나다");
+        assert_eq!(t[0].shape, vec![1, 2]);
+        assert_eq!(encode_inputs(None, &Value::Number(3.0)).unwrap()[0].shape, vec![1, 1]);
+        assert!(encode_inputs(None, &Value::Text("x".into())).is_err());
     }
 
     #[test]
