@@ -159,6 +159,7 @@ PNG 가 필요하면 `magick diff/03-view3.ppm 03-view3.png` 처럼 바꾼다.
 - **모달**: 앱에 모달(저장 확인·복구 제안)이 떠 있으면 뒤쪽 클릭이 전부 막힌다. 클릭이 "안 먹는" 것처럼 보이면 먼저
   전체 캡처로 모달 여부를 확인한다. 강제 종료 뒤 재시작하면 복구 모달이 뜨므로 테스트 시작은 `UITEST_FRESH=1`.
 - `pgrep -f`/`pkill -f` 에 명령줄 일부를 넣으면 호출한 셸 자신을 죽일 수 있다. 스크립트는 `/proc/<pid>/cmdline` 을 본다.
+- **앱은 한 번에 하나만**: `app` 과 `run` 은 시작할 때 남아 있는 앱을 내리고 창이 사라진 것까지 확인한다(pid 파일과 `swaymsg -t get_tree` 의 `app_id=neural-linker` 만 본다). 일부러 띄워 둔 앱에 이어 붙이려면 `run … --keep-app`.
 - 병렬로 쓰려면 `UITEST_DIR` 을 다르게 준다.
 - 앱 로그의 "arboard clipboard: X11 …" 경고는 헤드리스라 X 가 없어서 나는 것으로 무해하다.
 
