@@ -155,9 +155,6 @@ pub struct Runner {
     /// `Sink::MouseKeyboard` 무장 스위치의 **초기값**. 꺼져 있으면(기본) 액션을 로그로만 남기고 실제 입력은 보내지 않는다.
     /// 시작한 뒤에는 [`RunnerHandle::set_armed`] 로 바꾼다.
     pub arm_input: bool,
-    /// 본문을 읽는 워커 수. 기본 [`default_http_workers`].
-    /// 큰 본문이 자주 오는 배포에서는 늘리고, 작은 기기에서는 줄인다.
-    pub http_workers: usize,
     /// `Source::HttpServer` 가 받은 요청을 포기하는 시간. 기본 [`HTTP_REPLY_TIMEOUT`].
     /// 모델 추론이 오래 걸리는 파이프라인은 늘리고, 빠른 실패를 원하면 줄인다.
     pub http_reply_timeout: Duration,
@@ -211,7 +208,6 @@ impl Runner {
             base_dir,
             device,
             arm_input: false,
-            http_workers: default_http_workers(),
             http_reply_timeout: HTTP_REPLY_TIMEOUT,
         }
     }
@@ -263,12 +259,6 @@ const HTTP_SERVER_POLL: Duration = Duration::from_millis(50);
 pub const HTTP_QUEUE_LIMIT: usize = 16;
 /// 동시에 처리 중인 연결 상한. 넘으면 새 요청을 503 으로 흘려보낸다 (slowloris 완화).
 pub const HTTP_MAX_CONNECTIONS: usize = 64;
-/// 본문 워커 수의 기본값. 코어 수를 따르되 4~16 사이로 묶는다.
-///
-/// 적으면 느린 본문 몇 개가 뒤 요청을 밀고, 많으면 스레드만 논다.
-pub fn default_http_workers() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(4, 16)
-}
 /// 모든 `HttpServer` 노드의 토큰을 덮어쓰는 환경 변수.
 pub const HTTP_TOKEN_ENV: &str = "NL_HTTP_TOKEN";
 /// 포트별로 덮어쓰는 환경 변수의 앞부분. 뒤에 포트 번호를 붙인다 (`NL_HTTP_TOKEN_8799`).
@@ -409,8 +399,6 @@ struct HttpServerState {
     ready: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
-    /// 본문을 읽는 워커들. accept 스레드가 닫히면 채널이 끊겨 스스로 끝난다.
-    workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl HttpServerState {
@@ -435,9 +423,6 @@ impl HttpServerState {
         }
         if let Some(h) = self.handle.take() {
             let _ = h.join();
-        }
-        for w in self.workers.drain(..) {
-            let _ = w.join();
         }
     }
 }
@@ -474,12 +459,7 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// 서버 소켓을 열고 수신 스레드를 띄운다.
-fn start_http_server(
-    bind: &str,
-    path: &str,
-    token: Option<&str>,
-    workers: usize,
-) -> Result<HttpServerState, String> {
+fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<HttpServerState, String> {
     let policy = AccessPolicy::new(bind, token);
     // 인증 없이 바깥에 여는 것은 거부한다. 이 서버는 파이프라인을 구동하므로,
     // 열어 두면 그 주소에 닿는 누구나 모델을 돌리고 (싱크에 따라) 입력까지 보낼 수 있다.
@@ -491,32 +471,18 @@ fn start_http_server(
     let server = crate::httpd::Server::bind(bind).map(Arc::new).map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
     // 틱 루프로 넘기는 큐는 상한이 있다. 넘치면 붙잡지 않고 503 으로 돌려보낸다.
     let (tx, rx) = crossbeam_channel::bounded(HTTP_QUEUE_LIMIT);
-    // accept 와 본문 읽기를 나눈다. 느린 클라이언트는 워커 하나만 묶고 accept 는 계속 돈다.
-    let (raw_tx, raw_rx) = crossbeam_channel::bounded::<crate::httpd::Request>(workers * 2);
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicBool::new(false));
     let policy = Arc::new(policy);
     let want = normalize_path(path);
 
     let inflight = Arc::new(AtomicUsize::new(0));
-    let mut worker_handles = Vec::with_capacity(workers);
-    for i in 0..workers {
-        let (rrx, ptx, fly) = (raw_rx.clone(), tx.clone(), inflight.clone());
-        let w = std::thread::Builder::new()
-            .name(format!("nl-http-body-{i}"))
-            .spawn(move || http_body_worker(&rrx, &ptx, &fly))
-            .map_err(|e| format!("HTTP 본문 워커 생성 실패: {e}"))?;
-        worker_handles.push(w);
-    }
-    drop(tx);
-    drop(raw_rx);
-
-    let handoff = HeadHandoff {
+    let handoff = ConnContext {
         want_path: Arc::new(want),
         policy,
         ready: ready.clone(),
         inflight: inflight.clone(),
-        to_body: raw_tx,
+        to_pipeline: tx,
     };
     let (s2, srv2) = (stop.clone(), server.clone());
     let handle = std::thread::Builder::new()
@@ -531,7 +497,6 @@ fn start_http_server(
         ready,
         stop,
         handle: Some(handle),
-        workers: worker_handles,
     })
 }
 
@@ -547,16 +512,10 @@ fn normalize_path(p: &str) -> String {
 
 /// accept 전용 루프. 소켓을 받아 **연결마다 짧은 스레드**에 넘긴다.
 ///
-/// 머리 읽기를 고정 워커 풀에 맡기면 느린 클라이언트 몇이 풀을 다 차지해 뒤 요청이 밀린다.
-/// 연결마다 스레드를 띄우면 그 일이 없고, 스레드 수는 두 가지가 묶어 준다.
-///
-/// - 동시 연결 상한 [`HTTP_MAX_CONNECTIONS`] — 넘으면 머리도 읽지 않고 503
-/// - 머리 마감 [`crate::httpd::HEADER_TIMEOUT`] — 아무리 늦어도 5초면 끝난다
-///
-/// 그래서 최악에도 살아 있는 머리 스레드는 64개를 넘지 않는다.
+/// 여기서는 한 바이트도 읽지 않는다. 읽기는 전부 [`http_conn_thread`] 가 하고, 그쪽은 마감으로 묶여 있다.
 fn http_accept_loop(
     server: &crate::httpd::Server,
-    head: &HeadHandoff,
+    ctx: &ConnContext,
     stop: &AtomicBool,
     inflight: &AtomicUsize,
 ) {
@@ -578,10 +537,10 @@ fn http_accept_loop(
         }
         inflight.fetch_add(1, Ordering::SeqCst);
 
-        let h = head.clone();
+        let c = ctx.clone();
         let spawned = std::thread::Builder::new()
-            .name("nl-http-head".into())
-            .spawn(move || http_head_thread(stream, &h));
+            .name("nl-http-conn".into())
+            .spawn(move || http_conn_thread(stream, &c));
         if spawned.is_err() {
             // 스레드를 못 만들었다. 세어 둔 것을 되돌리고 다음 연결로 간다.
             inflight.fetch_sub(1, Ordering::SeqCst);
@@ -589,38 +548,63 @@ fn http_accept_loop(
     }
 }
 
-/// 머리 스레드가 본문 워커에게 넘길 때 필요한 것들.
+/// 연결 스레드가 요청 하나를 끝내는 데 필요한 것들.
 #[derive(Clone)]
-struct HeadHandoff {
+struct ConnContext {
     want_path: Arc<String>,
     policy: Arc<AccessPolicy>,
     ready: Arc<AtomicBool>,
     inflight: Arc<AtomicUsize>,
-    /// 본문 워커로 가는 길. 가득 차면 503.
-    to_body: Sender<crate::httpd::Request>,
+    /// 틱 루프로 가는 길. 가득 차면 503.
+    to_pipeline: Sender<HttpIncoming>,
 }
 
-/// 연결 하나의 머리를 읽고 정책까지 본 뒤 본문 워커에게 넘긴다.
+/// 연결 하나를 **끝까지** 처리한다: 머리 → 정책 → 본문 → 값.
 ///
-/// ## 처리 중 세기
-/// accept 가 하나 올리고, **끝내는 쪽이 하나 내린다.** 머리 단계에서 답하고 끝나면 여기서,
-/// 본문 워커로 넘어가면 워커가 내린다. 한 요청에 정확히 한 번만 줄어든다.
-fn http_head_thread(stream: std::net::TcpStream, h: &HeadHandoff) {
-    let Some(request) = head_phase(stream, h) else {
+/// 단계를 나눠 고정 워커 풀에 맡기지 않는다. 그러면 느린 클라이언트 몇이 풀을 차지해 뒤 요청이 밀린다.
+/// 연결마다 스레드를 쓰면 그 일이 없고, 스레드 수는 세 가지가 묶어 준다.
+///
+/// - 동시 연결 상한 [`HTTP_MAX_CONNECTIONS`] — 넘으면 머리도 읽지 않고 503
+/// - 머리 마감 [`crate::httpd::HEADER_TIMEOUT`] (5초)
+/// - 본문 마감 [`crate::httpd::BODY_TIMEOUT`] (30초)
+///
+/// 그래서 살아 있는 연결 스레드는 64개를 넘지 않고, 하나하나가 35초 안에 반드시 끝난다.
+fn http_conn_thread(stream: std::net::TcpStream, c: &ConnContext) {
+    // 이 연결을 어떻게 끝내든 처리 중 수는 줄어든다.
+    let _guard = InflightGuard(c.inflight.clone());
+    let at = Instant::now();
+
+    let Some(mut request) = head_phase(stream, c) else {
         // 이미 답하고 끝났다.
-        h.inflight.fetch_sub(1, Ordering::SeqCst);
         return;
     };
-    match h.to_body.try_send(request) {
-        // 워커가 세기를 이어받는다.
-        Ok(()) => {}
-        Err(crossbeam_channel::TrySendError::Full(req)) => {
-            let _ = respond_json(req, 503, "본문을 읽을 자리가 없다. 잠시 뒤 다시 시도하라");
-            h.inflight.fetch_sub(1, Ordering::SeqCst);
+
+    let query = request.query().to_owned();
+    let content_type = request.header("content-type").unwrap_or_default().to_owned();
+    let body = match request.read_body(MAX_HTTP_REQUEST_BYTES) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = respond_json(request, e.status, &e.message);
+            return;
         }
-        Err(crossbeam_channel::TrySendError::Disconnected(req)) => {
-            let _ = respond_json(req, 503, "서버가 멈추는 중이다");
-            h.inflight.fetch_sub(1, Ordering::SeqCst);
+    };
+
+    let value = match body_to_value(&content_type, body, &query) {
+        Ok(v) => v,
+        Err(msg) => {
+            let _ = respond_json(request, 400, &msg);
+            return;
+        }
+    };
+
+    // 큐가 가득 찼다. 붙잡지 않고 돌려보낸다 (M1).
+    match c.to_pipeline.try_send(HttpIncoming { value, request, at }) {
+        Ok(()) => {}
+        Err(crossbeam_channel::TrySendError::Full(inc)) => {
+            let _ = respond_json(inc.request, 503, "파이프라인이 밀렸다. 잠시 뒤 다시 시도하라");
+        }
+        Err(crossbeam_channel::TrySendError::Disconnected(inc)) => {
+            let _ = respond_json(inc.request, 503, "파이프라인이 멈췄다");
         }
     }
 }
@@ -628,7 +612,7 @@ fn http_head_thread(stream: std::net::TcpStream, h: &HeadHandoff) {
 /// 머리를 읽고 본문까지 갈 요청이면 돌려준다. 여기서 답하고 끝났으면 `None`.
 ///
 /// 본문을 읽을 필요가 없는 응답(404·401·403·503·405·413·431·408)은 전부 여기서 끝난다.
-fn head_phase(stream: std::net::TcpStream, h: &HeadHandoff) -> Option<crate::httpd::Request> {
+fn head_phase(stream: std::net::TcpStream, c: &ConnContext) -> Option<crate::httpd::Request> {
     let request = match crate::httpd::Request::read_head(stream) {
         Ok(r) => r,
         Err((sock, e)) => {
@@ -638,24 +622,30 @@ fn head_phase(stream: std::net::TcpStream, h: &HeadHandoff) -> Option<crate::htt
     };
 
     let got_path = normalize_path(request.path());
-    if got_path != *h.want_path {
+    if got_path != *c.want_path {
         let _ = respond_json(
             request,
             404,
-            &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {})", h.want_path),
+            &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {})", c.want_path),
         );
         return None;
     }
 
     // 누가 보냈는지부터 본다. 인증·출처 확인은 준비 상태보다 앞이다 —
     // 아직 준비되지 않았다는 사실조차 아무에게나 알려 줄 이유가 없다.
-    if let Err((status, why)) = policy_check(&h.policy, &request) {
+    let deny = c.policy.check(
+        request.header("origin"),
+        request.header("host"),
+        request.header("authorization"),
+        request.header("x-nl-token"),
+    );
+    if let Err((status, why)) = deny {
         let _ = respond_json(request, status, &why);
         return None;
     }
 
     // 모델이 아직 안 올라왔다. 물고 있지 말고 곧바로 돌려보낸다 — 클라이언트가 재시도하면 된다.
-    if !h.ready.load(Ordering::SeqCst) {
+    if !c.ready.load(Ordering::SeqCst) {
         let _ = respond_json(request, 503, MODEL_LOADING);
         return None;
     }
@@ -675,62 +665,12 @@ fn head_phase(stream: std::net::TcpStream, h: &HeadHandoff) -> Option<crate::htt
     Some(request)
 }
 
-fn policy_check(policy: &AccessPolicy, request: &crate::httpd::Request) -> Result<(), (u16, String)> {
-    policy.check(
-        request.header("origin"),
-        request.header("host"),
-        request.header("authorization"),
-        request.header("x-nl-token"),
-    )
-}
-
-/// 살아 있는 동안 "처리 중" 으로 세어지는 표식. 워커가 어떤 길로 끝나든 수가 맞게 한다.
+/// 살아 있는 동안 "처리 중" 으로 세어지는 표식. 어떤 길로 끝나든 수가 맞게 한다.
 struct InflightGuard(Arc<AtomicUsize>);
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// 본문을 읽어 값으로 바꾸는 워커.
-///
-/// 머리는 이미 통과했다. 여기서 오래 걸리는 것은 본문뿐이고, 그마저도 소켓 타임아웃(30초)에 끊긴다.
-fn http_body_worker(raw: &Receiver<crate::httpd::Request>, tx: &Sender<HttpIncoming>, inflight: &Arc<AtomicUsize>) {
-    for mut request in raw.iter() {
-        // 머리 스레드가 넘긴 세기를 여기서 이어받는다.
-        let _guard = InflightGuard(inflight.clone());
-        let at = Instant::now();
-
-        let query = request.query().to_owned();
-        let content_type = request.header("content-type").unwrap_or_default().to_owned();
-        let body = match request.read_body(MAX_HTTP_REQUEST_BYTES) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = respond_json(request, e.status, &e.message);
-                continue;
-            }
-        };
-
-        let value = match body_to_value(&content_type, body, &query) {
-            Ok(v) => v,
-            Err(msg) => {
-                let _ = respond_json(request, 400, &msg);
-                continue;
-            }
-        };
-
-        // 큐가 가득 찼다. 붙잡지 않고 돌려보낸다 (M1).
-        match tx.try_send(HttpIncoming { value, request, at }) {
-            Ok(()) => {}
-            Err(crossbeam_channel::TrySendError::Full(inc)) => {
-                let _ = respond_json(inc.request, 503, "파이프라인이 밀렸다. 잠시 뒤 다시 시도하라");
-            }
-            Err(crossbeam_channel::TrySendError::Disconnected(inc)) => {
-                let _ = respond_json(inc.request, 503, "파이프라인이 멈췄다");
-                break;
-            }
-        }
     }
 }
 
@@ -1231,8 +1171,7 @@ fn run_loop(
     stop: &AtomicBool,
     armed: &AtomicBool,
 ) {
-    let Runner { project, pipeline, base_dir, device, arm_input, http_workers, http_reply_timeout } = runner;
-    let http_workers = http_workers.clamp(1, 64);
+    let Runner { project, pipeline, base_dir, device, arm_input, http_reply_timeout } = runner;
     let _ = etx.send(RunnerEvent::Started);
 
     let (order, cyclic) = topo_order(&pipeline);
@@ -1340,7 +1279,7 @@ fn run_loop(
             )));
         }
         let effective = overridden.as_deref().or(token.as_deref());
-        match start_http_server(bind, path, effective, http_workers) {
+        match start_http_server(bind, path, effective) {
             Ok(srv) => {
                 let _ = etx.send(RunnerEvent::Log(format!(
                     "HTTP 서버 http://{}{} 열림 ({})",
@@ -3265,7 +3204,7 @@ mod tests {
     #[test]
     fn requests_before_ready_get_503_and_are_not_queued() {
         let addr = free_addr();
-        let mut srv = start_http_server(&addr, "/infer", None, 4).expect("서버를 열지 못했다");
+        let mut srv = start_http_server(&addr, "/infer", None).expect("서버를 열지 못했다");
         assert!(!srv.ready.load(Ordering::SeqCst), "처음에는 준비 전이다");
 
         let url = format!("http://{addr}/infer");
@@ -3577,18 +3516,18 @@ mod tests {
     #[test]
     fn opening_a_public_port_without_a_token_is_refused() {
         // `HttpServerState` 는 Debug 가 아니라 `unwrap_err` 를 못 쓴다.
-        let Err(err) = start_http_server("0.0.0.0:0", "/x", None, 4) else {
+        let Err(err) = start_http_server("0.0.0.0:0", "/x", None) else {
             panic!("토큰 없이 0.0.0.0 에 열렸다");
         };
         assert!(err.contains("토큰 없이 열 수 없다"), "{err}");
         // 토큰이 있으면 열린다 (0 번 포트라 실제로 바인드된다).
         // `HttpServerState` 는 Debug 가 아니라 `expect` 를 못 쓴다.
-        let Ok(mut ok) = start_http_server("0.0.0.0:0", "/x", Some("t"), 4) else {
+        let Ok(mut ok) = start_http_server("0.0.0.0:0", "/x", Some("t")) else {
             panic!("토큰이 있으면 열려야 한다");
         };
         ok.shutdown();
         // 루프백은 토큰 없이도 열린다.
-        let Ok(mut lo) = start_http_server("127.0.0.1:0", "/x", None, 4) else {
+        let Ok(mut lo) = start_http_server("127.0.0.1:0", "/x", None) else {
             panic!("루프백은 열려야 한다");
         };
         lo.shutdown();
@@ -4016,38 +3955,46 @@ mod tests {
         assert!(h.wait_done(Duration::from_secs(3)));
     }
 
-    /// 느린 연결 8개가 동시에 붙어 있어도 정상 요청이 곧바로 처리된다.
+    /// **느린 본문** 8개가 동시에 붙어 있어도 정상 요청이 곧바로 처리된다.
     ///
-    /// 머리 읽기가 고정 워커 풀에 있던 시절에는 느린 클라이언트 몇이 풀을 다 차지해
-    /// 뒤 요청이 밀렸다. 지금은 연결마다 짧은 스레드라 그 일이 없다.
+    /// 본문 읽기를 고정 워커 풀에 맡기던 시절에는 느린 본문 몇이 풀을 다 차지해 뒤 요청이 밀렸다.
+    /// 지금은 연결마다 스레드라 그 일이 없다 — 머리든 본문이든 자기 연결만 붙잡는다.
     #[test]
-    fn eight_slow_clients_do_not_delay_a_normal_request() {
+    fn eight_slow_bodies_do_not_delay_a_normal_request() {
         use std::io::Write as _;
-        let (h, addr) = serve_echo("slowmany");
+        let (h, addr) = serve_echo("slowbodies");
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut slow = Vec::new();
         for _ in 0..8 {
             let Ok(mut sock) = std::net::TcpStream::connect(&addr) else { continue };
             sock.set_write_timeout(Some(Duration::from_secs(2))).ok();
-            if sock.write_all(b"POST /infer HTTP/1.1\r\n").is_err() {
+            // 머리는 제대로 보낸다 — 여기서 막히면 본문 시험이 되지 않는다.
+            // 본문 4096 바이트를 약속해 놓고 아주 천천히 흘린다.
+            if sock
+                .write_all(
+                    b"POST /infer HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                      Content-Type: application/json\r\nContent-Length: 4096\r\n\r\n",
+                )
+                .is_err()
+            {
                 continue;
             }
+            let _ = sock.flush();
             let s2 = stop.clone();
             slow.push(std::thread::spawn(move || {
-                // 머리를 아주 천천히 흘린다. 서버가 5초에 끊을 때까지 계속.
                 while !s2.load(Ordering::SeqCst) {
-                    if sock.write_all(b"X").is_err() || sock.flush().is_err() {
+                    if sock.write_all(b" ").is_err() || sock.flush().is_err() {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(300));
                 }
             }));
         }
-        assert_eq!(slow.len(), 8, "느린 연결을 8개 만들지 못했다");
-        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(slow.len(), 8, "느린 본문 연결을 8개 만들지 못했다");
+        std::thread::sleep(Duration::from_millis(300));
 
-        // 느린 연결이 전부 살아 있는 동안 정상 요청이 1초 안에 끝나야 한다.
+        // 느린 본문 8개가 살아 있는 동안 정상 요청이 1초 안에 끝나야 한다.
         let start = Instant::now();
         let res = crate::http::call(
             "POST",
@@ -4056,7 +4003,7 @@ mod tests {
             Some("[7]"),
             Duration::from_secs(5),
         )
-        .expect("느린 연결 8개 때문에 정상 요청이 막혔다");
+        .expect("느린 본문 8개 때문에 정상 요청이 막혔다");
         let took = start.elapsed();
         assert_eq!(res.status, 200, "본문: {}", res.body);
         assert!(took < Duration::from_secs(1), "정상 요청이 {took:?} 나 걸렸다");
@@ -4067,16 +4014,6 @@ mod tests {
         }
         h.stop();
         assert!(h.wait_done(Duration::from_secs(3)));
-    }
-
-    /// 워커 수 기본값은 코어 수를 따르되 4~16 사이다.
-    #[test]
-    fn the_worker_default_is_clamped() {
-        let n = default_http_workers();
-        assert!((4..=16).contains(&n), "워커 기본값이 범위 밖이다: {n}");
-        // Runner 가 그 값을 그대로 쓴다.
-        let r = Runner::new(Project::new("p"), Pipeline::new("x"), tmp_dir("workers"), DevicePref::Cpu);
-        assert_eq!(r.http_workers, n);
     }
 
     /// 헤더를 끝없이 보내면 431 로 끊는다 — 메모리가 늘지 않는다.
