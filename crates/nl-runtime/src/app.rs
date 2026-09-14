@@ -3,12 +3,12 @@
 use crate::update::UpdateUi;
 use nl_bundle::Bundle;
 use nl_core::gui::{Binding, BuiltinAction};
-use nl_core::{BundleManifest, DevicePref, GuiLayout, PNodeId, Pipeline, Project, WidgetId, WidgetKind};
+use nl_core::{BundleManifest, DevicePref, GuiLayout, ModelId, PNodeId, Pipeline, Project, WidgetId, WidgetKind};
 use nl_engine::{DeviceInfo, Value};
 use nl_gui::{GuiEvent, GuiState, RenderMode};
 use nl_io::runner::RunnerInput;
 use nl_io::{Runner, RunnerEvent, RunnerHandle};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -97,6 +97,23 @@ fn join_inside(base: &Path, rel: &str) -> Option<PathBuf> {
 
 // ───────────────────────────── 파이프라인 ─────────────────────────────
 
+/// 파이프라인의 모델 노드 → 그 노드가 돌리는 모델.
+///
+/// `Binding::ModelOutput` 은 모델을 가리키는데 실행기는 노드 단위로 값을 낸다. 그 사이를 잇는 표다.
+fn model_nodes_of(pipeline: Option<&Pipeline>) -> BTreeMap<PNodeId, ModelId> {
+    let Some(pipeline) = pipeline else {
+        return BTreeMap::new();
+    };
+    pipeline
+        .nodes
+        .values()
+        .filter_map(|n| match &n.kind {
+            nl_core::PNodeKind::Model { model, .. } => Some((n.id, *model)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// 매니페스트의 진입 파이프라인. 지정이 없고 파이프라인이 하나뿐이면 그것을 쓴다.
 pub fn entry_pipeline(project: &Project, manifest: &BundleManifest) -> Option<Pipeline> {
     if let Some(id) = manifest.entry_pipeline {
@@ -171,12 +188,18 @@ pub struct RuntimeApp {
     update: Option<UpdateUi>,
     /// 입력 무장 안내를 이미 로그에 남겼는가 (시작/정지를 반복해도 한 번만).
     warned_arm_input: bool,
+    /// 파이프라인의 모델 노드 → 그 노드가 돌리는 모델. `Binding::ModelOutput` 위젯에 값을 넘길 때 쓴다.
+    ///
+    /// `PipelineOutput` 은 노드를 직접 가리키지만 `ModelOutput` 은 모델을 가리킨다. 그 모델을 돌리는
+    /// 노드가 값을 내는 순간이 곧 "마지막 추론 값" 이라, 노드에서 모델로 한 번 옮겨야 한다.
+    model_nodes: BTreeMap<PNodeId, ModelId>,
 }
 
 impl RuntimeApp {
     /// 번들과 이미 준비된 작업 폴더로 앱을 만든다. `manifest.autostart` 면 곧바로 파이프라인을 시작한다.
     pub fn new(bundle: &Bundle, base_dir: PathBuf, device: DevicePref) -> Self {
         let pipeline = entry_pipeline(&bundle.project, &bundle.manifest);
+        let model_nodes = model_nodes_of(pipeline.as_ref());
         let mut app = Self {
             project: bundle.project.clone(),
             manifest: bundle.manifest.clone(),
@@ -193,6 +216,7 @@ impl RuntimeApp {
             stats: None,
             update: None,
             warned_arm_input: false,
+            model_nodes,
         };
         app.log(format!("{} {}", app.manifest.app_name, app.manifest.app_version));
         if app.manifest.autostart {
@@ -335,6 +359,20 @@ impl RuntimeApp {
                     self.gui.push_value(*widget, value.clone(), points);
                 }
                 RunnerEvent::Value { node, value } => self.apply_node_value(*node, value),
+                // 이미지 원본은 `Value` 로 오지 않는다(드롭 정책) — 이 축소판이 유일한 통로다.
+                RunnerEvent::ValuePreview {
+                    node,
+                    width,
+                    height,
+                    rgba,
+                } => {
+                    let preview = Value::Image {
+                        width: *width,
+                        height: *height,
+                        rgba: rgba.clone(),
+                    };
+                    self.apply_node_value(*node, &preview);
+                }
                 RunnerEvent::Stats { hz, tick_ms, .. } => self.stats = Some((*hz, *tick_ms)),
                 _ => {}
             }
@@ -354,13 +392,23 @@ impl RuntimeApp {
         stopped
     }
 
-    /// `Binding::PipelineOutput{node}` 로 묶인 위젯에도 값을 반영한다.
+    /// 이 노드의 값을 받을 위젯들에 넘긴다. 빌더 미리보기(`nl_app::session`)와 같은 규칙이다.
+    ///
+    /// `PipelineOutput` 은 노드를 직접 가리키고, `ModelOutput` 은 모델을 가리킨다. 뒤쪽은 그 모델을
+    /// 돌리는 노드가 값을 낼 때가 곧 마지막 추론 값이라 여기서 함께 채운다.
     fn apply_node_value(&mut self, node: PNodeId, value: &Value) {
+        let model = self.model_nodes.get(&node).copied();
         let targets: Vec<WidgetId> = self
             .layout
             .widgets
             .values()
-            .filter(|w| matches!(&w.binding, Some(Binding::PipelineOutput { node: n }) if *n == node))
+            .filter(|w| match &w.binding {
+                Some(Binding::PipelineOutput { node: n }) => *n == node,
+                // 필드 이름은 아직 쓰지 않는다 — 모델 출력이 하나면 그것이 곧 그 필드다.
+                // 다출력을 지원할 때 `Value::Json` 에서 필드를 꺼내는 자리가 여기다.
+                Some(Binding::ModelOutput { model: m, .. }) => model == Some(*m),
+                _ => false,
+            })
             .map(|w| w.id)
             .collect();
         for id in targets {
@@ -708,6 +756,150 @@ mod tests {
         (dir, h)
     }
 
+    /// `Binding::ModelOutput` 위젯이 든 번들. 모델 노드 하나와 그 모델을 가리키는 값 위젯·이미지 위젯.
+    fn model_output_bundle() -> (Bundle, PNodeId, ModelId, WidgetId, WidgetId) {
+        let mut project = Project::new("데모");
+        let model = ModelId::from_u128(77);
+        project.models.insert(model, nl_core::ModelDef::new("분류기"));
+
+        let mut pipeline = Pipeline::new("주 파이프라인");
+        let node = pipeline.add_node(PNode::new(PNodeKind::Model { model, payload: None }, [0.0, 0.0]));
+        // 같은 파이프라인의 다른 노드. 모델이 아니므로 ModelOutput 위젯을 건드리면 안 된다.
+        let other = pipeline.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [0.0, 60.0]));
+        let pid = pipeline.id;
+        project.pipelines.insert(pid, pipeline);
+
+        let mut layout = GuiLayout::default();
+        layout.window.title = "모델 출력".into();
+        let mut value = Widget::new(
+            WidgetKind::Value {
+                prefix: "예측: ".into(),
+            },
+            [10.0, 10.0, 260.0, 30.0],
+        );
+        value.binding = Some(Binding::ModelOutput {
+            model,
+            field: "라벨".into(),
+        });
+        let value_id = layout.add(value);
+        let mut image = Widget::new(WidgetKind::Image, [10.0, 50.0, 120.0, 120.0]);
+        image.binding = Some(Binding::ModelOutput {
+            model,
+            field: "미리보기".into(),
+        });
+        let image_id = layout.add(image);
+        // 다른 노드에 묶인 위젯 — 모델 값에 반응하면 안 된다.
+        let mut unrelated = Widget::new(
+            WidgetKind::Value {
+                prefix: "로그: ".into(),
+            },
+            [10.0, 180.0, 260.0, 30.0],
+        );
+        unrelated.binding = Some(Binding::PipelineOutput { node: other });
+        layout.add(unrelated);
+        project.gui = layout;
+
+        let mut manifest = BundleManifest::new("모델 출력", "0.1.0");
+        manifest.entry_pipeline = Some(pid);
+        manifest.autostart = false;
+        (Bundle::new(manifest, project), node, model, value_id, image_id)
+    }
+
+    fn model_output_app(bundle: &Bundle) -> (tempfile::TempDir, RuntimeApp) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = RuntimeApp::new(bundle, dir.path().to_path_buf(), DevicePref::Cpu);
+        (dir, app)
+    }
+
+    /// 모델 노드가 값을 내면 그 모델을 가리키는 `ModelOutput` 위젯에 값이 들어간다.
+    #[test]
+    fn a_model_node_value_reaches_widgets_bound_to_that_model() {
+        let (bundle, node, model, value_id, _image_id) = model_output_bundle();
+        let (_dir, mut app) = model_output_app(&bundle);
+        assert_eq!(app.model_nodes.get(&node), Some(&model), "모델 노드 표가 비었습니다");
+
+        app.apply_node_value(node, &Value::Number(0.75));
+        assert_eq!(app.gui.values.get(&value_id), Some(&Value::Number(0.75)));
+    }
+
+    /// 모델이 아닌 노드의 값은 `ModelOutput` 위젯을 건드리지 않는다.
+    #[test]
+    fn a_value_from_another_node_does_not_touch_model_output_widgets() {
+        let (bundle, _node, _model, value_id, _image_id) = model_output_bundle();
+        let (_dir, mut app) = model_output_app(&bundle);
+
+        let other = PNodeId::from_u128(4242);
+        app.apply_node_value(other, &Value::Number(9.0));
+        assert!(!app.gui.values.contains_key(&value_id), "엉뚱한 노드 값이 들어갔습니다");
+    }
+
+    /// 다른 모델을 가리키는 위젯에는 들어가지 않는다.
+    #[test]
+    fn only_the_matching_model_receives_the_value() {
+        let (mut bundle, node, _model, _value_id, _image_id) = model_output_bundle();
+        // 위젯의 바인딩을 다른 모델로 바꾼다.
+        let other_model = ModelId::from_u128(99);
+        for w in bundle.project.gui.widgets.values_mut() {
+            if let Some(Binding::ModelOutput { model, .. }) = &mut w.binding {
+                *model = other_model;
+            }
+        }
+        let ids: Vec<WidgetId> = bundle.project.gui.widgets.keys().copied().collect();
+        let (_dir, mut app) = model_output_app(&bundle);
+
+        app.apply_node_value(node, &Value::Number(1.0));
+        for id in ids {
+            assert!(!app.gui.values.contains_key(&id), "{id:?} 에 값이 들어갔습니다");
+        }
+    }
+
+    /// 이미지 축소판(`ValuePreview`)도 같은 배선을 탄다 — 이미지 원본은 `Value` 로 오지 않는다.
+    #[test]
+    fn a_value_preview_reaches_model_output_widgets_as_an_image() {
+        let (bundle, node, _model, value_id, image_id) = model_output_bundle();
+        let (_dir, mut app) = model_output_app(&bundle);
+
+        let rgba = vec![0u8; 2 * 2 * 4];
+        app.apply_node_value(
+            node,
+            &Value::Image {
+                width: 2,
+                height: 2,
+                rgba: rgba.clone(),
+            },
+        );
+        assert!(
+            matches!(
+                app.gui.values.get(&image_id),
+                Some(Value::Image {
+                    width: 2,
+                    height: 2,
+                    ..
+                })
+            ),
+            "이미지 위젯에 축소판이 들어가지 않았습니다"
+        );
+        // 같은 모델을 가리키므로 값 위젯에도 들어간다 (렌더러가 "이미지 2×2" 로 적는다).
+        assert!(app.gui.values.contains_key(&value_id));
+    }
+
+    /// 모델 출력이 든 화면이 패닉 없이 그려진다.
+    #[test]
+    fn a_bundle_with_model_output_widgets_renders() {
+        let (bundle, node, _model, _value_id, _image_id) = model_output_bundle();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu);
+        app.apply_node_value(node, &Value::Number(0.5));
+
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(400.0, 300.0))
+            .with_step_dt(1.0 / 60.0)
+            .with_max_steps(60)
+            .build_ui_state(|ui, app: &mut RuntimeApp| app.draw(ui), app);
+        h.run_steps(3);
+        assert!(h.state().log_lines().iter().any(|l| l.contains("모델 출력")));
+    }
+
     #[test]
     fn renders_without_panic_and_shows_bundle_gui() {
         let (_dir, mut h) = harness(true);
@@ -931,6 +1123,44 @@ mod tests {
             .threshold(0.7)
             .max_failed_pixels(64);
         h.try_snapshot_options("runtime-app", &options).unwrap();
+    }
+
+    /// `ModelOutput` 위젯에 값이 들어간 화면을 굳힌다. 배선이 끊기면 값 칸이 비어 골든과 어긋난다.
+    #[test]
+    fn model_output_snapshot() {
+        if !renderer_ready() {
+            return;
+        }
+        let Some(fonts) = snapshot_fonts() else {
+            skip_optional(&format!(
+                "골든을 만든 글꼴({SNAPSHOT_FONT})이 없습니다. \
+                 Fedora `google-noto-sans-cjk-fonts`, Debian/Ubuntu `fonts-noto-cjk` 를 깔면 돕니다"
+            ));
+            return;
+        };
+        let (bundle, node, _model, _value_id, _image_id) = model_output_bundle();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = RuntimeApp::new(&bundle, dir.path().to_path_buf(), DevicePref::Cpu);
+
+        // 모델 노드가 낸 값. 배선이 맞으면 "예측: 0.750" 이 보이고, 끊기면 빈 칸이 된다.
+        //
+        // 숫자 하나만 넣는다. 두 위젯이 같은 모델을 가리키므로 값은 **둘 다** 받는다 —
+        // `field` 로 갈라 보내는 것은 모델이 출력을 여럿 낼 때의 일이고 아직 하지 않는다.
+        // 이미지 경로는 `a_value_preview_reaches_model_output_widgets_as_an_image` 가 따로 본다.
+        app.apply_node_value(node, &Value::Number(0.75));
+
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(420.0, 300.0))
+            .with_step_dt(1.0 / 60.0)
+            .with_max_steps(60)
+            .build_ui_state(|ui, app: &mut RuntimeApp| app.draw(ui), app);
+        h.ctx.set_fonts(fonts);
+        h.run_steps(3);
+
+        let options = egui_kittest::SnapshotOptions::new()
+            .threshold(0.7)
+            .max_failed_pixels(64);
+        h.try_snapshot_options("model-output", &options).unwrap();
     }
 
     #[test]
