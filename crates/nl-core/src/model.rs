@@ -435,6 +435,29 @@ pub enum LayerKind {
         vocab: usize,
         dim: usize,
     },
+    /// LSTM. 입력 `[L, D]` → `return_sequence` 면 `[L, H]`, 아니면 마지막 상태 `[H]`.
+    /// 양방향이면 `H` 가 `hidden * 2` 다 (두 방향을 마지막 차원에서 이어 붙인다).
+    Lstm {
+        hidden: usize,
+        #[serde(default)]
+        bidirectional: bool,
+        #[serde(default = "yes")]
+        return_sequence: bool,
+    },
+    /// GRU. 형상 규칙은 [`LayerKind::Lstm`] 과 같다.
+    Gru {
+        hidden: usize,
+        #[serde(default)]
+        bidirectional: bool,
+        #[serde(default = "yes")]
+        return_sequence: bool,
+    },
+    /// 셀프 어텐션. 입력 `[L, D]` → 출력 `[L, D]`. `D` 는 `heads` 로 나누어떨어져야 한다.
+    MultiHeadAttention {
+        heads: usize,
+        #[serde(default)]
+        dropout: f32,
+    },
 }
 
 fn yes() -> bool {
@@ -477,6 +500,10 @@ pub enum LayerCategory {
     Normalize,
     Merge,
     Embed,
+    /// 순환 (LSTM·GRU).
+    Sequence,
+    /// 어텐션.
+    Attention,
 }
 
 impl LayerCategory {
@@ -492,6 +519,8 @@ impl LayerCategory {
             LayerCategory::Normalize => "정규화(통계)",
             LayerCategory::Merge => "병합",
             LayerCategory::Embed => "임베딩",
+            LayerCategory::Sequence => "순환",
+            LayerCategory::Attention => "어텐션",
         }
     }
 }
@@ -550,6 +579,17 @@ impl LayerKind {
             LayerKind::Mul,
             LayerKind::Concat { dim: 0 },
             LayerKind::Embedding { vocab: 1000, dim: 32 },
+            LayerKind::Lstm {
+                hidden: 64,
+                bidirectional: false,
+                return_sequence: true,
+            },
+            LayerKind::Gru {
+                hidden: 64,
+                bidirectional: false,
+                return_sequence: true,
+            },
+            LayerKind::MultiHeadAttention { heads: 4, dropout: 0.0 },
         ]
     }
 
@@ -581,6 +621,9 @@ impl LayerKind {
             LayerKind::Mul => s("Mul", C::Merge, 2, true, false, [255, 193, 7]),
             LayerKind::Concat { .. } => s("Concat", C::Merge, 2, true, false, [255, 193, 7]),
             LayerKind::Embedding { .. } => s("Embedding", C::Embed, 1, true, true, [233, 30, 99]),
+            LayerKind::Lstm { .. } => s("LSTM", C::Sequence, 1, true, true, [63, 81, 181]),
+            LayerKind::Gru { .. } => s("GRU", C::Sequence, 1, true, true, [92, 107, 192]),
+            LayerKind::MultiHeadAttention { .. } => s("MultiHeadAttention", C::Attention, 1, true, true, [0, 150, 136]),
         }
     }
 
@@ -624,6 +667,27 @@ impl LayerKind {
             LayerKind::LayerNorm { .. } => String::new(),
             LayerKind::Concat { dim } => format!("dim {dim}"),
             LayerKind::Embedding { vocab, dim } => format!("{vocab} → {dim}"),
+            LayerKind::Lstm {
+                hidden,
+                bidirectional,
+                return_sequence,
+            }
+            | LayerKind::Gru {
+                hidden,
+                bidirectional,
+                return_sequence,
+            } => {
+                let dir = if *bidirectional { " 양방향" } else { "" };
+                let seq = if *return_sequence { "" } else { " 마지막만" };
+                format!("h{hidden}{dir}{seq}")
+            }
+            LayerKind::MultiHeadAttention { heads, dropout } => {
+                if *dropout > 0.0 {
+                    format!("{heads} 헤드 p={dropout}")
+                } else {
+                    format!("{heads} 헤드")
+                }
+            }
         }
     }
 }
@@ -727,7 +791,7 @@ mod tests {
         dedup.sort();
         dedup.dedup();
         assert_eq!(tags.len(), dedup.len(), "팔레트에 같은 종류가 두 번");
-        assert_eq!(tags.len(), 17, "새 LayerKind 변형을 팔레트에 추가할 것");
+        assert_eq!(tags.len(), 20, "새 LayerKind 변형을 팔레트에 추가할 것");
     }
 
     #[test]

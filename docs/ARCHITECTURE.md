@@ -61,6 +61,10 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   `slot` 로 구분한다.
 - `LayerKind` 는 데이터 열거형이다(`Linear { out_features, bias }`, `Conv2d {..}`, `Activation(Act)`, `Dropout`, `BatchNorm`,
   `LayerNorm`, `Flatten`, `Reshape`, `MaxPool2d`, `AvgPool2d`, `Add`, `Concat`, `Embedding`, `Input`, `Output`, …).
+  M3 에서 순환·어텐션이 더해졌다: `Lstm`/`Gru { hidden, bidirectional, return_sequence }` 는 `[L, D]` 를 받아
+  `return_sequence` 면 `[L, H]`, 아니면 마지막 상태 `[H]` 를 내고(양방향이면 `H` 가 두 배), `MultiHeadAttention { heads, dropout }`
+  는 셀프 어텐션으로 `[L, D] → [L, D]` 다(`D % heads == 0`). 셋 다 burn 의 `nn` 모듈 대신 파라미터 텐서 + 게이트 수식으로
+  직접 구현했다 — 그래프가 런타임에 정해져 `Module` 파생을 쓸 수 없기 때문이다.
   각 종류의 입력 슬롯 수·파라미터 유무·표시 색은 `LayerKind::spec()` 이 단일 소유한다. 엔진은 `LayerKind` 를 해석해
   텐서 연산으로 바꾸며, **새 레이어 추가 = core 의 enum 변형 + spec + shape 규칙 + engine 의 연산 하나**다.
 - `add_edge` 는 자기참조/중복/슬롯 점유만 거부하고 **순환은 허용** — 검증기(`validate`)가 감지해 오류 목록으로 보고하고,

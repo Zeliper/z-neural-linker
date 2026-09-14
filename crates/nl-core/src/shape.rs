@@ -357,6 +357,47 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             out[*dim] = a[*dim] + b[*dim];
             checked(Shape::from_sample(&out))
         }
+        LayerKind::Lstm {
+            hidden,
+            bidirectional,
+            return_sequence,
+        }
+        | LayerKind::Gru {
+            hidden,
+            bidirectional,
+            return_sequence,
+        } => {
+            if *hidden == 0 {
+                return Err(invalid("hidden 은 0 일 수 없음"));
+            }
+            let s = one()?;
+            if s.rank() != 3 {
+                return Err(mismatch(format!("순환 레이어는 [B, L, D] 입력이 필요 (지금 {s})")));
+            }
+            let sm = s.sample();
+            let out = hidden * if *bidirectional { 2 } else { 1 };
+            if *return_sequence {
+                checked(Shape::from_sample(&[sm[0], out]))
+            } else {
+                checked(Shape::from_sample(&[out]))
+            }
+        }
+        LayerKind::MultiHeadAttention { heads, .. } => {
+            if *heads == 0 {
+                return Err(invalid("heads 는 0 일 수 없음"));
+            }
+            let s = one()?;
+            if s.rank() != 3 {
+                return Err(mismatch(format!("어텐션은 [B, L, D] 입력이 필요 (지금 {s})")));
+            }
+            let d = s.sample()[1];
+            if d % heads != 0 {
+                return Err(mismatch(format!(
+                    "특징 차원 {d} 가 헤드 수 {heads} 로 나누어떨어지지 않음"
+                )));
+            }
+            Ok(s)
+        }
         LayerKind::Embedding { vocab, dim } => {
             if *vocab == 0 || *dim == 0 {
                 return Err(invalid("vocab·dim 은 0 일 수 없음"));
@@ -581,6 +622,68 @@ mod tests {
         let e = add(&mut g, LayerKind::Embedding { vocab: 10, dim: 4 });
         link(&mut g, i, e);
         assert!(matches!(infer(&g).errors[&e], GraphError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn sequence_layers_follow_return_sequence_and_direction() {
+        let cases = [
+            (false, false, vec![16]),
+            (true, false, vec![6, 16]),
+            (false, true, vec![32]),
+            (true, true, vec![6, 32]),
+        ];
+        for (return_sequence, bidirectional, want) in cases {
+            for kind in [
+                LayerKind::Lstm {
+                    hidden: 16,
+                    bidirectional,
+                    return_sequence,
+                },
+                LayerKind::Gru {
+                    hidden: 16,
+                    bidirectional,
+                    return_sequence,
+                },
+            ] {
+                let mut g = Graph::default();
+                let i = add(&mut g, LayerKind::Input { shape: vec![6, 8] });
+                let r = add(&mut g, kind.clone());
+                link(&mut g, i, r);
+                let rep = infer(&g);
+                assert!(rep.is_ok(), "{kind:?}: {:?}", rep.errors);
+                assert_eq!(rep.shape(r).unwrap().sample(), want, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_layers_need_a_rank_three_input() {
+        let mut g = Graph::default();
+        let i = add(&mut g, LayerKind::Input { shape: vec![8] });
+        let r = add(
+            &mut g,
+            LayerKind::Lstm {
+                hidden: 4,
+                bidirectional: false,
+                return_sequence: true,
+            },
+        );
+        link(&mut g, i, r);
+        assert!(matches!(infer(&g).errors[&r], GraphError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn attention_keeps_the_shape_and_checks_head_divisibility() {
+        let mut g = Graph::default();
+        let i = add(&mut g, LayerKind::Input { shape: vec![5, 12] });
+        let ok = add(&mut g, LayerKind::MultiHeadAttention { heads: 4, dropout: 0.0 });
+        let bad = add(&mut g, LayerKind::MultiHeadAttention { heads: 5, dropout: 0.0 });
+        link(&mut g, i, ok);
+        link(&mut g, i, bad);
+        let rep = infer(&g);
+        assert_eq!(rep.shape(ok).unwrap().sample(), vec![5, 12]);
+        let e = rep.errors[&bad].to_string();
+        assert!(e.contains("나누어떨어지지"), "{e}");
     }
 
     #[test]
