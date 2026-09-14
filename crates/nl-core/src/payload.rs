@@ -52,6 +52,12 @@ pub enum Transform {
     MapLabel,
     /// JSON 포인터로 값 추출 (예: "/data/0/value").
     JsonPointer { pointer: String },
+    /// 문자 단위 토크나이저 (`Text` 필드 → Embedding 입력).
+    ///
+    /// `vocab` 의 문자 하나가 인덱스 하나다. 인덱스는 **1 부터** 시작하고 0 은 패딩 겸 미지 문자다
+    /// (따라서 Embedding 의 `vocab` 은 `vocab.chars().count() + 1` 이상이어야 한다).
+    /// 결과는 길이 `max_len` 의 정수 텐서 — 짧으면 0 으로 채우고 길면 자른다.
+    Tokenize { vocab: String, max_len: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,7 +85,9 @@ impl Field {
             FieldKind::Scalar => vec![1],
             FieldKind::Vector { len } => vec![*len],
             FieldKind::ClassLabel { labels } => vec![labels.len()],
-            FieldKind::Text | FieldKind::Json => return None,
+            // Text 는 그 자체로 형상이 없다 — `Tokenize` 가 있어야 정해진다.
+            FieldKind::Text => vec![],
+            FieldKind::Json => return None,
         };
         for t in &self.encode {
             match t {
@@ -93,8 +101,12 @@ impl Field {
                     shape[2] = *width;
                 }
                 Transform::OneHot { classes } => shape = vec![*classes],
+                Transform::Tokenize { max_len, .. } => shape = vec![*max_len],
                 _ => {}
             }
+        }
+        if shape.is_empty() {
+            return None; // Text 인데 Tokenize 가 없다
         }
         Some(shape)
     }

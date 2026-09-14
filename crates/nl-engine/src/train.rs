@@ -266,6 +266,9 @@ fn train_on<B: AutodiffBackend>(
         bail!("데이터셋이 비어 있습니다");
     }
     check_dataset_inputs(&info.input_shape, &in_shapes)?;
+    if let Some(w) = info.empty_class_warning() {
+        let _ = tx.send(TrainEvent::Log(w));
+    }
 
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
     if req.dataset.shuffle {

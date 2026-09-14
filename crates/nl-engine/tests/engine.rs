@@ -776,6 +776,103 @@ fn image_sized_samples_train_through_the_resident_path() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ───────────────────────────── 빈 클래스 · 텍스트 입력 ─────────────────────────────
+
+#[test]
+fn training_warns_about_classes_with_no_samples() {
+    let dir = temp_dir("empty-class");
+    // 라벨 0, 1, 3 만 쓴다 → 클래스 2 는 비어 있다.
+    let mut text = String::from("x0,x1,y\n");
+    for i in 0..120 {
+        let label = [0, 1, 3][i % 3];
+        let f = ((i * 7) % 19) as f32 / 10.0 - 1.0;
+        text.push_str(&format!("{f},{},{label}\n", f * 0.5));
+    }
+    std::fs::write(dir.join("gap.csv"), text).unwrap();
+    let ds = DatasetSpec::new(
+        "간격",
+        DataSource::Csv {
+            path: "gap.csv".into(),
+            input_cols: vec!["x0".into(), "x1".into()],
+            target_cols: vec!["y".into()],
+            header: true,
+        },
+    );
+
+    let mut def = mlp(2, 8, 4);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.epochs = 3;
+    def.train.batch_size = 32;
+    def.train.device = DevicePref::Cpu;
+
+    let (run, logs) = train_collecting_logs(def, ds, &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    let warning = logs
+        .iter()
+        .find(|m| m.contains("샘플이 하나도 없는 클래스"))
+        .unwrap_or_else(|| panic!("빈 클래스 경고가 없습니다: {logs:?}"));
+    assert!(warning.contains('2'), "어느 클래스가 비었는지 없습니다: {warning}");
+
+    // 스캔 결과도 같은 것을 알려야 한다.
+    let info = nl_engine::scan(&nl_core::DatasetSpec::new(
+        "간격",
+        DataSource::Csv {
+            path: "gap.csv".into(),
+            input_cols: vec!["x0".into(), "x1".into()],
+            target_cols: vec!["y".into()],
+            header: true,
+        },
+    ), &dir)
+    .unwrap();
+    assert_eq!(info.classes.len(), 4);
+    assert_eq!(info.empty_classes, vec![2]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn tokenized_text_feeds_an_embedding_model() {
+    use nl_core::payload::{Field, FieldKind, Transform};
+
+    const VOCAB: &str = "abcdefghijklmnopqrstuvwxyz ";
+    const LEN: usize = 8;
+
+    let mut field = Field::new("문장", FieldKind::Text);
+    field.encode = vec![Transform::Tokenize { vocab: VOCAB.into(), max_len: LEN }];
+    assert_eq!(field.tensor_shape(), Some(vec![LEN]));
+
+    // 텍스트 → [1, 8] 정수 텐서.
+    let encoded = nl_engine::encode(&field, &nl_engine::Value::Text("hello you".into())).unwrap();
+    assert_eq!(encoded.shape, vec![1, LEN]);
+    assert!(encoded.data.iter().all(|v| *v >= 0.0 && (*v as usize) <= VOCAB.chars().count()));
+
+    // 그 텐서를 그대로 먹는 Embedding 모델.
+    let def = chain(vec![
+        LayerKind::Input { shape: vec![LEN] },
+        LayerKind::Embedding { vocab: VOCAB.chars().count() + 1, dim: 6 },
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 3, bias: true },
+    ]);
+    assert_eq!(inferred_output_shape(&def), vec![3]);
+
+    let mut session = Session::load(&def, None, DevicePref::Cpu).unwrap();
+    let out = session.run(&[encoded]).unwrap();
+    assert_eq!(out[0].shape, vec![1, 3]);
+    assert!(out[0].data.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn resolve_cached_is_safe_to_call_every_frame() {
+    // 목록만 준비되면(백그라운드 작업이 한 번 돌면) 비차단 조회가 값을 준다.
+    let _ = nl_engine::enumerate();
+    let cached = nl_engine::resolve_cached(DevicePref::Cpu).expect("CPU 는 항상 있다");
+    assert_eq!(cached.pref, DevicePref::Cpu);
+    // 몇 번을 불러도 같은 답.
+    for _ in 0..100 {
+        assert_eq!(nl_engine::resolve_cached(DevicePref::Cpu), Some(cached.clone()));
+    }
+}
+
 // ───────────────────────────── 성능 측정 (NL_BENCH=1) ─────────────────────────────
 
 /// XOR 1000 샘플 × 200 에포크 CPU 소요 시간. 배치 업로드 경로를 바꿀 때 전후 비교용.
