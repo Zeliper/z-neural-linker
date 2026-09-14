@@ -443,6 +443,8 @@ pub struct NlApp {
     tool_job: Option<Receiver<ToolEvent>>,
     tool_progress: Option<f32>,
     /// 진행 중인 설치를 멈추라는 신호. 청크 사이에서 확인된다.
+    /// 행 수를 세는 백그라운드 작업 (데이터셋별).
+    count_jobs: BTreeMap<DatasetId, Receiver<Result<usize, String>>>,
     tool_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 자동 저장·복구.
     autosaver: recovery::AutoSaver,
@@ -588,6 +590,7 @@ impl NlApp {
             plan_job: None,
             tool_job: None,
             tool_progress: None,
+            count_jobs: BTreeMap::new(),
             tool_cancel: None,
             autosaver: recovery::AutoSaver::default(),
             recover_candidates: recovery::list(&recovery::default_dir()),
@@ -1165,6 +1168,7 @@ impl NlApp {
                     self.autosaver.mark_file_save(now);
                 }
             }
+            ViewAction::CountDatasetRows(id) => self.count_dataset_rows(id, now),
             ViewAction::FindRecoveryFiles => {
                 self.recover_candidates = recovery::list(&self.recovery_dir);
                 if self.recover_candidates.is_empty() {
@@ -1302,7 +1306,7 @@ impl NlApp {
             Ok(info) => {
                 let msg = format!(
                     "샘플 {} · 입력 {} · 타깃 {}{}",
-                    info.samples,
+                    views::sample_count(&info),
                     views::shape_text(&info.input_shape),
                     views::shape_text(&info.target_shape),
                     if info.classes.is_empty() {
@@ -1325,6 +1329,88 @@ impl NlApp {
                 self.toast(format!("스캔 실패: {msg}"), now);
             }
         }
+    }
+
+    /// CSV 행 수를 정확히 센다.
+    ///
+    /// 스캔은 큰 파일을 다 읽지 않고 어림한다. 정확한 값은 파일 전체를 훑어야 나오므로 UI 스레드에서
+    /// 부를 수 없다 — 수 GB 짜리면 그동안 화면이 멎는다.
+    fn count_dataset_rows(&mut self, id: DatasetId, now: f64) {
+        if self.count_jobs.contains_key(&id) {
+            return;
+        }
+        let Some(spec) = self.doc.project.datasets.get(&id).cloned() else {
+            return;
+        };
+        let base = self.base_dir();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("nl-count".into()).spawn(move || {
+            let _ = tx.send(nl_engine::data::count_csv_rows(&spec, &base).map_err(|e| format!("{e:#}")));
+        });
+        match spawned {
+            Ok(_) => {
+                self.count_jobs.insert(id, rx);
+                self.views.data.counting.insert(id);
+            }
+            Err(e) => self.toast(format!("행을 세지 못했습니다: {e}"), now),
+        }
+    }
+
+    /// 행 세기 결과를 받아 캐시를 갱신한다.
+    fn tick_counts(&mut self, ctx: &egui::Context, now: f64) {
+        if self.count_jobs.is_empty() {
+            return;
+        }
+        let done: Vec<(DatasetId, Result<usize, String>)> = self
+            .count_jobs
+            .iter()
+            .filter_map(|(id, rx)| match rx.try_recv() {
+                Ok(r) => Some((*id, r)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some((*id, Err("세는 작업이 끊겼습니다".to_string())))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            })
+            .collect();
+        if done.is_empty() {
+            ctx.request_repaint_after(REPOLL);
+            return;
+        }
+        for (id, result) in done {
+            self.count_jobs.remove(&id);
+            self.views.data.counting.remove(&id);
+            match result {
+                Ok(n) => {
+                    let Some(mut spec) = self.doc.project.datasets.get(&id).cloned() else {
+                        continue;
+                    };
+                    let Some(info) = spec.cached_info.as_mut() else {
+                        continue;
+                    };
+                    info.samples = n;
+                    info.samples_estimated = false;
+                    let msg = format!(
+                        "샘플 {} · 입력 {} · 타깃 {}{}",
+                        views::sample_count(info),
+                        views::shape_text(&info.input_shape),
+                        views::shape_text(&info.target_shape),
+                        if info.classes.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · 클래스 {}", info.classes.len())
+                        }
+                    );
+                    self.views.data.scan.insert(id, Ok(msg));
+                    self.doc.apply_local(vec![Op::UpsertDataset { dataset: spec }]);
+                    self.toast(format!("행을 다 셌습니다: {n}개"), now);
+                }
+                Err(e) => {
+                    self.views.data.scan.insert(id, Err(e.clone()));
+                    self.toast(format!("행을 세지 못했습니다: {e}"), now);
+                }
+            }
+        }
+        ctx.request_repaint();
     }
 
     fn preview_dataset(&mut self, id: DatasetId, ctx: &egui::Context) {
@@ -3174,6 +3260,7 @@ impl eframe::App for NlApp {
         self.tick_updater(ctx);
         self.tick_devices(ctx);
         self.tick_autosave(ctx, now);
+        self.tick_counts(ctx, now);
         self.doc.tick(now);
         if self.doc.in_burst() {
             // 입력이 멎어도 burst 를 undo 항목으로 확정하려면 한 번 더 깨어나야 한다.

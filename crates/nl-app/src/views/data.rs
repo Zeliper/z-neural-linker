@@ -14,7 +14,7 @@ use nl_core::dataset::{DataSource, DatasetSpec, Split, SyntheticKind};
 use nl_core::payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
 use nl_core::pipeline::Region;
 use nl_core::{DatasetId, Op, PayloadId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 // ── 뷰 상태 ─────────────────────────────────────────────────────────
@@ -90,6 +90,8 @@ pub struct DataState {
     pub open_field: Option<(PayloadId, bool, usize)>,
     /// 녹화 폼 (열려 있을 때만).
     pub record_form: Option<RecordForm>,
+    /// 행 수를 세는 중인 데이터셋. 버튼을 두 번 눌러 스레드가 겹치지 않게 한다.
+    pub counting: BTreeSet<DatasetId>,
 }
 
 // ── 뷰 ──────────────────────────────────────────────────────────────
@@ -208,6 +210,21 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
                 actions.push(ViewAction::Ops(vec![Op::DeleteDataset { id: *id }]));
                 actions.push(ViewAction::Select(Selection::None));
             }
+            // 큰 CSV 는 스캔이 행 수를 어림한다. 정확한 값이 필요하면 여기서 한 번 세어 둔다.
+            let estimated = d.cached_info.as_ref().is_some_and(|i| i.samples_estimated);
+            if estimated && matches!(d.source, DataSource::Csv { .. }) {
+                let counting = state.counting.contains(id);
+                if ui
+                    .add_enabled(!counting, egui::Button::new("＃ 정확히 세기"))
+                    .on_hover_text("파일 전체를 훑어 행 수를 셉니다. 큰 파일은 시간이 걸립니다")
+                    .clicked()
+                {
+                    actions.push(ViewAction::CountDatasetRows(*id));
+                }
+                if counting {
+                    ui.label(RichText::new("세는 중…").color(COL_WEAK).size(11.0));
+                }
+            }
         });
         match state.scan.get(id) {
             Some(Ok(msg)) => {
@@ -221,7 +238,8 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
         if let Some(info) = &d.cached_info {
             ui.label(
                 RichText::new(format!(
-                    "캐시: 입력 {} · 타깃 {} · 클래스 {}",
+                    "캐시: 샘플 {} · 입력 {} · 타깃 {} · 클래스 {}",
+                    super::sample_count(info),
                     shape_text(&info.input_shape),
                     shape_text(&info.target_shape),
                     if info.classes.is_empty() {
@@ -235,7 +253,13 @@ fn datasets(ui: &mut egui::Ui, ctx: &ViewCtx, state: &mut DataState, actions: &m
             );
             // 한 장도 없는 클래스가 있으면 라벨 키를 잘못 눌렀거나 폴더가 빈 것이다.
             if let Some(warn) = info.empty_class_warning() {
-                ui.label(RichText::new(format!("⚠ {warn}")).color(COL_WARN).size(11.0));
+                // 추정 모드에서는 앞부분 표본만 본 결과다 — 뒤쪽에 그 클래스가 있을 수 있다.
+                let text = if info.samples_estimated {
+                    format!("⚠ {warn} (앞부분 표본 기준 — '정확히 세기' 로 확인하세요)")
+                } else {
+                    format!("⚠ {warn}")
+                };
+                ui.label(RichText::new(text).color(COL_WARN).size(11.0));
             }
         }
         if let Some(p) = &state.preview {

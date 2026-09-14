@@ -161,6 +161,8 @@ pub enum ViewAction {
     SetAutosaveFile(bool),
     /// 복구 폴더를 다시 훑는다.
     FindRecoveryFiles,
+    /// CSV 행 수를 정확히 센다 (백그라운드).
+    CountDatasetRows(DatasetId),
 }
 
 /// 뷰가 프레임 사이에 들고 있는 UI 상태 (문서가 아닌 것). 앱이 소유한다.
@@ -280,6 +282,18 @@ pub fn short_path(path: &str) -> String {
     }
 }
 
+/// 샘플 수 표기. 추정치면 "약" 을 붙인다.
+///
+/// 큰 CSV 는 스캔할 때 전부 읽지 않고 앞부분과 파일 크기로 어림한다. 그 값을 정확한 수처럼 보여 주면
+/// 배치 수나 학습 시간을 잘못 가늠하게 된다.
+pub fn sample_count(info: &nl_core::dataset::DatasetInfo) -> String {
+    if info.samples_estimated {
+        format!("약 {}개", info.samples)
+    } else {
+        format!("{}개", info.samples)
+    }
+}
+
 /// 로그·토스트에 쓸 경로. 홈 아래면 `~` 로 줄인다 (보안 리뷰 L5).
 ///
 /// 빌드 로그나 스크린샷을 남에게 보내는 일이 흔한데, 전체 경로에는 사용자 이름이 들어 있다.
@@ -310,6 +324,18 @@ pub fn kv(ui: &mut egui::Ui, key: &str, value: impl Into<String>) {
 
 #[cfg(test)]
 mod tests {
+    /// 추정치는 "약" 을 붙여 구분한다. 정확한 수처럼 보이면 배치 수나 학습 시간을 잘못 가늠한다.
+    #[test]
+    fn estimated_sample_counts_are_marked() {
+        let mut info = nl_core::dataset::DatasetInfo {
+            samples: 1200,
+            ..Default::default()
+        };
+        assert_eq!(sample_count(&info), "1200개");
+        info.samples_estimated = true;
+        assert_eq!(sample_count(&info), "약 1200개");
+    }
+
     /// 홈 아래 경로만 줄인다. 로그를 남에게 보낼 때 계정 이름이 드러나지 않게 하는 것이 목적이라,
     /// 홈 밖 경로까지 줄이면 어디인지 알 수 없어져 오히려 손해다.
     #[test]
