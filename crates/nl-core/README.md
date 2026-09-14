@@ -59,10 +59,11 @@
 
 **새 필드는 반드시 `#[serde(default)]`** 를 붙인다. 옛 문서가 그대로 열려야 한다.
 
-**미지 필드는 지금 보존되지 않는다.** 더 높은 `format_version` 의 문서도 `serde(default)` 덕에
-읽히지만, 이 앱이 모르는 필드는 저장할 때 **사라진다**. 그래서 `ProjectFile::newer_than_app()` 이
-참이면 호출자가 경고를 띄운다(`nl` 명령줄은 이미 띄운다). 보존용 `extra` 필드는 앱 쪽에서
-작업 중이며, 들어오면 이 문단을 고쳐야 한다.
+**미지 필드는 보존된다.** `Project`·`ModelDef`·`Node`·`PNode`·`Widget`·`ProjectFile` 에
+`#[serde(flatten)] extra: BTreeMap<String, Value>` 가 있어, 더 새로운 버전이 만든 모르는 필드도 열고 저장하면
+그대로 남는다(비어 있으면 직렬화에 나타나지 않는다). 다만 이 앱이 그 값을 해석·편집하지는 않으며,
+`diff_ops` 도 `extra` 를 비교하지 않는다. `ProjectFile::newer_than_app()` 이 참이면 호출자가
+"보존되지만 편집할 수 없다" 는 경고를 띄운다.
 
 ## 그래프 규칙
 
