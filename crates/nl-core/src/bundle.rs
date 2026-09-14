@@ -38,7 +38,7 @@ pub struct BundleManifest {
     /// 실행할 때 `NL_UPDATE_URL` 환경 변수가 우선한다.
     #[serde(default)]
     pub update_url: Option<String>,
-    /// 매니페스트 서명 검증에 쓸 minisign 공개키. 없으면 검증을 건너뛴다(경고 로그).
+    /// 매니페스트 서명 검증에 쓸 minisign 공개키. 없으면 배포 앱의 자동 업데이트가 비활성(`Disabled`, fail-closed)된다.
     #[serde(default)]
     pub update_public_key: Option<String>,
     /// 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
@@ -139,7 +139,7 @@ pub struct BuildSpec {
     /// 보통 `update_base_url` + `/latest.json` 이지만 따로 둘 수 있다.
     #[serde(default)]
     pub update_url: Option<String>,
-    /// 매니페스트 서명을 검증할 minisign 공개키. 없으면 배포 앱이 검증을 건너뛴다.
+    /// 매니페스트 서명을 검증할 minisign 공개키. 없으면 배포 앱의 자동 업데이트가 비활성(fail-closed)된다.
     #[serde(default)]
     pub update_public_key: Option<String>,
     /// 배포 앱이 새 버전을 알아서 내려받을지. 적용은 언제나 사용자 확인을 거친다.
