@@ -264,9 +264,13 @@ pub struct RunRecord {
     pub device_name: String,
     #[serde(default)]
     pub epochs: Vec<EpochMetrics>,
-    /// 마지막 체크포인트 (프로젝트 폴더 기준 상대 경로).
+    /// 학습 결과로 쓸 체크포인트 (프로젝트 폴더 기준 상대 경로).
+    /// 조기 종료를 켰고 검증 손실이 갱신된 적이 있으면 `best_checkpoint` 와 같다.
     #[serde(default)]
     pub checkpoint: Option<String>,
+    /// 검증 손실이 가장 낮았던 에포크의 가중치 (있을 때만).
+    #[serde(default)]
+    pub best_checkpoint: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
     /// 사용자 메모/태그.

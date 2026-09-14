@@ -873,6 +873,231 @@ fn resolve_cached_is_safe_to_call_every_frame() {
     }
 }
 
+// ───────────────────────────── 리뷰 회귀 (B1~B7) ─────────────────────────────
+
+/// 학습을 돌리되 실패를 오류 문자열로 받는다.
+fn train_expect_failure(def: ModelDef, ds: DatasetSpec, dir: &Path) -> String {
+    let req = TrainRequest {
+        run_id: RunId::new(),
+        model: def,
+        dataset: ds,
+        base_dir: dir.to_path_buf(),
+        run_dir: dir.join("run"),
+        resume_from: None,
+    };
+    let h = nl_engine::start(req).expect("학습 스레드 시작");
+    while let Ok(ev) = h.events.recv() {
+        match ev {
+            TrainEvent::Failed { error, .. } => return error,
+            TrainEvent::Finished { run } => panic!("실패해야 하는데 {:?} 로 끝났습니다", run.status),
+            _ => {}
+        }
+    }
+    panic!("Failed 이벤트가 오지 않았습니다");
+}
+
+/// B1: 출력 1 유닛 + BCE 에서 Accuracy 가 "라벨 0 비율" 이 아니라 실제 정답률이어야 한다.
+#[test]
+fn b1_accuracy_is_real_for_single_unit_binary_output() {
+    let dir = temp_dir("b1");
+    let mut def = mlp(2, 16, 1);
+    def.train.loss = Loss::BceWithLogits;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = Optimizer::Adam { lr: 1e-2, beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+    def.train.epochs = 60;
+    def.train.batch_size = 64;
+    def.train.val_split = 0.3;
+    def.train.device = DevicePref::Cpu;
+    def.train.seed = 7;
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 600), &dir);
+    let last = run.last().unwrap();
+    let acc = last.val_metric.expect("정확도");
+    // 고치기 전에는 검증셋의 라벨 0 비율(약 0.48)에 고정되어 있었다.
+    assert!(acc > 0.9, "단일 출력 정확도가 낮습니다: {acc} (손실 {})", last.val_loss.unwrap_or(f64::NAN));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// B2: 클래스 수보다 출력이 적으면 학습 시작 전에 이유를 담아 막는다.
+#[test]
+fn b2_too_few_output_units_is_reported_before_training() {
+    let dir = temp_dir("b2");
+    let mut def = mlp(2, 8, 2); // Quadrants 는 클래스 4 개인데 출력 2 유닛
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 1;
+    def.train.device = DevicePref::Cpu;
+
+    // 입력 형상을 Quadrants 에 맞춘다.
+    let mut d2 = ModelDef::new("b2");
+    let g = &mut d2.graph;
+    let i = add(g, LayerKind::Input { shape: vec![1, 8, 8] });
+    let f = add(g, LayerKind::Flatten);
+    let l = add(g, LayerKind::Linear { out_features: 2, bias: true });
+    let o = add(g, LayerKind::Output);
+    link(g, i, f);
+    link(g, f, l);
+    link(g, l, o);
+    d2.train = def.train.clone();
+
+    let e = train_expect_failure(d2, synthetic(SyntheticKind::Quadrants, 200), &dir);
+    assert!(e.contains("클래스"), "클래스 수를 짚어 주지 않습니다: {e}");
+    assert!(e.contains("2 유닛") || e.contains("Output"), "출력 폭을 짚어 주지 않습니다: {e}");
+    assert!(!e.contains("index out of bounds"), "백엔드 패닉이 그대로 새어 나옵니다: {e}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 추론 실패 메시지를 전체 체인으로 받는다 (`Session` 은 Debug 가 아니라 unwrap_err 를 못 쓴다).
+fn run_err(s: &mut Session, values: &[f32]) -> String {
+    let input = HostTensor::new(vec![1, values.len()], values.to_vec());
+    match s.run(&[input]) {
+        Ok(_) => panic!("{values:?} 를 받아들이면 안 됩니다"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+/// B3: Embedding 인덱스가 범위 밖이거나 정수가 아니면 레이어 맥락과 함께 알린다.
+#[test]
+fn b3_embedding_rejects_out_of_range_and_fractional_indices() {
+    let def = chain(vec![
+        LayerKind::Input { shape: vec![2] },
+        LayerKind::Embedding { vocab: 4, dim: 3 },
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 2, bias: true },
+    ]);
+    let mut s = Session::load(&def, None, DevicePref::Cpu).unwrap();
+
+    // 범위 밖.
+    let e = run_err(&mut s, &[0.0, 9.0]);
+    assert!(e.contains("vocab") && e.contains("Embedding"), "{e}");
+    // 소수 — 조용히 절단되면 안 된다.
+    let e = run_err(&mut s, &[0.0, 1.5]);
+    assert!(e.contains("정수"), "{e}");
+    // 음수.
+    let e = run_err(&mut s, &[-1.0, 1.0]);
+    assert!(e.contains("범위"), "{e}");
+    // 올바른 인덱스는 통과.
+    assert!(s.run(&[HostTensor::new(vec![1, 2], vec![0.0, 3.0])]).is_ok());
+}
+
+/// B4: 출력 1 유닛 + CrossEntropy 는 손실이 항상 0 이라 학습이 무효다 — 어느 경로로든 막아야 한다.
+#[test]
+fn b4_single_class_cross_entropy_is_rejected() {
+    // (a) 리뷰의 재현 구성. 이제는 클래스 수 대조(B2)가 먼저 잡고 더 구체적으로 알려 준다.
+    let dir = temp_dir("b4a");
+    let mut def = mlp(2, 8, 1);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 3;
+    def.train.device = DevicePref::Cpu;
+    let e = train_expect_failure(def, synthetic(SyntheticKind::Xor, 200), &dir);
+    assert!(e.contains("1 유닛"), "출력 폭을 짚어 주지 않습니다: {e}");
+    assert!(e.contains("클래스"), "{e}");
+    std::fs::remove_dir_all(&dir).ok();
+
+    // (b) 타깃이 전부 0 이라 클래스 수 대조를 통과하는 경우 — 손실 쪽 방어선이 잡아야 한다.
+    let dir = temp_dir("b4b");
+    let mut text = String::from("x0,x1,y\n");
+    for i in 0..80 {
+        let f = ((i * 7) % 19) as f32 / 10.0 - 1.0;
+        text.push_str(&format!("{f},{},0\n", f * 0.5));
+    }
+    std::fs::write(dir.join("zeros.csv"), text).unwrap();
+    let ds = DatasetSpec::new(
+        "전부0",
+        DataSource::Csv {
+            path: "zeros.csv".into(),
+            input_cols: vec!["x0".into(), "x1".into()],
+            target_cols: vec!["y".into()],
+            header: true,
+        },
+    );
+    let mut def = mlp(2, 8, 1);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.epochs = 3;
+    def.train.device = DevicePref::Cpu;
+    let e = train_expect_failure(def, ds, &dir);
+    assert!(e.contains("2 개 이상"), "{e}");
+    assert!(e.contains("BCE"), "대안을 알려 주지 않습니다: {e}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// B5: 랭크 6 이상은 편집기 단계(`shape::infer`·`validate`)에서 이미 걸려야 한다.
+#[test]
+fn b5_rank_above_the_limit_is_caught_by_validation_not_at_train_time() {
+    let def = chain(vec![
+        LayerKind::Input { shape: vec![1, 8, 8] },
+        LayerKind::Reshape { shape: vec![1, 2, 2, 4, 4] }, // 배치 포함 랭크 6
+        LayerKind::Flatten,
+        LayerKind::Linear { out_features: 2, bias: true },
+    ]);
+    let rep = shape::infer(&def.graph);
+    assert!(!rep.errors.is_empty(), "형상 추론이 랭크 상한을 놓쳤습니다");
+    let issues = nl_core::validate(&{
+        let mut p = nl_core::model::Project::new("t");
+        p.models.insert(def.id, def.clone());
+        p
+    });
+    assert!(!issues.is_empty(), "검증기가 랭크 상한을 놓쳤습니다");
+
+    // 엔진도 같은 이유로 거절한다 (계약이 한 곳에서 맞물린다).
+    assert!(Session::load(&def, None, DevicePref::Cpu).is_err());
+}
+
+/// B7: 조기 종료는 최적 에포크의 가중치를 남기고 `checkpoint` 가 그것을 가리켜야 한다.
+#[test]
+fn b7_early_stopping_keeps_the_best_weights() {
+    let dir = temp_dir("b7");
+    let mut def = mlp(2, 8, 2);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    // 학습률 0 → 첫 에포크가 최적이고 그 뒤로는 개선이 없다.
+    def.train.optimizer = Optimizer::Sgd { lr: 0.0, momentum: 0.0 };
+    def.train.epochs = 50;
+    def.train.batch_size = 64;
+    def.train.val_split = 0.25;
+    def.train.early_stop_patience = 2;
+    def.train.device = DevicePref::Cpu;
+
+    let (run, logs) = train_collecting_logs(def, synthetic(SyntheticKind::Xor, 256), &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    assert_eq!(run.epochs.len(), 3);
+
+    let best = run.best_checkpoint.as_ref().expect("best_checkpoint 가 기록되어야 합니다");
+    assert!(best.ends_with("best.safetensors"), "{best}");
+    assert!(dir.join(best).exists(), "best 파일이 없습니다");
+    assert_eq!(
+        run.checkpoint.as_deref(),
+        Some(best.as_str()),
+        "조기 종료면 checkpoint 가 best 를 가리켜야 합니다"
+    );
+    assert!(logs.iter().any(|m| m.contains("best.safetensors")), "{logs:?}");
+
+    // 조기 종료가 아니면 final 을 가리킨다.
+    let dir2 = temp_dir("b7-normal");
+    let mut d2 = mlp(2, 8, 2);
+    d2.train.loss = Loss::CrossEntropy;
+    d2.train.epochs = 3;
+    d2.train.batch_size = 64;
+    d2.train.device = DevicePref::Cpu;
+    let run2 = train_to_end(d2, synthetic(SyntheticKind::Xor, 256), &dir2);
+    assert!(run2.checkpoint.as_deref().unwrap().ends_with("final.safetensors"));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir2).ok();
+}
+
+/// S4: 다른 모델의 체크포인트를 얹으면 이유를 밝힌다.
+#[test]
+fn s4_checkpoint_from_another_model_is_refused() {
+    let r = xor_run();
+    let ckpt = r.dir.join(r.run.checkpoint.as_ref().unwrap());
+    // 같은 구조지만 id 가 다른 모델.
+    let other = mlp(2, 16, 2);
+    let e = match Session::load(&other, Some(&ckpt), DevicePref::Cpu) {
+        Ok(_) => panic!("다른 모델의 체크포인트를 받아들였습니다"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(e.contains("다른 모델"), "{e}");
+}
+
 // ───────────────────────────── 성능 측정 (NL_BENCH=1) ─────────────────────────────
 
 /// XOR 1000 샘플 × 200 에포크 CPU 소요 시간. 배치 업로드 경로를 바꿀 때 전후 비교용.

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// CPU 백엔드 (ndarray).
@@ -213,7 +213,11 @@ fn vram_of(info: &wgpu::AdapterInfo) -> Option<u64> {
 }
 
 /// 사용 가능한 장치 목록. 첫 항목은 항상 CPU. GPU 는 `DevicePref::Gpu{index}` 순서대로.
-/// 결과는 프로세스 수명 동안 캐시된다 (wgpu 어댑터 열거는 느릴 수 있음).
+/// 결과는 프로세스 수명 동안 캐시된다.
+///
+/// **UI 스레드에서 부르지 말 것.** 첫 호출은 wgpu 어댑터를 열거하므로 수백 ms 걸린다.
+/// 화면을 그리는 쪽은 [`resolve_cached`]·[`probe_cached`]·[`describe`] 를 쓰고, 이 함수는
+/// [`resolve`]·[`probe`] 와 함께 백그라운드 스레드에서 한 번 불러 준다.
 pub fn enumerate() -> Vec<DeviceInfo> {
     cache().iter().map(|(i, _)| i.clone()).collect()
 }
@@ -230,10 +234,13 @@ enum ProbeKey {
     Gpu(usize),
 }
 
-#[allow(clippy::type_complexity)]
-static PROBES: OnceLock<Mutex<HashMap<ProbeKey, Result<Duration, String>>>> = OnceLock::new();
+/// 키별 검사 슬롯. 같은 장치를 두 스레드가 동시에 물어도 검사는 **한 번만** 돈다.
+type Slot = Arc<OnceLock<Result<Duration, String>>>;
 
-fn probes() -> &'static Mutex<HashMap<ProbeKey, Result<Duration, String>>> {
+#[allow(clippy::type_complexity)]
+static PROBES: OnceLock<Mutex<HashMap<ProbeKey, Slot>>> = OnceLock::new();
+
+fn probes() -> &'static Mutex<HashMap<ProbeKey, Slot>> {
     PROBES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -252,23 +259,27 @@ fn probe_key(pref: DevicePref) -> Option<ProbeKey> {
 /// 그래서 별도 스레드 + `catch_unwind` + 타임아웃(20초)으로 감싼다. 실패한 드라이버가
 /// 남기는 stderr 패닉 메시지는 그대로 보인다 (원인 파악에 필요하다).
 ///
-/// 결과는 프로세스 수명 동안 캐시되므로 두 번째 호출부터는 즉시 돌아온다.
+/// 결과는 프로세스 수명 동안 캐시되고, 같은 장치를 여러 스레드가 동시에 물어도 검사는 한 번만 돈다
+/// (뒤늦게 온 호출은 먼저 시작된 검사가 끝날 때까지 기다린다).
 /// `Auto` 는 구체 장치가 아니라서 `resolve(Auto)` 가 고른 장치를 대신 검사한다.
+///
+/// **UI 스레드에서 부르지 말 것.** 최대 20 초 멈춘다. 화면을 그리는 쪽은 [`probe_cached`] 를 쓴다.
 pub fn probe(pref: DevicePref) -> Result<Duration, String> {
     let Some(key) = probe_key(pref) else {
         return probe(resolve(DevicePref::Auto).pref);
     };
-    if let Some(cached) = probes().lock().get(&key).cloned() {
-        return cached;
-    }
-    let result = run_probe(pref);
-    probes().lock().insert(key, result.clone());
-    result
+    // 슬롯을 먼저 잡고 락을 놓는다 — 락을 쥔 채 20 초짜리 검사를 돌리지 않는다.
+    let slot: Slot = probes().lock().entry(key).or_default().clone();
+    // `get_or_init` 이 경쟁을 흡수한다: 한 스레드만 검사하고 나머지는 그 결과를 기다린다.
+    slot.get_or_init(|| run_probe(pref)).clone()
 }
 
-/// 이미 검사한 결과만 조회한다 (검사를 새로 돌리지 않는다). GUI 가 UI 스레드에서 쓰기 위한 것.
+/// 이미 검사한 결과만 조회한다 (검사를 새로 돌리지 않고 기다리지도 않는다).
+/// GUI 가 UI 스레드에서 쓰기 위한 것.
 pub fn probe_cached(pref: DevicePref) -> Option<Result<Duration, String>> {
-    probe_key(pref).and_then(|k| probes().lock().get(&k).cloned())
+    let key = probe_key(pref)?;
+    let slot = probes().lock().get(&key).cloned()?;
+    slot.get().cloned()
 }
 
 fn run_probe(pref: DevicePref) -> Result<Duration, String> {
@@ -290,7 +301,14 @@ fn run_probe(pref: DevicePref) -> Result<Duration, String> {
     }
     match rx.recv_timeout(PROBE_TIMEOUT) {
         Ok(r) => r,
-        Err(_) => Err(format!("{}초 안에 응답하지 않았습니다", PROBE_TIMEOUT.as_secs())),
+        Err(_) => {
+            // **검사 스레드는 계속 돈다.** 죽은 GPU 드라이버 안에서 멈춰 있을 수 있고 바깥에서
+            // 안전하게 죽일 방법이 없다. 스레드 하나와 그 장치 컨텍스트가 프로세스 끝까지 남는
+            // 것을 감수하고, 대신 호출자는 기다리지 않는다. 결과가 뒤늦게 와도 이미 캐시된
+            // 타임아웃 결과를 덮지 않는다(`OnceLock` 은 한 번만 채워진다).
+            log::warn!("장치 검사가 {}초 안에 끝나지 않았습니다 — 검사 스레드는 그대로 남습니다", PROBE_TIMEOUT.as_secs());
+            Err(format!("{}초 안에 응답하지 않았습니다", PROBE_TIMEOUT.as_secs()))
+        }
     }
 }
 

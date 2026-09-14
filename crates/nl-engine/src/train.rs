@@ -128,6 +128,7 @@ pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
             device_name: String::new(),
             epochs: vec![],
             checkpoint: None,
+            best_checkpoint: None,
             error: None,
             note: String::new(),
         };
@@ -250,7 +251,7 @@ fn train_on<B: AutodiffBackend>(
 
     // 이어서 학습 — 가중치만 복원한다. 옵티마이저 모멘트·스텝 수는 새로 시작한다.
     if let Some(p) = &req.resume_from {
-        let loaded = weights::load(p)?;
+        let loaded = weights::load_for(p, Some(req.model.id))?;
         model.load_host_params(&loaded).with_context(|| format!("체크포인트 적용 실패: {}", p.display()))?;
         let _ = tx.send(TrainEvent::Log(format!(
             "체크포인트에서 이어서 학습: {} (가중치만 복원 — 옵티마이저 상태와 워밍업은 처음부터입니다)",
@@ -269,6 +270,8 @@ fn train_on<B: AutodiffBackend>(
     if let Some(w) = info.empty_class_warning() {
         let _ = tx.send(TrainEvent::Log(w));
     }
+    let out_width: usize = model.output_sample_shapes().first().map(|s| s.iter().product()).unwrap_or(0);
+    check_target_range(&train_set, &info, cfg.loss, out_width, &model.graph().nodes[&outs[0]].display_name())?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed);
     if req.dataset.shuffle {
@@ -308,6 +311,10 @@ fn train_on<B: AutodiffBackend>(
     let mut stopped = false;
     let mut best_val: Option<f64> = None;
     let mut since_improve = 0usize;
+    let mut skipped_steps = 0usize;
+    let mut best_path: Option<PathBuf> = None;
+    let mut best_epoch = 0usize;
+    let mut early_stopped = false;
 
     'epochs: for epoch in 1..=cfg.epochs.max(1) {
         let t0 = std::time::Instant::now();
@@ -348,7 +355,15 @@ fn train_on<B: AutodiffBackend>(
             }
 
             let grads = loss.backward();
-            opt.step(&mut model, grads, cfg.grad_clip)?;
+            if opt.step(&mut model, grads, cfg.grad_clip)? == StepOutcome::Skipped {
+                skipped_steps += 1;
+                if skipped_steps <= 3 {
+                    let _ = tx.send(TrainEvent::Log(format!(
+                        "epoch {epoch} step {step}: 그래디언트 노름이 유한하지 않아 이 스텝을 건너뜁니다"
+                    )));
+                }
+                continue;
+            }
 
             epoch_loss += value * chunk.len() as f64;
             seen += chunk.len();
@@ -389,22 +404,33 @@ fn train_on<B: AutodiffBackend>(
             let _ = tx.send(TrainEvent::Checkpoint { path });
         }
 
-        // 조기 종료 — 검증 손실 기준. 중지(Stopped)가 아니라 정상 종료(Finished)다.
-        if cfg.early_stop_patience > 0 {
-            if let Some(v) = val_loss {
-                if best_val.is_none_or(|b| v + 1e-12 < b) {
-                    best_val = Some(v);
-                    since_improve = 0;
-                } else {
-                    since_improve += 1;
-                    if since_improve >= cfg.early_stop_patience {
-                        let _ = tx.send(TrainEvent::Log(format!(
-                            "조기 종료: 검증 손실이 {since_improve} 에포크 동안 나아지지 않았습니다 (최저 {:.6})",
-                            best_val.unwrap_or(v)
-                        )));
-                        break;
-                    }
-                }
+        // 검증 손실이 갱신되면 그 시점의 가중치를 따로 남긴다.
+        //
+        // 조기 종료는 정의상 "patience 에포크만큼 나빠진 뒤" 멈추므로, 마지막 가중치는 언제나
+        // 최적점보다 열화된 쪽이다. 조기 종료를 켠 사용자가 원한 것과 정반대라 best 를 보관한다.
+        if let Some(v) = val_loss {
+            let improved = best_val.is_none_or(|b| v + 1e-12 < b);
+            if improved {
+                best_val = Some(v);
+                since_improve = 0;
+                let path = req.run_dir.join("best.safetensors");
+                weights::save(&path, req.model.id, &model.host_params())?;
+                let _ = tx.send(TrainEvent::Checkpoint { path: path.clone() });
+                best_path = Some(path);
+                best_epoch = epoch;
+            } else {
+                since_improve += 1;
+            }
+
+            // 조기 종료 — 중지(Stopped)가 아니라 정상 종료(Finished)다.
+            if cfg.early_stop_patience > 0 && since_improve >= cfg.early_stop_patience {
+                let _ = tx.send(TrainEvent::Log(format!(
+                    "조기 종료: 검증 손실이 {since_improve} 에포크 동안 나아지지 않았습니다 \
+                     (최저 {:.6}, 에포크 {best_epoch}). 그 에포크의 가중치를 best.safetensors 로 남겼습니다",
+                    best_val.unwrap_or(v)
+                )));
+                early_stopped = true;
+                break;
             }
         }
     }
@@ -413,7 +439,18 @@ fn train_on<B: AutodiffBackend>(
     let final_path = req.run_dir.join("final.safetensors");
     weights::save(&final_path, req.model.id, &model.host_params())?;
     let _ = tx.send(TrainEvent::Checkpoint { path: final_path.clone() });
-    run.checkpoint = Some(relative_to(&req.base_dir, &final_path));
+
+    run.best_checkpoint = best_path.as_ref().map(|p| relative_to(&req.base_dir, p));
+    // 조기 종료로 끝났으면 결과물은 마지막이 아니라 최적 가중치여야 한다.
+    run.checkpoint = match (&best_path, early_stopped) {
+        (Some(p), true) => Some(relative_to(&req.base_dir, p)),
+        _ => Some(relative_to(&req.base_dir, &final_path)),
+    };
+    if skipped_steps > 0 {
+        let _ = tx.send(TrainEvent::Log(format!(
+            "그래디언트가 유한하지 않아 건너뛴 스텝: {skipped_steps} 개"
+        )));
+    }
     run.status = if stopped { RunStatus::Stopped } else { RunStatus::Finished };
     Ok(())
 }
@@ -427,6 +464,50 @@ fn forward_first<B: AutodiffBackend>(
 ) -> Result<DynTensor<B>> {
     let inputs = split_inputs(x, in_shapes)?;
     model.forward(inputs, train)?.into_iter().next().context("출력이 없습니다")
+}
+
+/// 분류 타깃이 출력 폭 안에 있는지 **학습 시작 전에** 확인한다.
+///
+/// `device_loss` 의 `gather` 는 범위를 넘으면 ndarray 에서 패닉하고 wgpu 에서는 조용히 엉뚱한 값을
+/// 읽는다. 두 경우 다 원인을 알려 주지 못하므로, 한 번만 도는 호스트 쪽 검사로 미리 막는다.
+fn check_target_range(
+    set: &[Sample],
+    info: &nl_core::dataset::DatasetInfo,
+    loss: Loss,
+    out_width: usize,
+    out_name: &str,
+) -> Result<()> {
+    if loss != Loss::CrossEntropy || out_width == 0 {
+        return Ok(());
+    }
+    // 타깃이 one-hot 이면 폭이 곧 클래스 수라 gather 를 타지 않는다.
+    let target_width: usize = set.first().map(|s| s.target.data.len()).unwrap_or(0);
+    if target_width != 1 {
+        return Ok(());
+    }
+    let mut max = 0.0f32;
+    for s in set {
+        if let Some(&v) = s.target.data.first() {
+            if v < 0.0 || v.fract() != 0.0 {
+                bail!("CrossEntropy 타깃 {v} 가 음이 아닌 정수가 아닙니다 — 클래스 인덱스여야 합니다");
+            }
+            max = max.max(v);
+        }
+    }
+    let needed = max as usize + 1;
+    if needed > out_width {
+        let classes = if info.classes.is_empty() {
+            format!("{needed} 개")
+        } else {
+            format!("{} 개 ({:?})", info.classes.len(), info.classes)
+        };
+        bail!(
+            "데이터의 클래스가 {classes} 인데 Output '{out_name}' 은 {out_width} 유닛뿐입니다 — \
+             가장 큰 클래스 인덱스가 {} 라 최소 {needed} 유닛이 필요합니다",
+            max as usize
+        );
+    }
+    Ok(())
 }
 
 /// 데이터셋 형상이 모델 Input 과 맞는지 본다.
@@ -721,19 +802,26 @@ fn device_loss<B: burn::tensor::backend::Backend>(
         Loss::CrossEntropy => {
             let logits = out.clone().into_r2().context("CrossEntropy 는 [B, C] 출력이 필요합니다")?;
             let classes = logits.dims()[1];
+            // 클래스가 하나면 log_softmax 가 항상 0 이라 손실도 그래디언트도 0 이다.
+            // 학습이 아무 일도 하지 않고 "성공" 으로 끝나므로 여기서 막는다.
+            if classes < 2 {
+                bail!(
+                    "CrossEntropy 는 출력 클래스가 2 개 이상이어야 합니다 (지금 {classes}). \
+                     이진 분류라면 BCE (logits) 를 쓰거나 Output 을 2 유닛으로 하십시오"
+                );
+            }
             let logp = activation::log_softmax(logits, 1);
             let td = target.dims();
             if td.len() != 2 {
                 bail!("CrossEntropy 타깃은 [B, 1] 또는 [B, C] 여야 합니다 (지금 {td:?})");
             }
-            if td[1] == classes {
-                // one-hot
-                let t2 = target.clone().into_r2()?;
-                Ok((logp * t2).sum_dim(1).mean().neg())
-            } else if td[1] == 1 {
-                // 클래스 인덱스
+            // 폭 1 을 먼저 본다 — 클래스 수가 1 일 때의 모호함을 없앤다(위에서 이미 막았지만 의도를 분명히).
+            if td[1] == 1 {
                 let idx = target.clone().into_r2()?.int();
                 Ok(logp.gather(1, idx).mean().neg())
+            } else if td[1] == classes {
+                let t2 = target.clone().into_r2()?;
+                Ok((logp * t2).sum_dim(1).mean().neg())
             } else {
                 bail!("CrossEntropy 타깃 마지막 차원 {} 이 클래스 수 {} 도 1 도 아닙니다", td[1], classes)
             }
@@ -814,15 +902,15 @@ pub(crate) fn host_loss(out: &HostTensor, target: &HostTensor, loss: Loss) -> Re
             for i in 0..b {
                 let row = &out.data[i * c..(i + 1) * c];
                 let logp = log_softmax_row(row);
-                if tc == c {
-                    let row_t = &target.data[i * c..(i + 1) * c];
-                    sum -= row_t.iter().zip(&logp).map(|(t, lp)| *t as f64 * lp).sum::<f64>();
-                } else if tc == 1 {
+                if tc == 1 {
                     let k = target.data[i] as usize;
                     if k >= c {
                         bail!("클래스 인덱스 {k} 가 클래스 수 {c} 를 넘습니다");
                     }
                     sum -= logp[k];
+                } else if tc == c {
+                    let row_t = &target.data[i * c..(i + 1) * c];
+                    sum -= row_t.iter().zip(&logp).map(|(t, lp)| *t as f64 * lp).sum::<f64>();
                 } else {
                     bail!("CrossEntropy 타깃 폭 {tc} 이 클래스 수 {c} 도 1 도 아닙니다");
                 }
@@ -831,6 +919,9 @@ pub(crate) fn host_loss(out: &HostTensor, target: &HostTensor, loss: Loss) -> Re
         }
     }
 }
+
+// (아래는 옛 분기 잔재를 지우기 위한 표식)
+
 
 fn host_metric(out: &HostTensor, target: &HostTensor, metric: Metric) -> Result<f64> {
     match metric {
@@ -847,11 +938,17 @@ fn host_metric(out: &HostTensor, target: &HostTensor, metric: Metric) -> Result<
             let tc = target.data.len() / b.max(1);
             let mut hit = 0usize;
             for i in 0..b {
-                let pred = argmax(&out.data[i * c..(i + 1) * c]);
-                let truth = if tc == 1 {
-                    target.data[i] as usize
+                // 출력이 한 유닛이면 argmax 가 언제나 0 이라 "라벨 0 비율"이 나온다.
+                // 이진 분류(BCE)의 표준 구성이므로 임계 판정으로 처리한다.
+                let (pred, truth) = if c == 1 {
+                    ((out.data[i] >= 0.0) as usize, (target.data[i] >= 0.5) as usize)
                 } else {
-                    argmax(&target.data[i * tc..(i + 1) * tc])
+                    let t = if tc == 1 {
+                        target.data[i] as usize
+                    } else {
+                        argmax(&target.data[i * tc..(i + 1) * tc])
+                    };
+                    (argmax(&out.data[i * c..(i + 1) * c]), t)
                 };
                 if pred == truth {
                     hit += 1;
@@ -891,6 +988,13 @@ struct OptState<B: AutodiffBackend> {
     v: Option<DynTensor<B::InnerBackend>>,
 }
 
+/// 한 스텝의 결과. 그래디언트 노름이 유한하지 않으면 파라미터를 건드리지 않고 건너뛴다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StepOutcome {
+    Applied,
+    Skipped,
+}
+
 /// 파라미터 텐서를 직접 갱신하는 옵티마이저. `Gradients` 에서 텐서별 grad 를 꺼내 쓴다.
 struct Opt<B: AutodiffBackend> {
     kind: Optimizer,
@@ -908,7 +1012,7 @@ impl<B: AutodiffBackend> Opt<B> {
         self.kind.set_lr(lr);
     }
 
-    fn step(&mut self, model: &mut Model<B>, mut grads: B::Gradients, grad_clip: f64) -> Result<()> {
+    fn step(&mut self, model: &mut Model<B>, mut grads: B::Gradients, grad_clip: f64) -> Result<StepOutcome> {
         self.t += 1;
 
         // 1) 그래디언트 수집.
@@ -926,7 +1030,11 @@ impl<B: AutodiffBackend> Opt<B> {
         // 2) 전역 노름 클리핑.
         if grad_clip > 0.0 {
             let total: f64 = collected.iter().map(|(_, g)| g.sum_squares()).sum::<f64>().sqrt();
-            if total.is_finite() && total > grad_clip {
+            if !total.is_finite() {
+                // 클리핑이 있는 이유가 바로 이 경우다. 그대로 넣으면 파라미터가 NaN 으로 오염된다.
+                return Ok(StepOutcome::Skipped);
+            }
+            if total > grad_clip {
                 let scale = grad_clip / total;
                 for (_, g) in collected.iter_mut() {
                     *g = g.clone().mul_scalar(scale);
@@ -940,7 +1048,7 @@ impl<B: AutodiffBackend> Opt<B> {
             let updated = self.update(&name, p, g)?;
             model.set_param(&name, DynTensor::from_inner(updated).require_grad());
         }
-        Ok(())
+        Ok(StepOutcome::Applied)
     }
 
     fn update(

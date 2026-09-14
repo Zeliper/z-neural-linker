@@ -4,8 +4,12 @@
 //! 배치 1 텐서(`[1, …]`)로 만든다. 디코드는 그 반대로 텐서에서 시작해 `field.decode` 를 적용한다.
 //! 결과 형상은 `Field::tensor_shape()` 와 일치한다.
 
+use crate::limits::{
+    check_image_size, checked_elems, decode_image, MAX_CLASSES, MAX_TOKENS,
+};
 use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
 use nl_core::payload::{Field, FieldKind, Transform};
 
 /// 엔진 경계의 바깥 값.
@@ -94,16 +98,8 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
             if c != 1 && c != 3 {
                 bail!("이미지 채널은 1 또는 3 만 지원합니다 (지금 {c})");
             }
-            match value {
-                Value::Image { width: iw, height: ih, rgba } => {
-                    let data = rgba_to_planar(*iw as usize, *ih as usize, rgba, w, h, c)?;
-                    Ok(Mid::Img { c, h, w, data })
-                }
-                Value::Tensor(t) if t.shape.len() == 3 => {
-                    Ok(Mid::Img { c: t.shape[0], h: t.shape[1], w: t.shape[2], data: t.data.clone() })
-                }
-                other => bail!("Image 필드에는 Image 값이 필요합니다 (지금 {})", kind_of(other)),
-            }
+            check_image_size(w as u32, h as u32, "Image 필드")?;
+            image_start(value, w, h, c)
         }
         FieldKind::Tensor { shape, .. } => {
             let data = numbers(value)?;
@@ -157,6 +153,157 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
     }
 }
 
+/// `Image` 필드가 받아들이는 값들을 `[c, h, w]` 평면 f32 로 바꾼다.
+///
+/// 배포 앱의 HTTP 추론 API 는 JSON 만 받으므로 이미지가 여러 모습으로 들어온다.
+///
+/// - [`Value::Image`] — RGBA8 버퍼. 크기가 다르면 필드 크기로 리샘플링한다.
+/// - [`Value::Tensor`] — 랭크 3 이면 자기 형상을 그대로 쓴다 (체인의 `Resize` 가 맞춰도 된다).
+/// - [`Value::Numbers`] 와 숫자만 있는 [`Value::Json`] — **평탄하든 중첩이든 `[c][h][w]` 순서**로
+///   읽는다. 값은 건드리지 않는다 (0..1 인지 0..255 인지는 `Scale` 변환이 정한다).
+/// - 문자열 [`Value::Json`] — `data:image/...;base64,…` 또는 순수 base64 PNG/JPEG.
+fn image_start(value: &Value, w: usize, h: usize, c: usize) -> Result<Mid> {
+    match value {
+        Value::Image { width: iw, height: ih, rgba } => {
+            let data = rgba_to_planar(*iw as usize, *ih as usize, rgba, w, h, c)?;
+            Ok(Mid::Img { c, h, w, data })
+        }
+        Value::Tensor(t) if t.shape.len() == 3 => {
+            let want = checked_elems(&t.shape, "이미지 텐서")?;
+            if want != t.data.len() {
+                bail!("이미지 텐서 형상 {:?} 은 원소 {want} 개인데 데이터는 {} 개입니다", t.shape, t.data.len());
+            }
+            Ok(Mid::Img { c: t.shape[0], h: t.shape[1], w: t.shape[2], data: t.data.clone() })
+        }
+        Value::Numbers(v) => planar_from_flat(v, w, h, c, "Numbers", None),
+        Value::Json(serde_json::Value::String(text)) => {
+            let bytes = image_bytes_from_str(text)?;
+            let img = decode_image(&bytes, "Image 필드의 base64 이미지")?;
+            let rgba = img.to_rgba8();
+            let (iw, ih) = (rgba.width() as usize, rgba.height() as usize);
+            let data = rgba_to_planar(iw, ih, rgba.as_raw(), w, h, c)?;
+            Ok(Mid::Img { c, h, w, data })
+        }
+        Value::Json(j) => {
+            let nesting = json_nesting(j);
+            // 중첩이 3 단이면 순서까지 본다. [h][w][c](채널 마지막)는 원소 수가 같아 개수 검사로는
+            // 절대 잡히지 않는데, 그대로 받으면 픽셀이 뒤섞인 채 조용히 학습·추론된다.
+            if nesting.len() == 3 && nesting != [c, h, w] {
+                if nesting == [h, w, c] {
+                    bail!(
+                        "Image 필드는 [채널][높이][너비] = [{c}][{h}][{w}] 순서가 필요한데 \
+                         받은 배열은 [{h}][{w}][{c}] 로 채널이 마지막입니다"
+                    );
+                }
+                bail!(
+                    "Image 필드는 [채널][높이][너비] = [{c}][{h}][{w}] 중첩이 필요한데 \
+                     받은 배열은 {nesting:?} 입니다"
+                );
+            }
+            let flat = json_numbers(j)?;
+            planar_from_flat(&flat, w, h, c, "JSON 숫자 배열", Some(nesting))
+        }
+        other => bail!(
+            "Image 필드에는 Image · 랭크 3 Tensor · 숫자 배열 · base64 이미지 문자열 중 하나가 필요합니다 (지금 {})",
+            kind_of(other)
+        ),
+    }
+}
+
+/// 평탄한 값 목록을 `[c, h, w]` 로 받아들인다. 개수가 다르면 기대 형상을 담아 거절한다.
+fn planar_from_flat(
+    values: &[f32],
+    w: usize,
+    h: usize,
+    c: usize,
+    source: &str,
+    nesting: Option<Vec<usize>>,
+) -> Result<Mid> {
+    let want = checked_elems(&[c, h, w], "Image 필드")?;
+    if values.len() != want {
+        let mut msg = format!(
+            "Image 필드는 [{c}, {h}, {w}](채널·높이·너비 순) = {want} 개 값이 필요한데 \
+             {source} 은 {} 개를 줬습니다",
+            values.len()
+        );
+        if let Some(dims) = nesting {
+            if !dims.is_empty() {
+                msg.push_str(&format!(" (받은 중첩 {dims:?})"));
+            }
+        }
+        bail!("{msg}");
+    }
+    Ok(Mid::Img { c, h, w, data: values.to_vec() })
+}
+
+/// 중첩 배열의 각 단계 길이 (첫 원소 기준). 숫자면 빈 벡터.
+fn json_nesting(j: &serde_json::Value) -> Vec<usize> {
+    let mut dims = Vec::new();
+    let mut cur = j;
+    while let serde_json::Value::Array(a) = cur {
+        dims.push(a.len());
+        match a.first() {
+            Some(next) => cur = next,
+            None => break,
+        }
+        if dims.len() > 8 {
+            break;
+        }
+    }
+    dims
+}
+
+/// PNG/JPEG 매직 바이트.
+fn looks_like_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+}
+
+/// 문자열에서 이미지 바이트를 꺼낸다 (`data:` URL 또는 순수 base64).
+fn image_bytes_from_str(text: &str) -> Result<Vec<u8>> {
+    // base64 는 3 바이트를 4 글자로 늘린다 — 디코드 결과가 상한을 넘을 문자열은 아예 받지 않는다.
+    let max_chars = (crate::limits::MAX_IMAGE_ALLOC / 3 * 4) as usize;
+    if text.len() > max_chars {
+        bail!("base64 이미지 문자열이 {} 자로 너무 깁니다", text.len());
+    }
+
+    let (payload, declared) = match text.strip_prefix("data:") {
+        Some(rest) => {
+            let (meta, data) = rest
+                .split_once(',')
+                .context("data URL 에 쉼표가 없습니다 (data:image/png;base64,… 형식)")?;
+            if !meta.contains("base64") {
+                bail!("data URL 이 base64 가 아닙니다 (meta: '{meta}')");
+            }
+            (data, true)
+        }
+        None => (text, false),
+    };
+
+    let cleaned: String = payload.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if cleaned.is_empty() {
+        bail!("base64 이미지 문자열이 비어 있습니다");
+    }
+    let engine = base64::engine::general_purpose::STANDARD;
+    let bytes = match engine.decode(cleaned.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            // URL-safe 알파벳도 한 번 시도한다.
+            match base64::engine::general_purpose::URL_SAFE.decode(cleaned.as_bytes()) {
+                Ok(b) => b,
+                Err(_) if declared => bail!("data URL 의 base64 를 읽을 수 없습니다: {e}"),
+                Err(_) => bail!(
+                    "Image 필드의 문자열을 이미지로 읽을 수 없습니다 — \
+                     'data:image/png;base64,…' 또는 base64 로 인코딩한 PNG/JPEG 여야 합니다"
+                ),
+            }
+        }
+    };
+    if !looks_like_image(&bytes) {
+        bail!("base64 를 풀었지만 PNG 도 JPEG 도 아닙니다 (앞 바이트: {:02X?})", &bytes[..bytes.len().min(8)]);
+    }
+    Ok(bytes)
+}
+
 fn kind_of(v: &Value) -> &'static str {
     match v {
         Value::Number(_) => "Number",
@@ -199,13 +346,14 @@ fn json_numbers(j: &serde_json::Value) -> Result<Vec<f32>> {
 
 /// RGBA8 → `[c, h, w]` (0..255 f32). 필요하면 최근접 리샘플링으로 크기를 맞춘다.
 fn rgba_to_planar(iw: usize, ih: usize, rgba: &[u8], w: usize, h: usize, c: usize) -> Result<Vec<f32>> {
-    if iw == 0 || ih == 0 {
-        bail!("이미지 크기가 0 입니다");
+    check_image_size(iw as u32, ih as u32, "들어온 이미지")?;
+    check_image_size(w as u32, h as u32, "목표 이미지")?;
+    let need = checked_elems(&[iw, ih, 4], "RGBA 버퍼")?;
+    if rgba.len() < need {
+        bail!("RGBA 버퍼가 {}×{} 에 비해 짧습니다 ({} 바이트, {need} 필요)", iw, ih, rgba.len());
     }
-    if rgba.len() < iw * ih * 4 {
-        bail!("RGBA 버퍼가 {}×{} 에 비해 짧습니다 ({} 바이트)", iw, ih, rgba.len());
-    }
-    let img = image::RgbaImage::from_raw(iw as u32, ih as u32, rgba[..iw * ih * 4].to_vec())
+    checked_elems(&[c, h, w], "목표 이미지")?;
+    let img = image::RgbaImage::from_raw(iw as u32, ih as u32, rgba[..need].to_vec())
         .context("RGBA 버퍼를 이미지로 만들 수 없습니다")?;
     let dyn_img = image::DynamicImage::ImageRgba8(img);
     let resized = if iw != w || ih != h {
@@ -236,7 +384,8 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             let Mid::Img { c, h, w, data } = mid else {
                 bail!("Resize 는 이미지 필드에만 쓸 수 있습니다");
             };
-            let out = resample(&data, c, h, w, *height, *width);
+            check_image_size(*width as u32, *height as u32, "Resize 목표")?;
+            let out = resample(&data, c, h, w, *height, *width)?;
             Ok(Mid::Img { c, h: *height, w: *width, data: out })
         }
         Transform::Grayscale => {
@@ -260,10 +409,17 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             let Mid::Img { c, h, w, data } = mid else {
                 bail!("Crop 은 이미지 필드에만 쓸 수 있습니다");
             };
-            if x + width > w || y + height > h {
+            // 릴리스 빌드의 usize 덧셈은 조용히 래핑한다 — checked_add 로 검사를 통과시키지 않는다.
+            let right = x.checked_add(*width).context("Crop 의 x + width 가 넘칩니다")?;
+            let bottom = y.checked_add(*height).context("Crop 의 y + height 가 넘칩니다")?;
+            if right > w || bottom > h {
                 bail!("Crop 영역 ({x},{y},{width},{height}) 이 이미지 {w}×{h} 밖입니다");
             }
-            let mut out = vec![0.0f32; c * height * width];
+            if *width == 0 || *height == 0 {
+                bail!("Crop 크기는 1 이상이어야 합니다 (지금 {width}×{height})");
+            }
+            let n = checked_elems(&[c, *height, *width], "Crop 결과")?;
+            let mut out = vec![0.0f32; n];
             for ch in 0..c {
                 for row in 0..*height {
                     let src = ch * h * w + (y + row) * w + x;
@@ -289,6 +445,7 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             Ok(rebuild(shape, data))
         }
         Transform::OneHot { classes } => {
+            check_classes(*classes)?;
             let (_, data) = mid.into_parts()?;
             if data.len() != 1 {
                 bail!("OneHot 은 스칼라에만 쓸 수 있습니다 (지금 {} 개)", data.len());
@@ -346,6 +503,9 @@ fn tokenize(text: &str, vocab: &str, max_len: usize) -> Result<Vec<f32>> {
     if max_len == 0 {
         bail!("Tokenize 의 max_len 은 1 이상이어야 합니다");
     }
+    if max_len > MAX_TOKENS {
+        bail!("Tokenize 의 max_len {max_len} 이 상한 {MAX_TOKENS} 를 넘습니다");
+    }
     let table: Vec<char> = vocab.chars().collect();
     let mut out = vec![0.0f32; max_len];
     for (slot, ch) in out.iter_mut().zip(text.chars()) {
@@ -375,6 +535,9 @@ fn normalize(data: &mut [f32], shape: &[usize], mean: &[f32], std: &[f32], inver
     let pick = |i: usize, v: &[f32]| if v.len() == 1 { v[0] } else { v[i % v.len()] };
     if mean.len() != 1 && mean.len() != channels {
         bail!("Normalize mean 길이 {} 가 채널 {} 과 맞지 않습니다", mean.len(), channels);
+    }
+    if std.len() != 1 && std.len() != channels {
+        bail!("Normalize std 길이 {} 가 채널 {} 과 맞지 않습니다", std.len(), channels);
     }
     for ch in 0..channels {
         let (m, s) = (pick(ch, mean), pick(ch, std));
@@ -413,8 +576,24 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
                 FieldKind::ClassLabel { labels } => labels,
                 _ => bail!("MapLabel 은 ClassLabel 필드에만 쓸 수 있습니다"),
             };
-            // 아직 Argmax 를 거치지 않았다면 여기서 최대 인덱스를 고른다.
-            let idx = if data.len() == 1 { data[0] as usize } else { argmax(&data) };
+            // 단일 원소는 뜻이 갈린다. 라벨이 2 개면 이진 분류기의 로짓/확률로 보고 임계 판정하고,
+            // 그 밖에는 이미 Argmax 를 거친 인덱스로 본다.
+            let idx = if data.len() == 1 {
+                if labels.len() == 2 {
+                    binary_index(data[0])
+                } else {
+                    let v = data[0];
+                    if v < 0.0 || v.fract() != 0.0 {
+                        bail!(
+                            "MapLabel 이 받은 단일 값 {v} 를 클래스 인덱스로 볼 수 없습니다 — \
+                             Argmax 를 먼저 넣거나, 이진 분류라면 라벨을 2 개로 두십시오"
+                        );
+                    }
+                    v as usize
+                }
+            } else {
+                argmax(&data)
+            };
             let name = labels
                 .get(idx)
                 .with_context(|| format!("클래스 인덱스 {idx} 에 해당하는 라벨이 없습니다 (라벨 {} 개)", labels.len()))?;
@@ -432,6 +611,7 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
             Dec::Nums { shape, data }
         }
         Transform::OneHot { classes } => {
+            check_classes(*classes)?;
             // 디코드 쪽 OneHot 은 인덱스를 one-hot 벡터로 펼친다.
             let idx = if data.len() == 1 { data[0] as usize } else { argmax(&data) };
             if idx >= *classes {
@@ -451,6 +631,15 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
 
 // ───────────────────────────── 수치 도우미 ─────────────────────────────
 
+/// 단일 로짓/확률의 이진 판정.
+///
+/// 값이 `0..=1` 안이면 확률로 보고 0.5, 아니면 로짓으로 보고 0 을 임계로 쓴다
+/// (시그모이드가 0.5 를 넘는 지점이 로짓 0 이라 두 규칙은 서로 어긋나지 않는다).
+fn binary_index(v: f32) -> usize {
+    let positive = if (0.0..=1.0).contains(&v) { v >= 0.5 } else { v >= 0.0 };
+    positive as usize
+}
+
 fn argmax(v: &[f32]) -> usize {
     v.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m }).0
 }
@@ -469,11 +658,20 @@ fn softmax(v: &[f32]) -> Vec<f32> {
 ///
 /// 소스 이미지의 첫 리사이즈는 `image` 크레이트(`resize_exact`, Triangle)가 맡는다. 다만 체인 중간의
 /// `Transform::Resize` 는 앞선 Scale/Normalize 때문에 값이 0..255 를 벗어날 수 있어 u8 왕복을 할 수 없다.
-fn resample(data: &[f32], c: usize, h: usize, w: usize, nh: usize, nw: usize) -> Vec<f32> {
-    if h == nh && w == nw {
-        return data.to_vec();
+fn resample(data: &[f32], c: usize, h: usize, w: usize, nh: usize, nw: usize) -> Result<Vec<f32>> {
+    // h/w 가 0 이면 아래 `h - 1` 이 언더플로한다 (릴리스에서는 조용히 래핑해 인덱싱에서 터진다).
+    if h == 0 || w == 0 || nh == 0 || nw == 0 {
+        bail!("리샘플링 크기가 0 입니다 ({w}×{h} → {nw}×{nh})");
     }
-    let mut out = vec![0.0f32; c * nh * nw];
+    let need = checked_elems(&[c, h, w], "리샘플링 입력")?;
+    if data.len() < need {
+        bail!("리샘플링 입력이 [{c}, {h}, {w}] 에 비해 짧습니다 ({} 개)", data.len());
+    }
+    if h == nh && w == nw {
+        return Ok(data.to_vec());
+    }
+    let out_n = checked_elems(&[c, nh, nw], "리샘플링 결과")?;
+    let mut out = vec![0.0f32; out_n];
     let sy = h as f32 / nh as f32;
     let sx = w as f32 / nw as f32;
     for ch in 0..c {
@@ -498,7 +696,18 @@ fn resample(data: &[f32], c: usize, h: usize, w: usize, nh: usize, nw: usize) ->
             }
         }
     }
-    out
+    Ok(out)
+}
+
+/// 클래스 수가 상한 안인지. 프로젝트 파일의 값이 그대로 할당 크기가 되므로 반드시 막는다.
+fn check_classes(classes: usize) -> Result<()> {
+    if classes == 0 {
+        bail!("클래스 수는 1 이상이어야 합니다");
+    }
+    if classes > MAX_CLASSES {
+        bail!("클래스 수 {classes} 가 상한 {MAX_CLASSES} 를 넘습니다");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -608,6 +817,188 @@ mod tests {
         let mut h = Field::new("t", FieldKind::Text);
         h.decode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 2 }];
         assert!(decode(&h, &HostTensor::new(vec![1, 2], vec![1.0, 2.0])).is_err(), "디코드 전용 아님");
+    }
+
+    // ── Image 입력의 여러 모습 (HTTP 추론 API) ──
+
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 8) as u8, (y * 8) as u8, 128]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn image_accepts_flat_and_nested_json_numbers() {
+        let f = Field::new("img", FieldKind::Image { width: 2, height: 2, channels: 1 });
+        // 평탄 배열.
+        let flat = serde_json::json!([1.0, 2.0, 3.0, 4.0]);
+        let t = encode(&f, &Value::Json(flat)).unwrap();
+        assert_eq!(t.shape, vec![1, 1, 2, 2]);
+        assert_eq!(t.data, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // [c][h][w] 중첩 — 같은 결과.
+        let nested = serde_json::json!([[[1.0, 2.0], [3.0, 4.0]]]);
+        assert_eq!(encode(&f, &Value::Json(nested)).unwrap().data, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // Numbers 도 같은 규칙. 값은 그대로 (Scale 이 없으면 0..255 도 그대로).
+        let t = encode(&f, &Value::Numbers(vec![10.0, 20.0, 200.0, 255.0])).unwrap();
+        assert_eq!(t.data, vec![10.0, 20.0, 200.0, 255.0]);
+    }
+
+    #[test]
+    fn image_json_shape_mismatch_names_the_expected_shape() {
+        let f = Field::new("img", FieldKind::Image { width: 4, height: 3, channels: 3 });
+        let e = format!("{:#}", encode(&f, &Value::Json(serde_json::json!([1.0, 2.0]))).unwrap_err());
+        assert!(e.contains("[3, 3, 4]"), "기대 형상이 없습니다: {e}");
+        assert!(e.contains("36"), "기대 원소 수가 없습니다: {e}");
+
+        // 채널이 마지막인 배열은 원소 수가 같아 개수로는 못 잡는다 — 중첩 순서로 잡아야 한다.
+        // 필드는 [c=3][h=2][w=4], 들어온 것은 [h=2][w=4][c=3] (둘 다 24 개).
+        let g = Field::new("img", FieldKind::Image { width: 4, height: 2, channels: 3 });
+        let hwc = serde_json::json!([
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        ]);
+        assert_eq!(json_nesting(&hwc), vec![2, 4, 3]);
+        let e = format!("{:#}", encode(&g, &Value::Json(hwc)).unwrap_err());
+        assert!(e.contains("채널이 마지막"), "채널 순서를 짚어 주지 않습니다: {e}");
+
+        // 올바른 [c][h][w] 중첩은 통과한다.
+        let chw = serde_json::json!([
+            [[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]],
+            [[2.0, 2.0, 2.0, 2.0], [2.0, 2.0, 2.0, 2.0]],
+            [[3.0, 3.0, 3.0, 3.0], [3.0, 3.0, 3.0, 3.0]]
+        ]);
+        let t = encode(&g, &Value::Json(chw)).unwrap();
+        assert_eq!(t.shape, vec![1, 3, 2, 4]);
+        assert_eq!(t.data[0], 1.0);
+        assert_eq!(t.data[8], 2.0);
+        assert_eq!(t.data[16], 3.0);
+    }
+
+    #[test]
+    fn image_accepts_base64_png_with_and_without_data_url() {
+        let mut f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 3 });
+        f.encode = vec![Transform::Scale { min: 0.0, max: 255.0 }];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes(8, 8));
+
+        for text in [format!("data:image/png;base64,{b64}"), b64.clone()] {
+            let t = encode(&f, &Value::Json(serde_json::Value::String(text))).unwrap();
+            assert_eq!(t.shape, vec![1, 3, 4, 4], "8×8 PNG 가 필드 크기로 리샘플링되어야 한다");
+            assert!(t.data.iter().all(|v| (0.0..=1.0).contains(v)));
+        }
+
+        // 줄바꿈이 섞인 base64 도 받아들인다.
+        let wrapped = format!("{}\n{}", &b64[..b64.len() / 2], &b64[b64.len() / 2..]);
+        assert!(encode(&f, &Value::Json(serde_json::Value::String(wrapped))).is_ok());
+    }
+
+    #[test]
+    fn image_rejects_strings_that_are_not_images() {
+        let f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 3 });
+        // base64 로 풀리지만 이미지가 아니다.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello world hello world");
+        let e = format!("{:#}", encode(&f, &Value::Json(serde_json::Value::String(b64))).unwrap_err());
+        assert!(e.contains("PNG") && e.contains("JPEG"), "{e}");
+
+        // base64 조차 아니다.
+        let e = format!(
+            "{:#}",
+            encode(&f, &Value::Json(serde_json::Value::String("!!! not base64 !!!".into()))).unwrap_err()
+        );
+        assert!(e.contains("base64"), "{e}");
+
+        // data URL 인데 base64 가 아니다.
+        let e = format!(
+            "{:#}",
+            encode(&f, &Value::Json(serde_json::Value::String("data:image/png,raw".into()))).unwrap_err()
+        );
+        assert!(e.contains("base64"), "{e}");
+    }
+
+    // ── 리뷰 지적 (B6, S6) ──
+
+    #[test]
+    fn normalize_validates_std_length_too() {
+        let mut f = Field::new("img", FieldKind::Image { width: 2, height: 2, channels: 3 });
+        f.encode = vec![Transform::Normalize { mean: vec![0.0; 3], std: vec![1.0, 2.0] }];
+        let e = format!("{:#}", encode(&f, &Value::Numbers(vec![0.0; 12])).unwrap_err());
+        assert!(e.contains("std"), "{e}");
+
+        // 길이 1(전체 적용)과 채널 수는 통과한다.
+        f.encode = vec![Transform::Normalize { mean: vec![0.0], std: vec![2.0] }];
+        assert!(encode(&f, &Value::Numbers(vec![4.0; 12])).is_ok());
+        f.encode = vec![Transform::Normalize { mean: vec![0.0; 3], std: vec![1.0, 2.0, 4.0] }];
+        assert!(encode(&f, &Value::Numbers(vec![4.0; 12])).is_ok());
+    }
+
+    #[test]
+    fn map_label_handles_a_single_binary_output() {
+        let labels = vec!["아니오".to_string(), "예".to_string()];
+        let mut f = Field::new("c", FieldKind::ClassLabel { labels });
+        f.decode = vec![Transform::MapLabel];
+
+        // 확률 (0..1): 0.5 기준.
+        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![0.7])).unwrap(), Value::Text("예".into()));
+        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![0.3])).unwrap(), Value::Text("아니오".into()));
+        // 로짓 (범위 밖): 0 기준.
+        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![2.5])).unwrap(), Value::Text("예".into()));
+        assert_eq!(decode(&f, &HostTensor::new(vec![1, 1], vec![-2.5])).unwrap(), Value::Text("아니오".into()));
+
+        // 라벨이 3 개인데 단일 실수가 오면 모호하므로 오류로 알린다.
+        let mut g = Field::new("c", FieldKind::ClassLabel { labels: vec!["a".into(), "b".into(), "c".into()] });
+        g.decode = vec![Transform::MapLabel];
+        let e = format!("{:#}", decode(&g, &HostTensor::new(vec![1, 1], vec![0.7])).unwrap_err());
+        assert!(e.contains("Argmax"), "{e}");
+        // 정수 인덱스는 그대로 통한다.
+        assert_eq!(decode(&g, &HostTensor::new(vec![1, 1], vec![2.0])).unwrap(), Value::Text("c".into()));
+    }
+
+    // ── 보안 (M19): 악성 입력이 패닉이 아니라 Err ──
+
+    #[test]
+    fn zero_sized_resize_chain_errors_instead_of_panicking() {
+        let mut f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 1 });
+        f.encode = vec![Transform::Resize { width: 0, height: 0 }, Transform::Resize { width: 4, height: 4 }];
+        assert!(encode(&f, &Value::Numbers(vec![0.0; 16])).is_err());
+    }
+
+    #[test]
+    fn oversized_transform_parameters_are_rejected() {
+        let mut f = Field::new("img", FieldKind::Image { width: 4, height: 4, channels: 1 });
+        // 거대 Resize — 할당을 시도하기 전에 거절해야 한다.
+        f.encode = vec![Transform::Resize { width: 100_000, height: 100_000 }];
+        assert!(encode(&f, &Value::Numbers(vec![0.0; 16])).is_err());
+
+        // Crop 의 x + width 가 usize 를 넘는다.
+        f.encode = vec![Transform::Crop { x: usize::MAX, y: 0, width: 4, height: 4 }];
+        assert!(encode(&f, &Value::Numbers(vec![0.0; 16])).is_err());
+
+        // 거대 OneHot.
+        let mut g = Field::new("s", FieldKind::Scalar);
+        g.encode = vec![Transform::OneHot { classes: 4_000_000_000 }];
+        assert!(encode(&g, &Value::Number(0.0)).is_err());
+
+        // 거대 Tokenize.
+        let mut h = Field::new("t", FieldKind::Text);
+        h.encode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: usize::MAX }];
+        assert!(encode(&h, &Value::Text("a".into())).is_err());
+    }
+
+    #[test]
+    fn image_field_with_absurd_dimensions_is_rejected() {
+        let f = Field::new("img", FieldKind::Image { width: 100_000, height: 100_000, channels: 3 });
+        let e = format!("{:#}", encode(&f, &Value::Numbers(vec![0.0; 4])).unwrap_err());
+        assert!(e.contains("상한"), "{e}");
+    }
+
+    #[test]
+    fn mismatched_tensor_image_is_rejected() {
+        let f = Field::new("img", FieldKind::Image { width: 2, height: 2, channels: 1 });
+        // 형상은 [1,2,2](4 개)인데 데이터가 2 개뿐 — 릴리스에서도 잡아야 한다.
+        let bad = HostTensor { shape: vec![1, 2, 2], data: vec![1.0, 2.0] };
+        assert!(encode(&f, &Value::Tensor(bad)).is_err());
     }
 
     #[test]

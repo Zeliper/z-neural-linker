@@ -27,6 +27,6 @@ pub use payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
 pub use sample::{api_pipeline, new_project, quadrants_cnn_project, xor_project, SampleFactory, API_BIND, API_PATH, SAMPLES};
 pub use pipeline::{Link, Logic, PNode, PNodeKind, Pipeline, Sink, Source, InputAction, Region};
 pub use pipeline::{host_of_bind, is_loopback_bind, new_token, TOKEN_LEN};
-pub use shape::{infer, Dim, GraphError, Shape, ShapeReport};
+pub use shape::{infer, Dim, GraphError, Shape, ShapeReport, MAX_RANK};
 pub use train::{DevicePref, EpochMetrics, Loss, LrSchedule, Metric, Optimizer, RunRecord, RunStatus, TrainConfig};
 pub use validate::{validate, Issue, Severity};

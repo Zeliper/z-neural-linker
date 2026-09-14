@@ -75,7 +75,8 @@ fn build<B: Backend>(
 ) -> Result<(Box<dyn Runner>, Vec<Vec<usize>>, Vec<Vec<usize>>)> {
     let mut model = Model::<B>::new(def, device, def.train.seed)?;
     if let Some(path) = w {
-        let loaded = weights::load(path).with_context(|| format!("가중치 읽기 실패: {}", path.display()))?;
+        let loaded = weights::load_for(path, Some(def.id))
+            .with_context(|| format!("가중치 읽기 실패: {}", path.display()))?;
         model
             .load_host_params(&loaded)
             .with_context(|| format!("가중치 적용 실패: {}", path.display()))?;

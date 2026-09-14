@@ -1,5 +1,9 @@
 //! 데이터셋 로딩(CSV · 이미지 폴더 · 합성 · 녹화). 학습 루프와 미리보기가 공유한다.
 
+use crate::limits::{
+    check_file_size, checked_elems, decode_image_file, MAX_CSV_BYTES, MAX_CSV_COLS, MAX_CSV_ROWS,
+    MAX_DATASET_ELEMS, MAX_LABELS_BYTES,
+};
 use crate::tensor::HostTensor;
 use anyhow::{bail, Context, Result};
 use nl_core::dataset::{DataSource, DatasetInfo, SyntheticKind};
@@ -115,7 +119,7 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
                 Some(h) if h.len() == 3 => h.to_vec(),
                 _ => match &first {
                     Some(p) => {
-                        let img = image::open(p).with_context(|| format!("이미지 열기 실패: {}", p.display()))?;
+                        let img = decode_image_file(p)?;
                         let c = if img.color().has_color() { 3 } else { 1 };
                         vec![c, img.height() as usize, img.width() as usize]
                     }
@@ -224,6 +228,7 @@ fn load_csv(
     if target_cols.is_empty() {
         bail!("CSV 타깃 열이 비어 있습니다");
     }
+    check_file_size(path, MAX_CSV_BYTES, "CSV 파일")?;
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(header)
         .from_path(path)
@@ -249,27 +254,46 @@ fn load_csv(
     };
     let in_idx: Vec<usize> = input_cols.iter().map(|c| resolve_col(c)).collect::<Result<_>>()?;
     let tg_idx: Vec<usize> = target_cols.iter().map(|c| resolve_col(c)).collect::<Result<_>>()?;
+    // 오류 메시지에 사용자가 쓴 지정자를 그대로 보여 주기 위한 대응표.
+    let in_spec: Vec<&str> = input_cols.iter().map(|c| c.as_str()).collect();
+    let tg_spec: Vec<&str> = target_cols.iter().map(|c| c.as_str()).collect();
+
+    if in_idx.len() + tg_idx.len() > MAX_CSV_COLS {
+        bail!("CSV 열 수 {} 가 상한 {MAX_CSV_COLS} 를 넘습니다", in_idx.len() + tg_idx.len());
+    }
+    let per_row = in_idx.len() + tg_idx.len();
+    let max_rows = limit.unwrap_or(MAX_CSV_ROWS).min(MAX_CSV_ROWS);
 
     let mut out = Vec::new();
     for (row, rec) in rdr.records().enumerate() {
-        if let Some(l) = limit {
-            if out.len() >= l {
-                break;
+        if out.len() >= max_rows {
+            if limit.is_none() {
+                bail!("CSV 행 수가 상한 {MAX_CSV_ROWS} 를 넘습니다: {}", path.display());
             }
+            break;
         }
         let rec = rec.with_context(|| format!("CSV {}행 읽기 실패", row + 1))?;
-        let pick = |idx: &[usize]| -> Result<Vec<f32>> {
+        if rec.len() > MAX_CSV_COLS {
+            bail!("CSV {}행의 열 수 {} 가 상한 {MAX_CSV_COLS} 를 넘습니다", row + 1, rec.len());
+        }
+        if out.len().saturating_mul(per_row) > MAX_DATASET_ELEMS {
+            bail!("CSV 원소 수가 상한 {MAX_DATASET_ELEMS} 를 넘습니다: {}", path.display());
+        }
+        let pick = |idx: &[usize], spec: &[&str]| -> Result<Vec<f32>> {
             idx.iter()
-                .map(|&i| {
-                    let raw = rec.get(i).with_context(|| format!("CSV {}행에 열 {i} 이 없습니다", row + 1))?;
-                    raw.trim()
-                        .parse::<f32>()
-                        .with_context(|| format!("CSV {}행 열 {i} 의 값 '{raw}' 을 수로 읽을 수 없습니다", row + 1))
+                .zip(spec)
+                .map(|(&i, name)| {
+                    let raw = rec
+                        .get(i)
+                        .with_context(|| format!("CSV {}행에 열 '{name}'(번호 {i}) 이 없습니다", row + 1))?;
+                    raw.trim().parse::<f32>().with_context(|| {
+                        format!("CSV {}행 열 '{name}'(번호 {i}) 의 값 '{raw}' 을 수로 읽을 수 없습니다", row + 1)
+                    })
                 })
                 .collect()
         };
-        let x = pick(&in_idx)?;
-        let y = pick(&tg_idx)?;
+        let x = pick(&in_idx, &in_spec)?;
+        let y = pick(&tg_idx, &tg_spec)?;
         out.push(Sample {
             input: HostTensor::new(vec![in_idx.len()], x),
             target: HostTensor::new(vec![tg_idx.len()], y),
@@ -324,11 +348,51 @@ fn class_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
         .filter(|e| e.path().is_dir())
         .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
         .collect();
-    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v.sort_by(|a, b| natural_cmp(&a.0, &b.0));
     if v.is_empty() {
         bail!("이미지 폴더에 클래스 하위 폴더가 없습니다: {}", dir.display());
     }
     Ok(v)
+}
+
+/// 숫자를 값으로 비교하는 정렬 — 폴더 이름이 `0`, `1`, `2`, `10` 일 때 바이트 순서(`0,1,10,2`)를 피한다.
+///
+/// 클래스 인덱스는 이 순서로 매겨진다. 폴더 이름을 그대로 클래스 번호로 쓰는 사용자가
+/// 인덱스가 밀린 채 학습하는 일을 막는다.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut ai, mut bi) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => {
+                if x.is_ascii_digit() && y.is_ascii_digit() {
+                    let take = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                        let mut s = String::new();
+                        while it.peek().is_some_and(|c| c.is_ascii_digit()) {
+                            s.push(it.next().expect("peek 했다"));
+                        }
+                        s
+                    };
+                    let (xs, ys) = (take(&mut ai), take(&mut bi));
+                    // 자릿수가 아주 길면 수로 못 바꾸므로 앞 0 을 떼고 길이·사전 순으로 비교한다.
+                    let (xt, yt) = (xs.trim_start_matches('0'), ys.trim_start_matches('0'));
+                    let ord = xt.len().cmp(&yt.len()).then_with(|| xt.cmp(yt)).then_with(|| xs.cmp(&ys));
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                } else {
+                    let ord = x.cmp(&y);
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                    ai.next();
+                    bi.next();
+                }
+            }
+        }
+    }
 }
 
 fn image_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -349,7 +413,7 @@ fn image_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// 이미지 파일 하나를 `[C, H, W]` f32(0..1) 로. `shape` 가 `None` 이면 파일 크기를 그대로 쓴다.
 fn load_image(path: &Path, shape: Option<&[usize]>) -> Result<HostTensor> {
-    let img = image::open(path).with_context(|| format!("이미지 열기 실패: {}", path.display()))?;
+    let img = decode_image_file(path)?;
     let (c, h, w) = match shape {
         Some(s) if s.len() == 3 => (s[0], s[1], s[2]),
         Some(s) => bail!("이미지 입력 형상은 [C, H, W] 여야 합니다 (지금 {s:?})"),
@@ -361,6 +425,9 @@ fn load_image(path: &Path, shape: Option<&[usize]>) -> Result<HostTensor> {
     if c != 1 && c != 3 {
         bail!("이미지 채널은 1 또는 3 만 지원합니다 (지금 {c})");
     }
+    // 프로젝트 파일이 정한 목표 형상도 상한 안이어야 한다 — 디코더 한도는 이쪽을 보지 않는다.
+    crate::limits::check_image_size(w as u32, h as u32, "이미지 입력 형상")?;
+    checked_elems(&[c, h, w], "이미지 샘플")?;
     let resized = if img.width() as usize != w || img.height() as usize != h {
         img.resize_exact(w as u32, h as u32, image::imageops::FilterType::Triangle)
     } else {
@@ -432,9 +499,34 @@ struct LabelLine {
     label: i64,
 }
 
+/// `labels.jsonl` 의 `frame` 을 `frames/` 바로 아래의 단일 파일 이름으로만 받아들인다.
+///
+/// 이 파일은 외부에서 온 데이터다. `..` 이나 절대 경로를 그대로 `join` 하면 폴더 밖 파일을 학습
+/// 데이터로 끌어올 수 있고, 실패 메시지가 파일 존재 여부를 알려 주는 신호가 된다.
+fn safe_frame_name(name: &str) -> Result<&str> {
+    if name.is_empty() {
+        bail!("frame 이름이 비어 있습니다");
+    }
+    let p = Path::new(name);
+    if p.is_absolute() {
+        bail!("frame '{name}' 은 절대 경로입니다 — frames/ 아래 파일 이름만 쓸 수 있습니다");
+    }
+    let mut parts = p.components();
+    let only = match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(c)), None) => c,
+        _ => bail!("frame '{name}' 은 frames/ 바로 아래의 파일 이름 하나여야 합니다"),
+    };
+    // Windows 에서 "a:b" 같은 이름이 드라이브로 해석되는 것도 막는다.
+    if only.to_str() != Some(name) {
+        bail!("frame '{name}' 에 쓸 수 없는 문자가 있습니다");
+    }
+    Ok(name)
+}
+
 fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Result<(Vec<Sample>, DatasetInfo)> {
     let labels_path = dir.join("labels.jsonl");
     let frames_dir = dir.join("frames");
+    check_file_size(&labels_path, MAX_LABELS_BYTES, "라벨 파일")?;
     let text = std::fs::read_to_string(&labels_path)
         .with_context(|| format!("라벨 파일 읽기 실패: {}", labels_path.display()))?;
 
@@ -458,7 +550,9 @@ fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Re
             bail!("{} {}줄: 라벨은 0 이상이어야 합니다 (지금 {})", labels_path.display(), i + 1, rec.label);
         }
         max_label = max_label.max(rec.label);
-        let f = frames_dir.join(&rec.frame);
+        let name = safe_frame_name(&rec.frame)
+            .with_context(|| format!("{} {}줄", labels_path.display(), i + 1))?;
+        let f = frames_dir.join(name);
         let t = load_image(&f, shape.as_deref())?;
         if shape.is_none() {
             shape = Some(t.shape.clone());
@@ -655,6 +749,85 @@ mod tests {
         assert_eq!(samples[0].target.data, vec![3.0]);
         assert_eq!(samples[1].target.data, vec![1.0]);
         assert_eq!(info.classes.len(), 4, "0..=3 라벨");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn class_dirs_sort_numerically_not_bytewise() {
+        // 바이트 순이면 0,1,10,11,2 — 폴더 이름을 클래스 번호로 쓰는 사용자가 밀린 인덱스로 학습한다.
+        let mut v = ["10", "2", "0", "11", "1"];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(v, ["0", "1", "2", "10", "11"]);
+
+        // 접두사가 있어도 숫자 부분을 값으로 본다.
+        let mut w = ["class10", "class2", "class1"];
+        w.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(w, ["class1", "class2", "class10"]);
+
+        // 숫자가 없으면 평범한 사전 순.
+        let mut x = ["dog", "cat", "bird"];
+        x.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(x, ["bird", "cat", "dog"]);
+
+        // 앞 0 은 값으로는 같다 — 그래도 전순서라야 하므로 어느 한쪽으로 확정되고 대칭이어야 한다.
+        let a = natural_cmp("007", "7");
+        assert_ne!(a, std::cmp::Ordering::Equal, "서로 다른 이름이 같은 순위를 가지면 정렬이 불안정하다");
+        assert_eq!(natural_cmp("7", "007"), a.reverse());
+        // 값이 다르면 앞 0 과 무관하게 값 순서를 따른다.
+        assert_eq!(natural_cmp("007", "10"), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn recorded_rejects_frame_names_that_escape_the_folder() {
+        for bad in [
+            "../../../etc/hosts",
+            "/etc/hosts",
+            "sub/dir.png",
+            "..",
+            "",
+        ] {
+            assert!(safe_frame_name(bad).is_err(), "'{bad}' 를 받아들이면 안 됩니다");
+        }
+        assert_eq!(safe_frame_name("000001.png").unwrap(), "000001.png");
+    }
+
+    #[test]
+    fn recorded_folder_rejects_traversal_in_labels() {
+        let dir = tmp("recorded-escape");
+        let frames = dir.join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        write_png(&frames.join("a.png"), 4, 4, 0);
+        // 폴더 밖 파일을 가리키는 줄.
+        std::fs::write(
+            dir.join("labels.jsonl"),
+            "{\"frame\":\"a.png\",\"label\":0}\n{\"frame\":\"../../secret.png\",\"label\":1}\n",
+        )
+        .unwrap();
+
+        let e = format!("{:#}", load_recorded(&dir, None, None).unwrap_err());
+        assert!(e.contains("frames/"), "경계 위반을 알려야 합니다: {e}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn csv_column_errors_name_the_user_spec() {
+        let dir = tmp("csv-err");
+        let p = dir.join("c.csv");
+        std::fs::write(&p, "a,b\n1,x\n").unwrap();
+        // 값이 수가 아니면 사용자가 쓴 열 이름이 메시지에 있어야 한다.
+        let e = format!("{:#}", load_csv(&p, &["a".into()], &["b".into()], true, None).unwrap_err());
+        assert!(e.contains("'b'"), "사용자가 쓴 열 이름이 없습니다: {e}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oversized_image_shape_hint_is_rejected() {
+        let dir = tmp("img-bomb");
+        std::fs::create_dir_all(dir.join("c0")).unwrap();
+        write_png(&dir.join("c0/a.png"), 8, 8, 0);
+        // 프로젝트 파일이 정한 목표 형상이 터무니없으면 할당 전에 거절한다.
+        let e = format!("{:#}", load_image_folder(&dir, Some(&[3, 100_000, 100_000]), None).unwrap_err());
+        assert!(e.contains("상한"), "{e}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
