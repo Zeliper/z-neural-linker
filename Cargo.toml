@@ -12,6 +12,9 @@ members = [
     "crates/nl-cli",
     "tools/uitest/vseat",
 ]
+# ONNX protobuf 코드 생성기. 결과(`crates/nl-engine/src/onnx/pb.rs`)를 커밋해 두므로
+# 평소 빌드에는 필요 없다 — 워크스페이스에서 뺀다.
+exclude = ["scripts/onnxgen"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,6 +36,11 @@ rayon = "1"
 # ML 엔진: burn 0.21 안정판. CPU = ndarray, GPU = wgpu(Vulkan/DX12/Metal — 드라이버 SDK 불필요)
 burn = { version = "0.21", default-features = false }
 safetensors = "0.8"
+# ONNX 내보내기의 protobuf 런타임. 생성 코드(`nl-engine/src/onnx/pb.rs`)를 커밋해 두므로
+# 빌드에 prost-build 도 protoc 도 필요 없다 — 런타임 크레이트만 쓴다.
+prost = "0.14"
+# ONNX 내보내기 검증 전용(dev-dependency). 배포 바이너리에는 들어가지 않는다 — 넣으면 +34 MiB 다.
+tract-onnx = "0.23"
 base64 = "0.22"
 memmap2 = "0.9"
 # 장치 열거용 wgpu — burn(cubecl-wgpu)이 쓰는 것과 같은 메이저 버전이어야 한다.

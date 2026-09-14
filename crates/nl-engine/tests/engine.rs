@@ -5,6 +5,7 @@
 use nl_core::dataset::{DataSource, SyntheticKind};
 use nl_core::model::{Act, Graph, LayerKind, ModelDef, Node, Port};
 use nl_core::shape;
+use nl_core::templates;
 use nl_core::{DatasetSpec, DevicePref, Loss, Metric, Optimizer, RunId, RunRecord, RunStatus};
 use nl_engine::{HostTensor, Session, TrainEvent, TrainRequest};
 use std::path::{Path, PathBuf};
@@ -2158,4 +2159,228 @@ fn try_train(def: ModelDef, ds: DatasetSpec, dir: &Path) -> Result<RunRecord, St
         }
     }
     Err("Finished/Failed 없이 이벤트 채널이 끊겼습니다 (백엔드가 학습 스레드 밖에서 패닉)".into())
+}
+
+// ───────────────────────────── 레이어 템플릿 (nl-core::templates) ─────────────────────────────
+
+/// 템플릿 블록을 `prev` 뒤에 붙이고 블록 출력 노드를 돌려준다.
+///
+/// 열린 슬롯은 **전부** `prev` 에 잇는다 — 잔차 우회로가 본줄기와 같은 상류를 봐야 형상이 맞는다.
+/// 앱 팔레트가 하게 될 일과 같은 순서다 (`instantiate` → `open_inputs` → 노드·엣지 삽입 → 연결).
+fn splice(g: &mut Graph, prev: nl_core::NodeId, params: templates::TemplateParams) -> nl_core::NodeId {
+    let (nodes, edges) = templates::instantiate(params.name(), [0.0, 0.0], &params).expect("템플릿 생성");
+    let open = templates::open_inputs(&nodes, &edges);
+    let out = nodes.last().expect("빈 템플릿").id;
+    for n in nodes {
+        g.add_node(n);
+    }
+    for e in edges {
+        g.edges.insert(e.id, e);
+    }
+    for p in open {
+        assert!(g.add_edge(prev, p).is_some(), "열린 슬롯 {p:?} 연결 실패");
+    }
+    out
+}
+
+fn adam(lr: f64) -> Optimizer {
+    Optimizer::Adam {
+        lr,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+    }
+}
+
+/// 손실이 실제로 내려갔는지 — 순전파만이 아니라 **역전파가 블록을 통과했다는** 증거다.
+fn assert_loss_improved(run: &RunRecord, what: &str) {
+    assert_eq!(run.status, RunStatus::Finished, "{what}: 학습이 끝나지 않았습니다");
+    let first = run.epochs.first().expect("에포크 기록").train_loss;
+    let last = run.epochs.last().expect("에포크 기록").train_loss;
+    assert!(last.is_finite(), "{what}: 손실이 유한하지 않습니다 ({last})");
+    assert!(last < first, "{what}: 손실이 줄지 않았습니다 ({first} → {last})");
+}
+
+#[test]
+fn residual_block_template_trains() {
+    let dir = temp_dir("tpl-residual");
+    // Input[2] → Linear(16) → [잔차 블록] → Linear(2) → Output
+    let mut def = ModelDef::new("잔차");
+    let g = &mut def.graph;
+    let input = add(g, LayerKind::Input { shape: vec![2] });
+    let up = add(
+        g,
+        LayerKind::Linear {
+            out_features: 16,
+            bias: true,
+        },
+    );
+    link(g, input, up);
+    let block = splice(g, up, templates::TemplateParams::ResidualBlock { width: 16 });
+    let head = add(
+        g,
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+    );
+    link(g, block, head);
+    let out = add(g, LayerKind::Output);
+    link(g, head, out);
+
+    assert_eq!(inferred_output_shape(&def), vec![2]);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = adam(1e-2);
+    def.train.epochs = 12;
+    def.train.batch_size = 64;
+    def.train.seed = 7;
+    def.train.device = test_device();
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Xor, 512), &dir);
+    assert_loss_improved(&run, "잔차 블록");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn transformer_block_template_trains_on_a_sequence_task() {
+    let dir = temp_dir("tpl-transformer");
+    let (len, vocab, d_model) = (8usize, 16usize, 16usize);
+    // Input[L] → Embedding → [트랜스포머 블록] → Flatten → Linear(2) → Output
+    let mut def = ModelDef::new("트랜스포머");
+    let g = &mut def.graph;
+    let input = add(g, LayerKind::Input { shape: vec![len] });
+    let emb = add(g, LayerKind::Embedding { vocab, dim: d_model });
+    link(g, input, emb);
+    let block = splice(
+        g,
+        emb,
+        templates::TemplateParams::TransformerBlock {
+            d_model,
+            heads: 4,
+            ff_mult: 2,
+        },
+    );
+    let flat = add(g, LayerKind::Flatten);
+    link(g, block, flat);
+    let head = add(
+        g,
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+    );
+    link(g, flat, head);
+    let out = add(g, LayerKind::Output);
+    link(g, head, out);
+
+    // 블록이 [L, D] 를 보존하므로 Flatten 은 L*D 다.
+    assert_eq!(inferred_output_shape(&def), vec![2]);
+    let rep = shape::infer(&def.graph);
+    assert_eq!(rep.shape(block).expect("블록 출력 형상").sample(), vec![len, d_model]);
+
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::None;
+    def.train.optimizer = adam(3e-3);
+    def.train.epochs = 6;
+    def.train.batch_size = 16;
+    def.train.val_split = 0.0;
+    def.train.seed = 3;
+    def.train.device = test_device();
+
+    let ds = memory_sequence_csv(&dir, 128, len, vocab);
+    let run = train_to_end(def, ds, &dir);
+    assert_loss_improved(&run, "트랜스포머 블록");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn conv_block_template_trains_on_images() {
+    let dir = temp_dir("tpl-conv");
+    // Input[1,8,8] → [합성곱 블록] → Flatten → Linear(4) → Output
+    let mut def = ModelDef::new("합성곱");
+    let g = &mut def.graph;
+    let input = add(g, LayerKind::Input { shape: vec![1, 8, 8] });
+    let block = splice(g, input, templates::TemplateParams::ConvBlock { channels: 8 });
+    let flat = add(g, LayerKind::Flatten);
+    link(g, block, flat);
+    let head = add(
+        g,
+        LayerKind::Linear {
+            out_features: 4,
+            bias: true,
+        },
+    );
+    link(g, flat, head);
+    let out = add(g, LayerKind::Output);
+    link(g, head, out);
+
+    // 합성곱은 8×8 을 유지하고 풀링이 4×4 로 줄인다 → 8 채널.
+    let rep = shape::infer(&def.graph);
+    assert_eq!(rep.shape(block).expect("블록 출력 형상").sample(), vec![8, 4, 4]);
+    assert_eq!(inferred_output_shape(&def), vec![4]);
+
+    def.train.loss = Loss::CrossEntropy;
+    def.train.metric = Metric::Accuracy;
+    def.train.optimizer = adam(3e-3);
+    def.train.epochs = 6;
+    def.train.batch_size = 32;
+    def.train.seed = 11;
+    def.train.device = test_device();
+
+    let run = train_to_end(def, synthetic(SyntheticKind::Quadrants, 256), &dir);
+    assert_loss_improved(&run, "합성곱 블록");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn stacked_template_blocks_keep_the_shape_and_save_weights() {
+    let dir = temp_dir("tpl-stack");
+    // 잔차 블록 두 개를 겹쳐 쌓아도 폭이 그대로고, 체크포인트가 남는지까지 본다.
+    let mut def = ModelDef::new("2단 잔차");
+    let g = &mut def.graph;
+    let input = add(g, LayerKind::Input { shape: vec![2] });
+    let mut prev = add(
+        g,
+        LayerKind::Linear {
+            out_features: 12,
+            bias: true,
+        },
+    );
+    link(g, input, prev);
+    for _ in 0..2 {
+        prev = splice(g, prev, templates::TemplateParams::ResidualBlock { width: 12 });
+    }
+    let head = add(
+        g,
+        LayerKind::Linear {
+            out_features: 2,
+            bias: true,
+        },
+    );
+    link(g, prev, head);
+    let out = add(g, LayerKind::Output);
+    link(g, head, out);
+
+    assert_eq!(inferred_output_shape(&def), vec![2]);
+    def.train.loss = Loss::CrossEntropy;
+    def.train.optimizer = adam(1e-2);
+    def.train.epochs = 4;
+    def.train.batch_size = 64;
+    def.train.seed = 5;
+    def.train.device = test_device();
+
+    let run = train_to_end(def.clone(), synthetic(SyntheticKind::Xor, 256), &dir);
+    assert_eq!(run.status, RunStatus::Finished);
+    let ckpt = run.best_checkpoint.clone().or_else(|| run.checkpoint.clone());
+    let ckpt = dir.join(ckpt.expect("체크포인트 경로"));
+    assert!(ckpt.exists(), "체크포인트가 저장되지 않았습니다: {}", ckpt.display());
+
+    // 저장된 가중치로 추론까지 돌아야 파라미터 이름이 맞는 것이다.
+    let mut s = Session::load(&def, Some(&ckpt), test_device()).expect("세션 생성");
+    let y = s
+        .run(&[HostTensor::new(vec![2, 2], vec![0.1, 0.9, 0.9, 0.1])])
+        .expect("추론");
+    assert_eq!(y[0].shape, vec![2, 2]);
+    std::fs::remove_dir_all(&dir).ok();
 }

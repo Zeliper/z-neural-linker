@@ -9,6 +9,7 @@ description = "burn 기반 런타임 정의 그래프 인터프리터 · 장치 
 nl-core = { path = "../nl-core" }
 burn = { workspace = true, features = ["std", "ndarray", "wgpu", "autodiff", "vulkan"] }
 safetensors.workspace = true
+prost.workspace = true
 base64.workspace = true
 memmap2.workspace = true
 wgpu.workspace = true
@@ -27,6 +28,16 @@ csv.workspace = true
 image.workspace = true
 rand = "0.9"
 rand_chacha = "0.9"
+# `onnx-import` 기능을 켤 때만 들어간다. 끄면 의존성 트리에 나타나지 않는다.
+tract-onnx = { workspace = true, optional = true }
+
+[dev-dependencies]
+# ONNX 내보내기 왕복 검증 전용. 배포 바이너리에는 들어가지 않는다.
+tract-onnx.workspace = true
 
 [features]
 default = []
+# ONNX **가져오기**(추론 전용). 기본 꺼짐 — 켜면 배포 바이너리가 34 MiB 늘어난다(+46%).
+# `tract-onnx` 는 기능 플래그로 줄일 수 없다(optional 의존성이 하나도 없다).
+# 실측과 판단 근거는 docs/research/onnx-2026-09-14.md.
+onnx-import = ["dep:tract-onnx"]

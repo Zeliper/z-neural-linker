@@ -71,6 +71,16 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   엔진은 검증 통과 그래프만 받는다(trust-pms 의 "문서를 깨뜨리지 않는다" 원칙).
 - 모든 새 필드는 `#[serde(default)]` — 옛 문서 그대로 로드. `FORMAT_VERSION` 상수와 `ProjectFile::from_json` 마이그레이션.
 
+### 레이어 템플릿 (`templates.rs`)
+- 팔레트에서 **한 번에** 넣는 노드 묶음이다. `list()` 가 `TemplateSpec { name, label, category, description, default_params }`
+  를 주고, `instantiate(name, at, &params)` 가 `(Vec<Node>, Vec<Edge>)` 를 새 id 로 만들어 돌려준다 — 문서에 넣는 것은 호출자가
+  `Op::UpsertNode`/`UpsertEdge` 로 하므로 undo 한 번에 묶인다. 현재 셋: `residual_block { width }`(Linear→ReLU→Linear+잔차),
+  `transformer_block { d_model, heads, ff_mult }`(pre-norm 어텐션 + 피드포워드, 잔차 둘), `conv_block { channels }`
+  (Conv2d→BatchNorm→ReLU→MaxPool).
+- **마지막 노드가 블록 출력이고, 엣지가 붙지 않은 입력 슬롯이 블록 입력**이다(`open_inputs`). 잔차가 있는 두 템플릿은 그 슬롯이
+  **둘**(본줄기와 우회로)이고 **둘 다 같은 상류에 이어야** 잔차 덧셈의 형상이 맞는다. `transformer_block` 이 `d_model` 을 따로
+  받는 것도 같은 이유다 — 피드포워드의 마지막 `Linear` 가 입력 폭으로 돌아와야 더할 수 있다.
+
 ### 형상 추론 (`shape.rs`)
 - `infer(graph, batch: Option<usize>) -> ShapeReport { shapes: BTreeMap<NodeId, Shape>, errors: Vec<GraphError> }`.
   위상정렬(Kahn) → 순환 노드는 `GraphError::Cycle` 로 격리, 슬롯 누락은 `MissingInput`, 규칙 위반은 `ShapeMismatch{expected, got}`.
@@ -201,6 +211,74 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
 ### 추론 (`infer.rs`)
 - `Session::load(model, weights, device)`; `run(&[HostTensor]) -> Vec<HostTensor>`. `codec.rs` 가 페이로드 Transform 을 적용해
   이미지/CSV/JSON ↔ 텐서를 오간다.
+### ONNX 내보내기 (`onnx/`)
+
+- `onnx::export(&ModelDef, weights, out, ExportOptions { opset, batch }) -> ExportReport { nodes, initializers, unsupported }`.
+  학습한 모델을 **opset 17** ONNX 파일로 쓴다. 읽기는 기본 꺼진 feature 다(아래 "가져오기").
+- **opset 17 인 이유**: `LayerNormalization` 이 17 에서 들어왔고 `Softmax` 가 축을 실제 축으로 읽는 것이 13 부터다.
+  위로는 검증에 쓰는 tract 의 보장 범위가 18 까지다. 그래서 opset 20 의 `Gelu` 와 opset 23 의 `Attention` 은
+  쓰지 않고 각각 `Erf` 전개와 분해로 간다.
+- **가중치 변환이 거의 없다.** burn 의 `module::linear` 이 `x @ w` 라 우리 `Linear.weight` 가 `[in, out]` 이고
+  이게 ONNX `MatMul` 의 B 와 그대로 맞는다(PyTorch 는 `[out, in]` 이라 전치가 필요하다). `Conv2d` 도 형상이 같고,
+  `BatchNorm` 은 ONNX 가 추론에서 요구하는 running 통계를 우리가 이미 저장하고 있다. `Gemm` 은 2D 전용이라
+  `[B, L, D]` 도 되는 `MatMul`+`Add` 로 통일한다.
+- `Dropout` 은 노드를 만들지 않고 상류 이름을 물려준다(추론에서 항등). `Concat` 의 축은 우리가 샘플 기준이라
+  **+1** 보정한다. `Embedding` 은 우리 인덱스가 f32 라 `Cast(INT64)` → `Gather(axis=0)` 다.
+  배치는 기본이 `dim_param = "B"` 기호라 어떤 배치 크기로도 돈다(`Batch::Fixed(n)` 로 박을 수도 있다).
+- **순환 레이어(`Lstm`·`Gru`)는 세 가지가 동시에 다르다.** 하나라도 빠뜨리면 오류 없이 값만 틀린다.
+  1. **게이트 순서** — 우리는 PyTorch 를 따라 `i,f,g,o`(LSTM)·`r,z,n`(GRU), ONNX 는 `i,o,f,c`·`z,r,h` 다.
+     `hidden` 크기 블록 단위로 각각 `[0,3,1,2]`·`[1,0,2]` 로 재배열한다. LSTM 의 `g` 와 ONNX 의 `c` 는 같은 게이트다.
+  2. **가중치 방향** — 우리 `weight_ih` 는 `[D, gates·H]`(burn 의 `x @ w`), ONNX `W` 는 `[방향, gates·H, D]`(`Xt·Wᵀ`)다.
+     전치한 뒤 방향 축을 붙인다. 편향은 우리가 `bias_ih`·`bias_hh` 를 따로 두고 ONNX `B` 도 `[Wb, Rb]` 를 이어 붙인
+     `[방향, 2·gates·H]` 라 구조가 같다.
+  3. **배치 축 위치** — 우리는 `[B, L, D]`(batch-first), ONNX 기본 `layout=0` 은 `[L, B, D]` 다.
+     **`layout=0` + 앞뒤 `Transpose`** 를 쓴다(아래).
+  `return_sequence` 면 `Y` `[L, 방향, B, H]` 를, 아니면 `Y_h` `[방향, B, H]` 를 받아 `Transpose`+`Reshape` 로
+  우리 형상에 맞춘다. 안 쓰는 출력은 빈 이름으로 둔다(ONNX 가 정한 선택적 출력 표기). 양방향은
+  `direction="bidirectional"` 에 정방향·역방향 가중치를 방향 축으로 쌓는다.
+- **GRU 는 `linear_before_reset=1` 이 필수다.** ONNX 기본값 0 은 리셋을 `h(t-1)` 에 먼저 곱하는 쪽인데, 우리 구현은
+  `n = tanh(gi_n + r ⊙ gh_n)` 이고 `gh_n` 이 `bias_hh` 를 이미 포함하므로 1 쪽이다. **빠뜨려도 파일은 정상이고
+  읽는 쪽도 오류를 내지 않는다 — 값만 달라진다.** 왕복 테스트에서 실제로 이걸 0 으로 바꿔 보면 출력이 0.021 어긋난다.
+- **어텐션은 분해한다.** 표준 `Attention` 은 opset 23 이고 `com.microsoft` 쪽은 ONNX Runtime 전용이라 둘 다 못 쓴다.
+  `exec.rs` 의 `self_attention` 과 같은 순서로 q·k·v 투영(`MatMul`+`Add`) → `Reshape`/`Transpose` 헤드 분리 →
+  `MatMul`·`Div(√head_dim)`·`Softmax`·`MatMul` → `Transpose`/`Reshape` 결합 → out 투영을 늘어놓는다.
+  `Reshape` 의 목표 형상에는 배치·길이 자리에 **0**(그 자리 입력 차원 그대로)을 써서 기호 차원을 지킨다.
+  학습용 `dropout` 은 추론에서 항등이라 내보내지 않는다.
+- **tract 의 실제 동작을 확인했다.** `layout=1`(batch-first)도 읽고 `layout=0` 과 **같은 값**을 낸다 —
+  그래도 `layout` 속성은 opset 14 부터라 읽는 쪽을 가리므로 `Transpose` 두 개를 쓰는 쪽이 이식성이 낫다.
+  `linear_before_reset` 도 tract 가 제대로 해석한다(0 으로 바꾸면 결과가 달라지는 것으로 확인).
+  출력 이름을 빈 문자열로 둔 선택적 출력(`Y` 를 버리고 `Y_h` 만 받기)도 그대로 받아들인다.
+- **검증은 왕복이다.** `tests/onnx.rs` 가 학습 → 내보내기 → `tract-onnx` 로 읽기 → 우리 `Session` 과 1e-4 이내 비교를
+  한다. `tract-onnx` 는 **dev-dependency 라 배포 바이너리에 들어가지 않는다**. 우리 코드끼리 비교하면 규약을 잘못
+  이해한 경우를 못 잡으니 바깥 구현이어야 의미가 있다. 순환 레이어는 단방향·양방향 × `return_sequence` 네 경우를
+  모두 돌고, 어텐션과 `templates` 의 트랜스포머 블록 전체도 함께 본다. 배치는 2 로 잡는다 — 1 이면 배치 축이
+  뒤섞이는 실수를 놓친다.
+### ONNX 가져오기 (`onnx_import.rs`) — 선택 feature
+
+```sh
+cargo build -p nl-engine --features onnx-import
+cargo test  -p nl-engine --features onnx-import      # 왕복 테스트 둘이 이때만 돈다
+```
+
+- **기본이 꺼져 있다.** 실행은 `tract-onnx` 가 하는데 배포 바이너리가 **34 MiB** 늘어난다
+  (현재 `nl-runtime` 74 MiB 대비 +46%). 기능 플래그로도 못 줄인다 — `tract-onnx` 0.23.7 에는
+  `optional` 의존성이 하나도 없다. 끈 상태에서는 의존성 트리에 tract 가 **아예 나타나지 않는다**.
+  **CI 에 feature 켠 잡을 두지 않는다**(빌드가 14분 늘어난다).
+- `OnnxSession::load(path)` → `run(&[HostTensor]) -> Vec<HostTensor>`. 입출력 순서는 **파일에 적힌 순서**다.
+  우리 `Session` 이 `Graph::input_nodes()` 순서를 쓰는 자리와 같으므로, 우리가 내보낸 파일은 그대로 맞는다.
+- **추론 전용이다.** 학습도, `ModelDef` 로 되돌리는 변환도, 캔버스 표시도 없다.
+  `PNodeKind::OnnxModel` 변형은 **아직 `nl-core` 에 넣지 않았다** — `PNodeKind` 를 전수 match 하는 앱 코드가
+  함께 고쳐져야 해서다. 지금은 이 모듈을 직접 부르는 것만 된다.
+- **실행 계획은 첫 `run` 때 만든다.** 동적 배치로 내보낸 모델은 배치가 기호로 남아 그대로는 최적화할 수 없다.
+  실측 결과 **tract 는 기호 배치가 남은 LSTM 을 최적화하려다 패닉한다**(`UndeterminedSymbol("B")`).
+  그래서 입력 형상을 아는 순간에 계획을 만들고 `catch_unwind` 로 감싼다 — 남의 파일 하나 때문에 앱이 죽으면
+  안 된다. 같은 형상이 다시 오면 만들어 둔 계획을 그대로 쓴다.
+- 파일 크기는 가중치와 같은 상한(`MAX_WEIGHTS_BYTES`)을 건다. protobuf 는 중첩 깊이·크기 공격이 가능한 포맷이다.
+  입력 형상은 우리가 먼저 검사해서 tract 내부 오류 대신 읽을 수 있는 메시지를 낸다(기호 차원은 무엇이든 받는다).
+
+- protobuf 메시지 정의(`onnx/pb.rs`)는 **생성 결과를 커밋**해 둔다 — 빌드에 `protoc` 도 코드 생성도 필요 없다
+  (tract 가 쓰는 방식과 같다). 재생성 절차는 `scripts/onnxgen/README.md` 에 있고 순수 Rust(`protox` + `prost-build`)다.
+
 - 필드 하나가 아니라 **페이로드 전체**를 옮길 때는 `codec::{encode_inputs, decode_outputs}` 를 쓴다.
   `payload.inputs` 순서 = `Graph::input_nodes()` 순서, `payload.outputs` 순서 = `Graph::output_nodes()` 순서가 **계약**이다
   (이름으로 맞추지 않는다 — 개수가 다르면 오류). 출력 필드가 하나면 값 자체를, 여럿이면 필드 이름을 키로 한 JSON 객체를 돌려준다.

@@ -17,7 +17,7 @@ pub const WEIGHTS_FORMAT: &str = "neural-linker/v1";
 /// 파라미터를 safetensors 파일로 저장한다 (임시 파일 + rename 으로 원자적).
 pub fn save(path: &Path, model: ModelId, params: &BTreeMap<String, HostTensor>) -> Result<()> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("폴더 생성 실패: {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("폴더 생성 실패: {}", crate::paths::short(dir)))?;
     }
 
     // TensorView 는 바이트 슬라이스를 빌려가므로 먼저 모든 바이트를 만들어 둔다.
@@ -46,8 +46,8 @@ pub fn save(path: &Path, model: ModelId, params: &BTreeMap<String, HostTensor>) 
     let buf = safetensors::serialize(views, Some(meta)).map_err(|e| anyhow::anyhow!("safetensors 직렬화 실패: {e}"))?;
 
     let tmp = path.with_extension("safetensors.tmp");
-    std::fs::write(&tmp, &buf).with_context(|| format!("체크포인트 쓰기 실패: {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("체크포인트 이동 실패: {}", path.display()))?;
+    std::fs::write(&tmp, &buf).with_context(|| format!("체크포인트 쓰기 실패: {}", crate::paths::short(&tmp)))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("체크포인트 이동 실패: {}", crate::paths::short(path)))?;
     Ok(())
 }
 
@@ -65,15 +65,16 @@ pub fn load(path: &Path) -> Result<BTreeMap<String, HostTensor>> {
 /// [`load`] 에 모델 id 확인을 더한 것.
 pub fn load_for(path: &Path, expect_model: Option<ModelId>) -> Result<BTreeMap<String, HostTensor>> {
     check_file_size(path, MAX_WEIGHTS_BYTES, "체크포인트")?;
-    let file = std::fs::File::open(path).with_context(|| format!("체크포인트 열기 실패: {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("체크포인트 열기 실패: {}", crate::paths::short(path)))?;
     // SAFETY: 읽기 전용 매핑. 읽는 동안 다른 프로세스가 파일을 줄이면 SIGBUS 가 날 수 있는데,
     // 이는 `std::fs::read` 로도 막을 수 없는 동시 수정이며 우리 쓰기는 tmp + rename 으로 원자적이다.
-    let mapped =
-        unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("체크포인트 매핑 실패: {}", path.display()))?;
+    let mapped = unsafe { memmap2::Mmap::map(&file) }
+        .with_context(|| format!("체크포인트 매핑 실패: {}", crate::paths::short(path)))?;
     let buf: &[u8] = &mapped;
 
     let st = safetensors::SafeTensors::deserialize(buf)
-        .map_err(|e| anyhow::anyhow!("safetensors 파싱 실패 ({}): {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("safetensors 파싱 실패 ({}): {e}", crate::paths::short(path)))?;
     if st.len() > MAX_WEIGHTS_TENSORS {
         bail!(
             "체크포인트의 텐서 {} 개가 상한 {MAX_WEIGHTS_TENSORS} 를 넘습니다",
@@ -124,7 +125,7 @@ fn check_header(buf: &[u8], path: &Path, expect_model: Option<ModelId>) -> Resul
         if fmt != WEIGHTS_FORMAT {
             log::warn!(
                 "{}: format 이 '{fmt}' 입니다 (기대값 '{WEIGHTS_FORMAT}') — 그대로 읽습니다",
-                path.display()
+                crate::paths::short(path)
             );
         }
     }
@@ -137,14 +138,14 @@ fn check_header(buf: &[u8], path: &Path, expect_model: Option<ModelId>) -> Resul
     if std::env::var("NL_WEIGHTS_FORCE").as_deref() == Ok("1") {
         log::warn!(
             "{}: 다른 모델({got})의 체크포인트지만 NL_WEIGHTS_FORCE=1 이라 그대로 읽습니다",
-            path.display()
+            crate::paths::short(path)
         );
         return Ok(());
     }
     bail!(
         "이 체크포인트는 다른 모델의 것입니다 — 파일의 모델 id 는 {got} 인데 지금 모델은 {want} 입니다 \
          ({}). 그래도 얹으려면 NL_WEIGHTS_FORCE=1 로 실행하십시오",
-        path.display()
+        crate::paths::short(path)
     )
 }
 
@@ -153,11 +154,12 @@ pub fn summary(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
     check_file_size(path, MAX_WEIGHTS_BYTES, "체크포인트")?;
     // mmap 으로 매핑만 한다 — 헤더 페이지만 실제로 읽히므로 3 GB 파일도 통째로 메모리에 올리지 않는다.
     // (safetensors 의 `read_metadata` 는 마지막 오프셋이 파일 끝과 맞는지 확인하므로 전체 슬라이스가 필요하다.)
-    let file = std::fs::File::open(path).with_context(|| format!("체크포인트 열기 실패: {}", path.display()))?;
-    let mapped =
-        unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("체크포인트 매핑 실패: {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("체크포인트 열기 실패: {}", crate::paths::short(path)))?;
+    let mapped = unsafe { memmap2::Mmap::map(&file) }
+        .with_context(|| format!("체크포인트 매핑 실패: {}", crate::paths::short(path)))?;
     let (_, meta) = safetensors::SafeTensors::read_metadata(&mapped)
-        .map_err(|e| anyhow::anyhow!("safetensors 헤더 파싱 실패 ({}): {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("safetensors 헤더 파싱 실패 ({}): {e}", crate::paths::short(path)))?;
     let mut out: Vec<(String, Vec<usize>)> = meta
         .tensors()
         .into_iter()
