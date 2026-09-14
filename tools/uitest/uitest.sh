@@ -10,10 +10,11 @@
 #                                    나서 새로 띄운다. UITEST_FRESH=1 이면 앱 데이터(복구 스냅샷·설정)를
 #                                    비우고 시작 — 이전 강제 종료의 복구 모달이 떠서 클릭을 막는 일이 없다.
 #   uitest.sh ime                    fcitx5(한글) 를 이 컴포지터에 붙인다
-#   uitest.sh shot out.png [x,y WxH]  캡처(선택 영역)
+#   uitest.sh shot out.png [x,y WxH]  캡처(선택 영역). 상대 경로는 $UITEST_SHOT_DIR(기본 $UITEST_DIR/shots) 아래
 #   uitest.sh move X Y | click X Y [right|middle] | dblclick X Y | drag X1 Y1 X2 Y2 [steps]
 #   uitest.sh hold alt | release alt   수식키를 누른 채 두기(Alt+드래그 복제 등) / 떼기
 #   uitest.sh key <wtype 인자…>        예: key -M ctrl -k s -m ctrl  /  key -k Tab  /  key -M alt -k Left -m alt
+#   uitest.sh key-until "<정규식>" <wtype 인자…>  결과가 로그에 보일 때까지 키를 다시 보낸다(기본 5회)
 #   uitest.sh type "문자열"            글자 그대로 입력(가상 키보드, 입력기 거치지 않음)
 #   uitest.sh wait-app                앱 창이 뜰 때까지 대기(최대 15초)
 #   uitest.sh wait-log "<정규식>" [초]  앱 로그에 그 줄이 나올 때까지 대기(기본 10초)
@@ -27,6 +28,7 @@
 # 골든은 $UITEST_GOLDEN_DIR(기본 tools/uitest/golden)에 PPM 으로 둔다 — 차이 계산이 표준 라이브러리로 끝난다.
 # 허용 오차는 UITEST_TOLERANCE(기본 0.5%), 잔 떨림 무시 폭은 UITEST_PIXEL_DELTA(기본 8).
 #
+# 캡처 기본 위치는 $UITEST_SHOT_DIR(기본 $UITEST_DIR/shots) — 절대 경로로 주면 그대로 쓴다.
 # 상태는 $UITEST_DIR(기본 /tmp/uitest-$USER) 에 둔다. 좌표는 가상 출력 기준 픽셀(좌상단 0,0).
 # 여러 하네스를 동시에 쓰려면(에이전트 병렬 검증) UITEST_DIR 을 다르게 준다 — sway 인스턴스마다 소켓이 다르다.
 # UITEST_SWAY_DEBUG=1 이면 sway 를 -d 로 띄워 $UITEST_DIR/sway.log 에 상세 로그를 남긴다.
@@ -37,6 +39,8 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 DIR="${UITEST_DIR:-/tmp/uitest-$USER}"
 GOLDEN_DIR="${UITEST_GOLDEN_DIR:-$HERE/golden}"
 DIFF_DIR="${UITEST_DIFF_DIR:-$DIR/diff}"
+# 시나리오가 상대 경로로 찍는 캡처가 떨어지는 곳. 저장소를 더럽히지 않으려고 기본값을 하네스 폴더에 둔다.
+SHOT_DIR="${UITEST_SHOT_DIR:-$DIR/shots}"
 STATE="$DIR/state.env"
 RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$DIR"
@@ -283,9 +287,20 @@ cmd_ime() {
 }
 
 # 확장자로 형식을 정한다. .ppm 은 헤더 뒤가 그냥 RGB 바이트라 골든 비교가 표준 라이브러리로 끝난다.
+# 상대 경로로 준 캡처는 $UITEST_SHOT_DIR 아래에 둔다. 현재 폴더 기준으로 쓰면 저장소 루트에서
+# 돌렸을 때 캡처가 작업 트리에 떨어진다(runtime 담당자가 실제로 겪었다).
+shot_path() {
+    local out="$1"
+    case "$out" in
+        /*) echo "$out" ;;
+        *) echo "$SHOT_DIR/$out" ;;
+    esac
+}
+
 cmd_shot() {
     load
-    local out="${1:?출력 파일}"
+    local out
+    out="$(shot_path "${1:?출력 파일}")"
     local fmt=png
     [[ "$out" == *.ppm ]] && fmt=ppm
     [[ "$out" == *.jpeg || "$out" == *.jpg ]] && fmt=jpeg
@@ -361,6 +376,39 @@ cmd_wait_log() {
     return 1
 }
 
+# 로그에 정규식이 나타났는가 (기다리되 아무것도 찍지 않는다). `key-until` 이 쓴다.
+log_has() {
+    local pattern="$1" secs="$2"
+    local deadline=$(( $(date +%s) + ${secs%.*} ))
+    while (( $(date +%s) <= deadline )); do
+        if [[ -f "$DIR/app.log" ]] && grep -Eq -- "$pattern" "$DIR/app.log"; then return 0; fi
+        sleep 0.2
+    done
+    return 1
+}
+
+# 키를 보내고 그 결과가 로그에 나타날 때까지 다시 보낸다.
+#
+# 컴포지터가 가상 키보드를 등록하기 전에 보낸 키는 **조용히 사라진다.** 앱이 `[nl-app] input ready` 를
+# 찍은 뒤에도 하네스를 막 띄운 회차에서는 첫 한두 개가 없어진다. 앱 쪽에서는 더 할 수 있는 일이 없어
+# 여기서 다시 보낸다 — 뷰 전환처럼 여러 번 눌러도 결과가 같은 동작에만 쓴다.
+#
+#   key-until "<정규식>" <wtype 인자…>
+cmd_key_until() {
+    local pattern="${1:?정규식}"; shift
+    local tries="${UITEST_KEY_TRIES:-5}" wait="${UITEST_KEY_WAIT:-2}" i
+    for (( i = 1; i <= tries; i++ )); do
+        cmd_key "$@"
+        if log_has "$pattern" "$wait"; then
+            (( i > 1 )) && echo "키 확인: $pattern ($i회째)" || echo "키 확인: $pattern"
+            return 0
+        fi
+    done
+    echo "키가 닿지 않았습니다 (${tries}회 보냈습니다): $pattern" >&2
+    tail -20 "$DIR/app.log" 2>/dev/null >&2 || true
+    return 1
+}
+
 # 화면이 멎을 때까지 기다렸다 찍는다. 잇따른 두 캡처가 바이트까지 같으면 멎은 것으로 본다.
 # 애니메이션·커서 깜빡임 때문에 나는 헛실패를 막는다. 오래 걸리는 시작 대기는 이것으로 대신할 수 없다 —
 # 앱이 준비되기 전에도 화면은 멎어 있을 수 있으니 시나리오에서 넉넉히 `sleep` 하거나 `wait-log` 를 쓴다.
@@ -417,6 +465,7 @@ run_step() {
         app)         cmd_app "$@";;
         wait-app)    cmd_wait_app;;
         wait-log)    cmd_wait_log "$@";;
+        key-until)   cmd_key_until "$@";;
         ime)         cmd_ime;;
         shot)        cmd_shot "$@";;
         expect-shot) cmd_expect_shot "$@";;

@@ -56,7 +56,12 @@ $U stop
 | `"따옴표"` | 공백이 든 인자를 한 덩어리로 (shlex 규칙) |
 
 명령은 `app`, `wait-app`, `wait-log`, `ime`, `shot`, `expect-shot`, `move`, `click`, `dblclick`,
-`drag`, `hold`, `release`, `key`, `type`, `sleep <초>`, `log`, `stop`.
+`drag`, `hold`, `release`, `key`, `key-until`, `type`, `sleep <초>`, `log`, `stop`.
+
+`key-until "<정규식>" <wtype 인자…>` 는 키를 보내고 그 결과가 로그에 보일 때까지 다시 보낸다(기본 5회,
+`UITEST_KEY_TRIES`·`UITEST_KEY_WAIT` 로 조절). 컴포지터가 가상 키보드를 등록하기 전에 보낸 키는 조용히
+사라지는데, 앱이 `input ready` 를 찍은 뒤에도 하네스를 막 띄운 회차에서는 첫 한두 개가 없어진다.
+**여러 번 눌러도 결과가 같은 동작에만 쓴다** — 뷰 전환은 괜찮고, 토글이나 카운터에는 쓰면 안 된다.
 
 좌표 상수는 시나리오 맨 위에 모아 두면 화면이 바뀌었을 때 한 곳만 고친다.
 
@@ -67,6 +72,9 @@ click $SAVE_X $TOOLBAR_Y
 ```
 
 #### 따옴표에서 걸리는 두 가지
+
+`shot` 에 **상대 경로**를 주면 현재 폴더가 아니라 `$UITEST_SHOT_DIR` 아래에 떨어진다. 저장소 루트에서
+시나리오를 돌려도 작업 트리가 더러워지지 않는다. 특정 위치에 남기고 싶으면 절대 경로를 준다.
 
 **공백이 든 인자는 반드시 따옴표로 묶는다.** 셸에서 한 덩어리로 주던 것을 시나리오에 그대로 옮기면
 토큰이 쪼개져 엉뚱한 자리로 들어간다. `wait-log` 의 정규식과 `shot` 의 영역이 특히 그렇다.
@@ -104,12 +112,17 @@ wait-log "프로젝트 열림" 10      # app.log 에 그 정규식이 나올 때
 | 마커 | 언제 | 쓰임 |
 | --- | --- | --- |
 | `[nl-app] ready` | 첫 화면을 다 그린 뒤 | 첫 캡처를 여기서 기다린다 |
-| `[nl-app] focused` | 창이 키보드 포커스를 받은 뒤 | **키를 넣기 전에 반드시 기다린다** |
+| `[nl-app] focused` | 창이 키보드 포커스를 받은 뒤 | 포커스가 왔다는 것까지만 알려 준다 |
+| `[nl-app] input ready` | 포커스 뒤 키보드가 자리를 잡은 뒤 | **키를 넣기 전에 이것을 기다린다** |
 | `[nl-app] devices ready` | 장치 열거·확인이 끝난 뒤 | 상태바의 장치 이름이 확정된다 |
 | `[nl-app] view <이름>` | 뷰가 바뀔 때마다 | 전환이 실제로 일어났는지 확인 |
 
 화면이 그려진 것과 입력을 받을 수 있는 것은 다르다. 포커스를 받기 전에 보낸 키는 조용히 사라지므로
 `ready` 만 기다리고 키를 넣으면 간헐적으로 씹힌다.
+
+포커스 **직후**에도 한 번 더 사라진다. 컴포지터가 그 시점에 키보드를 다시 만들고(winit 이
+`non-xkb compatible keymap` 을 찍는 구간) 그 사이의 키는 어디에도 닿지 않는다. 하네스를 처음 띄운
+회차에서 `Ctrl+1` 이 유실되던 것이 이 구간이었다. `input ready` 까지 기다리면 사라지지 않는다.
 
 ## 골든 이미지
 
@@ -125,6 +138,9 @@ wait-log "프로젝트 열림" 10      # app.log 에 그 정규식이 나올 때
 | `UITEST_TOLERANCE` | `0.5` | 다른 픽셀이 이 비율(%)을 넘으면 실패 |
 | `UITEST_PIXEL_DELTA` | `8` | 채널 차이가 이 값 이하인 픽셀은 같은 것으로 (안티에일리어싱 잔 떨림) |
 | `UITEST_GOLDEN_DIR` | `tools/uitest/golden` | 골든 위치 |
+| `UITEST_SHOT_DIR` | `$UITEST_DIR/shots` | `shot` 에 상대 경로를 주면 떨어지는 곳 |
+| `UITEST_KEY_TRIES` | `5` | `key-until` 이 키를 다시 보내는 횟수 |
+| `UITEST_KEY_WAIT` | `2` | 한 번 보낸 뒤 결과를 기다리는 시간(초) |
 | `UITEST_DIFF_DIR` | `$UITEST_DIR/diff` | 차이 이미지 위치 |
 | `UITEST_SETTLE_TRIES` | `8` | 프레임이 멎을 때까지 다시 찍는 횟수 |
 | `UITEST_SETTLE_INTERVAL` | `0.3` | 그 사이 간격(초) |

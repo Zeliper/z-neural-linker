@@ -64,6 +64,12 @@ const LOG_LIMIT: usize = 400;
 const REPOLL: std::time::Duration = std::time::Duration::from_millis(80);
 /// 실행 중 Esc 를 이만큼 누르고 있으면 킬 스위치가 동작한다.
 const KILL_HOLD: f64 = 0.5;
+/// 포커스를 받은 뒤 키보드가 자리를 잡기까지 기다리는 시간(초).
+///
+/// 컴포지터가 포커스 직후 키보드를 다시 만드는 구간이 있어, 그 사이에 보낸 키가 사라진다.
+/// 하네스는 `[nl-app] input ready` 를 기다린 뒤 키를 넣는다.
+const INPUT_SETTLE: f64 = 1.5;
+
 /// 설치 동의 모달의 고정 폭. 긴 주소·경로는 이 폭에 맞춰 접힌다.
 const MODAL_WIDTH: f32 = 460.0;
 /// 모달의 왼쪽 이름 칸 폭.
@@ -464,6 +470,10 @@ pub struct NlApp {
     ready_logged: bool,
     /// 창이 키보드 포커스를 받은 적이 있는가 (하네스 마커를 한 번만 찍으려고).
     focus_logged: bool,
+    /// 포커스를 받은 앱 시계. 키보드가 자리를 잡을 때까지 재는 기준이다.
+    focus_at: Option<f64>,
+    /// 키 입력이 안정됐다고 알린 적이 있는가.
+    input_ready_logged: bool,
     /// 진행 중인 화면 녹화.
     pub recording: Option<RecordSession>,
     /// "지금 한 장 캡처" 결과와 진행 중인 캡처 작업.
@@ -593,6 +603,8 @@ impl NlApp {
             probe_enabled: true,
             ready_logged: false,
             focus_logged: false,
+            focus_at: None,
+            input_ready_logged: false,
             recording: None,
             shot: ShotPreview::default(),
             shot_job: None,
@@ -3245,8 +3257,22 @@ impl eframe::App for NlApp {
         // 보낸 단축키는 그냥 버려지므로, 하네스는 키를 넣기 전에 이 줄을 기다려야 한다.
         if !self.focus_logged && ctx.input(|i| i.focused) {
             self.focus_logged = true;
+            self.focus_at = Some(now);
             log::info!("창 포커스 받음");
             eprintln!("[nl-app] focused");
+        }
+        // 포커스 **직후**에도 키가 한 번 더 사라질 수 있다. 컴포지터가 그 시점에 키보드를 다시 만들면
+        // (winit 이 `non-xkb compatible keymap` 을 찍는 구간) 그 사이에 보낸 키는 어디에도 닿지 않는다.
+        // 앱이 할 수 있는 일은 "이제 안정됐다" 를 알리는 것뿐이라, 포커스 뒤 이만큼 지나고 나서 찍는다.
+        if let Some(at) = self.focus_at.filter(|_| !self.input_ready_logged) {
+            if now - at >= INPUT_SETTLE {
+                self.input_ready_logged = true;
+                log::info!("키 입력 준비됨");
+                eprintln!("[nl-app] input ready");
+            } else {
+                // 그 시점에 한 번은 깨어나야 마커가 제때 찍힌다.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(INPUT_SETTLE - (now - at)));
+            }
         }
     }
 

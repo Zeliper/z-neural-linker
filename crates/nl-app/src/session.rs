@@ -7,14 +7,12 @@ use crate::pcanvas::{LiveView, NodePreview};
 use eframe::egui;
 use nl_core::gui::Binding;
 use nl_core::pipeline::PNodeKind;
-use nl_core::{
-    DevicePref, GuiLayout, ModelId, PNodeId, Pipeline, PipelineId, Project, WidgetId, WidgetKind,
-};
-use std::collections::BTreeMap;
+use nl_core::{DevicePref, GuiLayout, ModelId, PNodeId, Pipeline, PipelineId, Project, WidgetId, WidgetKind};
 use nl_engine::Value;
 use nl_gui::GuiState;
 use nl_io::runner::RunnerInput;
 use nl_io::{Runner, RunnerEvent, RunnerHandle};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -210,13 +208,7 @@ impl Drop for RunnerSession {
 /// `PipelineOutput` 은 노드를 직접 가리키고, `ModelOutput` 은 모델을 가리킨다. 뒤쪽은 그 모델을
 /// 돌리는 노드가 값을 낼 때가 곧 "마지막 추론 값" 이라 여기서 함께 채운다. 배포 런타임은 아직
 /// `ModelOutput` 을 처리하지 않으므로 지금은 빌더 미리보기에서만 보인다.
-fn push_to_bound_widgets(
-    gui: &mut GuiState,
-    layout: &GuiLayout,
-    node: PNodeId,
-    model: Option<ModelId>,
-    value: &Value,
-) {
+fn push_to_bound_widgets(gui: &mut GuiState, layout: &GuiLayout, node: PNodeId, model: Option<ModelId>, value: &Value) {
     let targets: Vec<WidgetId> = layout
         .widgets
         .values()
@@ -349,7 +341,10 @@ mod tests {
     fn model_output_widgets_follow_the_model_not_the_node() {
         let model = ModelId::from_u128(7);
         let (l, id) = layout_with(
-            Some(Binding::ModelOutput { model, field: "out".into() }),
+            Some(Binding::ModelOutput {
+                model,
+                field: "out".into(),
+            }),
             WidgetKind::Value { prefix: String::new() },
         );
         let mut gui = GuiState::default();
