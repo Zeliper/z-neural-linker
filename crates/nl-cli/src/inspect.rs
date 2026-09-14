@@ -25,6 +25,7 @@ pub fn run(path: &Path) -> Result<i32> {
         "레이어".into(),
         "출력 형상".into(),
         "가중치".into(),
+        "ONNX".into(),
     ]];
     for m in p.models.values() {
         let rep = shape::infer(&m.graph);
@@ -40,12 +41,27 @@ pub fn run(path: &Path) -> Result<i32> {
         } else {
             red(&format!("{} (형상 오류 {}건)", out_shape, rep.errors.len()))
         };
+        // 내보내기 가능 여부. 가중치 파일을 읽지 않으므로 학습 전에도 답이 나온다.
+        //
+        // 막는 것이 둘이다. 형상 추론이 통과하지 못하면 그래프를 옮길 수 없고, 아직 매핑하지 못한
+        // 레이어가 있어도 안 된다. `onnx::check` 는 뒤쪽만 보므로 앞쪽은 여기서 함께 본다 —
+        // 그러지 않으면 형상이 깨진 모델에도 "가능" 이라고 적히고 내보낼 때 비로소 실패한다.
+        let onnx = nl_engine::onnx::check(m);
+        let onnx_cell = if !rep.is_ok() {
+            yellow("형상 오류로 불가").to_string()
+        } else if onnx.unsupported.is_empty() {
+            green("가능").to_string()
+        } else {
+            // 어떤 레이어가 막는지까지 적는다 — "미지원" 만으로는 무엇을 바꿔야 할지 모른다.
+            yellow(&format!("미지원: {}", onnx.unsupported.join(", ")))
+        };
         rows.push(vec![
             m.name.clone(),
             m.id.short(),
             m.graph.nodes.len().to_string(),
             shape_cell,
             m.weights.clone().unwrap_or_else(|| dim("(없음)").to_string()),
+            onnx_cell,
         ]);
     }
     if rows.len() == 1 {

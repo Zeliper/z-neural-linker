@@ -542,6 +542,130 @@ fn a_multi_input_multi_output_model_answers_through_the_deployed_app() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// ONNX 내보내기: XOR 과 CNN 샘플을 학습해 파일로 내보내고, 그 파일이 진짜 ONNX 인지 본다.
+///
+/// 여기서 확인하는 것은 "다른 도구가 읽을 수 있는 바이트가 나왔는가" 다. 내용의 정확성은
+/// 엔진 쪽 시험이 보고, 이쪽은 **명령이 실제로 파일을 만들고 오류를 제대로 낸다**를 본다.
+#[test]
+fn export_onnx_writes_a_real_protobuf_for_both_samples() {
+    if !enabled() {
+        eprintln!("NL_E2E 가 없어 ONNX 내보내기 테스트를 건너뛴다 (켜려면 NL_E2E=1)");
+        return;
+    }
+    let dir = temp_dir("onnx");
+
+    for (kind, model, epochs) in [("xor", "XOR MLP", "2"), ("cnn", "사분면 CNN", "1")] {
+        let proj = dir.join(format!("{kind}.nlproj"));
+        run(
+            "nl sample",
+            Command::new(NL).arg("sample").arg(&proj).args(["--kind", kind]),
+        );
+
+        // ── 학습 전에는 내보낼 수 없다 ──
+        let out = Command::new(NL)
+            .args(["export-onnx"])
+            .arg(&proj)
+            .args(["--model", model, "--out"])
+            .arg(dir.join("없어야한다.onnx"))
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("실행");
+        assert!(!out.status.success(), "{kind}: 가중치 없이 내보내기가 성공했다");
+        let err = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+        assert!(err.contains("가중치"), "{kind}: 원인을 알려 주지 않는다:\n{err}");
+        assert!(
+            !dir.join("없어야한다.onnx").exists(),
+            "{kind}: 실패했는데 파일을 남겼다"
+        );
+
+        // ── 학습 → 내보내기 ──
+        run(
+            "nl train",
+            Command::new(NL)
+                .args(["train"])
+                .arg(&proj)
+                .args(["--model", model, "--device", "cpu", "--epochs", epochs]),
+        );
+        let onnx = dir.join(format!("{kind}.onnx"));
+        let out = run(
+            "nl export-onnx",
+            Command::new(NL)
+                .args(["export-onnx"])
+                .arg(&proj)
+                .args(["--model", model, "--out"])
+                .arg(&onnx),
+        );
+        let text = stdout(&out);
+        assert!(text.contains("내보냄"), "{kind}: 요약이 없다:\n{text}");
+        assert_onnx(&onnx, kind);
+
+        // ── 고정 배치 ──
+        let fixed = dir.join(format!("{kind}-b4.onnx"));
+        let out = run(
+            "nl export-onnx --batch 4",
+            Command::new(NL)
+                .args(["export-onnx"])
+                .arg(&proj)
+                .args(["--model", model, "--batch", "4", "--out"])
+                .arg(&fixed),
+        );
+        // 요약 표의 배치 칸이 동적이 아니라 4 여야 한다.
+        let text = stdout(&out);
+        assert!(text.contains(" 4 "), "{kind}: 고정 배치가 표에 없다:\n{text}");
+        assert_onnx(&fixed, kind);
+
+        // ── 없는 모델 이름 ──
+        let out = Command::new(NL)
+            .args(["export-onnx"])
+            .arg(&proj)
+            .args(["--model", "없는모델", "--out"])
+            .arg(dir.join("없다.onnx"))
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("실행");
+        assert!(!out.status.success(), "{kind}: 없는 모델로 내보내기가 성공했다");
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 파일이 ONNX `ModelProto` 로 보이는지. 첫 필드가 `ir_version` 이어야 한다.
+///
+/// protobuf 는 매직 바이트가 없어서 **첫 태그**로 본다. `ModelProto` 의 필드 1 은 `ir_version`
+/// (varint)이라 첫 바이트가 `0x08` 이고, 이어서 필드 2 `producer_name`(길이 구분, 태그 `0x12`)이 온다.
+fn assert_onnx(path: &Path, tag: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{tag}: {} 를 읽지 못했다: {e}", path.display()));
+    assert!(!bytes.is_empty(), "{tag}: 빈 파일이다");
+    assert_eq!(
+        bytes[0],
+        0x08,
+        "{tag}: 첫 태그가 ir_version(0x08)이 아니다 — {:02x?}",
+        &bytes[..bytes.len().min(8)]
+    );
+
+    // ir_version varint 를 읽고 그 뒤에 producer_name 태그가 오는지 본다.
+    let mut i = 1usize;
+    let mut ir: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        let b = *bytes.get(i).unwrap_or_else(|| panic!("{tag}: ir_version 이 잘렸다"));
+        ir |= u64::from(b & 0x7f) << shift;
+        i += 1;
+        shift += 7;
+        if b & 0x80 == 0 {
+            break;
+        }
+        assert!(shift < 64, "{tag}: varint 가 너무 길다");
+    }
+    assert!(ir >= 3, "{tag}: ir_version 이 {ir} 이다 — 너무 낮다");
+    assert_eq!(
+        bytes.get(i).copied(),
+        Some(0x12),
+        "{tag}: ir_version 뒤에 producer_name 이 없다"
+    );
+    eprintln!("{tag}: {} 바이트, ir_version {ir}", bytes.len());
+}
+
 /// `nl run --log-json` 이 내는 것이 **전부** 한 줄 JSON 인지.
 ///
 /// 수집기는 한 줄이라도 다른 모양이 섞이면 그 줄에서 멈춘다. 사람용 머리말·꼬리말이 새어

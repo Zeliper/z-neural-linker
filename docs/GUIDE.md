@@ -1086,6 +1086,9 @@ nl build p.nlproj --target all --name "내 앱" --version 1.0.0 \
 nl build p.nlproj --arm-input                # 배포 앱이 마우스·키보드를 실제로 조작하도록 허용 (기본 금지)
 nl build p.nlproj --tls-cert certs/server.crt --tls-key certs/server.key # 경로만 담는다 (인증서 파일은 번들에 안 들어간다)
 
+nl export-onnx p.nlproj --model XOR           # 학습한 모델을 ONNX 로 (기본 동적 배치)
+nl export-onnx p.nlproj --model XOR --batch 4 --out m.onnx
+
 nl tls-cert .                                # certs/ 에 자체 서명 인증서·키 (키는 0600)
 nl tls-cert . --hosts "localhost,127.0.0.1,api.example.com" --days 30
 
