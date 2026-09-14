@@ -12,7 +12,7 @@ AppPublisher=@PUBLISHER@
 ; 사용자 단위 설치: UAC 없이 조용한 업데이트가 가능하고, 재실행된 앱이 관리자 계정으로 뜨지 않는다.
 DefaultDirName={localappdata}\Programs\@APP_DIR@
 PrivilegesRequired=lowest
-DefaultGroupName=@APP_NAME@
+DefaultGroupName=@APP_DIR@
 OutputDir=Output
 OutputBaseFilename=@APP_SLUG@-setup-@APP_VERSION@
 Compression=lzma2
@@ -34,8 +34,8 @@ Source: "@APP_SLUG@.exe"; DestDir: "{app}"; Flags: ignoreversion
 @ICON_FILE@
 
 [Icons]
-Name: "{group}\@APP_NAME_Q@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@
-Name: "{autodesktop}\@APP_NAME_Q@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@; Tasks: desktopicon
+Name: "{group}\@APP_FILE@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@
+Name: "{autodesktop}\@APP_FILE@"; Filename: "{app}\@APP_SLUG@.exe"@ICON_REF@; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "바탕 화면 아이콘 만들기"; GroupDescription: "추가 작업:"

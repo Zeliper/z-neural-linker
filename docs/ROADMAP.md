@@ -13,7 +13,7 @@
 - [x] `nl-app` 2차: 파이프라인 뷰(시험 실행·입력 무장·킬 스위치), GUI 디자이너(바인딩·미리보기), 빌드 뷰(도구 상태·동의 모달·tar.gz/zip·latest.json)
 - [x] `nl-app` 3·4차: HttpServer/HttpReply 노드, 녹화 UI, Inno Setup 동의 설치, 빌더 자체 업데이트, 시작 지연 수정(12.2s→1.6s)·`[nl-app] ready/focused` 마커
 - [x] `nl-cli`: 헤드리스 inspect/devices/train/infer/run/record/build/sample — 실측 sample→train(98%)→build→배포판 HTTP /infer 응답 일치
-- [x] Windows: cargo-xwin 크로스 빌드(nl-runtime.exe 53.7MB, nl-app.exe 61MB), AttachConsole, .iss 생성(Inno 실컴파일은 네트워크 차단으로 미확인)
+- [x] Windows: cargo-xwin 크로스 빌드(nl-runtime.exe 53.7MB, nl-app.exe 61MB), AttachConsole, Inno Setup 실컴파일·실설치(wine + Inno 6.7.3)
 - [x] `nl-update` + 배포 런타임 자동 업데이트(배지/적용) + minisign 검증
 - [x] uitest 시나리오 러너(run/wait-log/expect-shot, PPM 골든) · egui_kittest 스냅샷 골든(nl-gui/nl-runtime)
 - [x] `tools/uitest` 이식(app_id `neural-linker`), egui_kittest 헤드리스 렌더 테스트
@@ -46,7 +46,7 @@ nl-app(H5·H9·M21·M22·L1~L3·L22) 담당이고, 낮음 6건은 영향이 낮�
       배포 앱은 빌더 UI 가 번들 매니페스트의 `update_public_key` 에 채워 넣는다
 - [ ] **실제 배포 서버** — https 로만 서빙하고 `latest.json` 옆에 `latest.json.minisig` 를 같이 올린다.
       자산은 매니페스트와 같은 오리진에 둔다(아니면 `allowed_asset_hosts` 에 적는다)
-- [ ] **Inno Setup 실컴파일 확인** — 설치본 해시는 고정했으나 설치·컴파일 경로는 아직 확인하지 못했다
+- [x] **Inno Setup 실컴파일 확인** — 2026-09-14 에 wine 11.0 + Inno Setup 6.7.3 으로 내려받기·검증·설치·실컴파일·실설치까지 확인했다 (`packaging/README.md`)
 - [ ] **Authenticode 서명** — Windows 설치본에 붙인다. 지금 신뢰의 뿌리는 서명된 매니페스트의 sha256 하나뿐이다(M10)
 
 ## M1 — 데이터·페이로드·파이프라인

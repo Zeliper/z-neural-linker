@@ -190,14 +190,21 @@ pub fn iss_escape(value: &str) -> String {
     iss_common(value).replace(['"', '#'], "")
 }
 
-/// 큰따옴표로 감싸는 자리(`Source:`, `Filename:`, `Name:`)에 들어갈 값. Inno 는 `"` 를 `""` 로 적는다.
+/// 큰따옴표로 감싸는 자리(`Source:`, `Filename:`, `Name:`)에 들어갈 값. **큰따옴표를 아예 지운다.**
 ///
-/// 이중화하지 않으면 `데모"; Parameters: "…` 같은 이름이 따옴표를 닫고 파라미터를 덧붙인다.
+/// 이중화(`"` → `""`)를 먼저 썼지만 Inno Setup 6.7.3 으로 실제 컴파일해 보니
+/// `Parameter "Name" cannot include quotes (")` 로 거절했다 — `[Icons]` 의 `Name:` 은 이중화조차 받지 않는다.
+/// 그래서 주입은 막히지만(컴파일이 실패하니 fail-closed) 따옴표가 든 **정상** 이름도 빌드가 깨졌다.
+/// 지우는 쪽이 언제나 컴파일되고 결과도 분명하다. 앱 이름에 `"` 를 쓰는 일은 거의 없다.
 fn iss_quoted(value: &str) -> String {
-    iss_common(value).replace('"', "\"\"")
+    iss_common(value).replace('"', "")
 }
 
-/// `{localappdata}\Programs\<이름>` 에 쓸 폴더 이름. Windows 경로에 못 쓰는 문자를 걷어낸다.
+/// 파일·폴더 이름으로 쓸 수 있게 다듬은 앱 이름. Windows 경로에 못 쓰는 문자를 걷어낸다.
+///
+/// `DefaultDirName` 뿐 아니라 `DefaultGroupName`(시작 메뉴 폴더)과 `[Icons]` 의 바로가기 이름에도
+/// 써야 한다. 이 셋은 전부 **경로**다. 다듬지 않은 이름을 넣으면 컴파일은 통과하고
+/// 설치할 때 "The folder name is not valid." 로 터진다 (Inno Setup 6.7.3 으로 실측).
 pub fn windows_dir_name(app_name: &str) -> String {
     let cleaned: String = app_name
         .chars()
@@ -234,6 +241,9 @@ pub fn render_iss(app_name: &str, version: &str, publisher: &str, slug: &str, wi
             ("@APP_NAME@", &iss_escape(app_name)),
             ("@APP_NAME_Q@", &iss_quoted(app_name)),
             ("@APP_DIR@", &iss_escape(&windows_dir_name(app_name))),
+            // 파일·폴더 이름이 되는 자리. `/`·`:` 가 남으면 설치 단계에서
+            // "The folder name is not valid." 로 **최종 사용자 기계에서** 실패한다.
+            ("@APP_FILE@", &iss_quoted(&windows_dir_name(app_name))),
             ("@APP_VERSION@", &iss_escape(version)),
             ("@PUBLISHER@", &iss_escape(publisher)),
             ("@APP_SLUG@", &iss_quoted(slug)),
@@ -389,27 +399,67 @@ mod tests {
     }
 
     /// H8-c: 따옴표를 닫고 파라미터를 덧붙이는 이름이 스크립트를 바꾸지 못한다.
+    ///
+    /// Inno Setup 6.7.3 으로 실제 컴파일해 확인했다. 이중화(`""`)는 `[Icons] Name:` 이 아예 거절하므로
+    /// 값에서 따옴표를 지운다 — 주입은 막히고 정상 이름은 그대로 컴파일된다.
     #[test]
     fn a_quote_injecting_name_cannot_add_iss_parameters() {
         let evil = r#"데모"; Parameters: "/x"#;
         let iss = render_iss(evil, "0.1.0", "나", "demo", false);
 
-        // 인용 자리에서는 따옴표가 이중화돼 문자열 안에 갇힌다.
-        assert!(iss.contains(r#"Name: "{group}\데모""; Parameters: ""/x""#), "{iss}");
-        // 새 파라미터가 생기지 않는다 — `; Parameters:` 로 시작하는 조각이 없다.
+        // 바로가기 이름은 경로라 따옴표와 `/` 가 모두 사라진다 — 파라미터 구분자가 만들어지지 않는다.
+        assert!(iss.contains(r#"Name: "{group}\데모; Parameters x""#), "{iss}");
+        // 표시용 자리에서는 따옴표만 사라지고 나머지는 남는다.
+        assert!(iss.contains(r#"Description: "데모; Parameters: /x 실행""#), "{iss}");
+
+        // 따옴표는 우리가 연 것만 남는다 — 줄마다 짝수 개이고, 바깥으로 샌 파라미터가 없다.
         for line in iss
             .lines()
             .filter(|l| l.starts_with("Name:") || l.starts_with("Filename:"))
         {
-            let outside: String = line
-                .split('"')
-                .step_by(2) // 짝수 조각 = 따옴표 바깥
-                .collect();
+            assert_eq!(line.matches('"').count() % 2, 0, "따옴표 짝이 안 맞습니다: {line}");
+            let outside: String = line.split('"').step_by(2).collect(); // 짝수 조각 = 따옴표 바깥
             assert!(!outside.contains("Parameters:"), "따옴표 밖으로 샜습니다: {line}");
         }
-        // 비인용 자리에서는 따옴표를 아예 지운다.
+
+        // 비인용 자리에서도 따옴표를 지운다.
         let app_name_line = iss.lines().find(|l| l.starts_with("AppName=")).unwrap();
         assert!(!app_name_line.contains('"'), "{app_name_line}");
+        // 이중화된 따옴표는 어디에도 남지 않는다 (Inno 가 그것도 거절한다).
+        assert!(!iss.contains(r#"""""#), "{iss}");
+    }
+
+    /// 경로가 되는 자리(`DefaultDirName`·`DefaultGroupName`·`[Icons] Name`)에는 파일 이름에 못 쓰는
+    /// 글자가 남으면 안 된다. 남으면 컴파일은 통과하고 **설치할 때** 터진다
+    /// (Inno Setup 6.7.3 실측: `The folder name is not valid.`).
+    #[test]
+    fn path_fields_never_keep_characters_windows_forbids() {
+        let evil = r#"데모"; Parameters: "/c calc"; Flags: runhidden"#;
+        let iss = render_iss(evil, "0.1.0", "나", "demo", false);
+
+        let forbidden = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+        // DefaultDirName 은 `{localappdata}\Programs\` 접두사가 붙으므로 그 뒤만 본다.
+        let dir = iss.lines().find(|l| l.starts_with("DefaultDirName=")).unwrap();
+        let tail = dir.rsplit_once('\\').unwrap().1;
+        assert!(!tail.contains(forbidden), "DefaultDirName: {dir}");
+
+        let group = iss.lines().find(|l| l.starts_with("DefaultGroupName=")).unwrap();
+        let value = group.strip_prefix("DefaultGroupName=").unwrap();
+        assert!(!value.contains(forbidden), "DefaultGroupName: {group}");
+
+        // [Icons] 의 바로가기 이름은 `{group}\` / `{autodesktop}\` 뒤 조각이다.
+        for line in iss.lines().filter(|l| l.starts_with("Name: \"{")) {
+            let name = line.split('"').nth(1).unwrap();
+            let leaf = name.rsplit_once('\\').unwrap().1;
+            assert!(!leaf.contains(forbidden), "바로가기 이름: {line}");
+        }
+
+        // 표시용 자리에는 이름이 그대로 남는다 — 정화는 경로에만 한다.
+        assert!(
+            iss.lines()
+                .any(|l| l.starts_with("AppName=") && l.contains("Parameters")),
+            "{iss}"
+        );
     }
 
     #[test]
@@ -444,7 +494,7 @@ mod tests {
     fn iss_escapes_braces_quotes_and_newlines() {
         assert_eq!(iss_escape("{app}"), "{{app}");
         assert_eq!(iss_escape("줄\n바꿈"), "줄 바꿈");
-        assert_eq!(iss_quoted("따\"옴표"), "따\"\"옴표");
+        assert_eq!(iss_quoted("따\"옴표"), "따옴표");
         assert_eq!(iss_escape("  공백  "), "공백");
         // 비인용 자리에서는 따옴표와 ISPP 지시문 글자를 지운다.
         assert_eq!(iss_escape("따\"옴표"), "따옴표");
