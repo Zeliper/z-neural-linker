@@ -12,9 +12,7 @@ use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1,
 };
-use wayland_protocols_wlr::virtual_pointer::v1::client::{
-    zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1,
-};
+use wayland_protocols_wlr::virtual_pointer::v1::client::{zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1};
 
 #[derive(Default)]
 struct State {
@@ -32,7 +30,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_seat" => st.seat = Some(registry.bind(name, version.min(7), qh, ())),
                 "zwlr_virtual_pointer_manager_v1" => {
@@ -72,7 +75,10 @@ fn main() {
     queue.roundtrip(&mut st).expect("registry roundtrip");
 
     let seat = st.seat.clone().expect("wl_seat 없음");
-    let pm = st.pointer_mgr.clone().expect("zwlr_virtual_pointer_manager_v1 없음 (wlroots 컴포지터가 아닌가?)");
+    let pm = st
+        .pointer_mgr
+        .clone()
+        .expect("zwlr_virtual_pointer_manager_v1 없음 (wlroots 컴포지터가 아닌가?)");
     let km = st.keyboard_mgr.clone().expect("zwp_virtual_keyboard_manager_v1 없음");
 
     let _pointer = pm.create_virtual_pointer(Some(&seat), &qh, ());
@@ -93,7 +99,13 @@ fn main() {
 fn tempfile_memfd() -> std::fs::File {
     // memfd 가 없는 환경을 대비해 임시 파일로도 충분하다(읽기만 하면 된다).
     let path = std::env::temp_dir().join(format!("vseat-keymap-{}", std::process::id()));
-    let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap();
     let _ = std::fs::remove_file(&path);
     f
 }
