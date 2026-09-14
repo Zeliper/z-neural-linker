@@ -19,6 +19,8 @@ pub const USAGE: &str = "\
   --work-dir <경로>     번들을 이 폴더에 풀고 그대로 둡니다 (기본은 끝나면 지워지는 임시 폴더).
                         서비스로 상시 운영할 때 씁니다 — 경로가 매번 바뀌지 않아 인증서 같은
                         파일을 <경로>/local/ 에 두고 참조할 수 있습니다.
+  --log-json            헤드리스 로그를 한 줄 JSON 으로 냅니다 (stdout 한 줄 = 이벤트 하나).
+                        journald·Loki 같은 수집기에 그대로 흘려보낼 때 씁니다.
   --version, -V         버전을 출력합니다.
   --help, -h            이 도움말을 출력합니다.
 
@@ -47,6 +49,8 @@ pub struct Options {
     pub work_dir: Option<PathBuf>,
     /// `KEY=VALUE` 줄을 읽어 환경 변수로 넣을 파일.
     pub env_file: Option<PathBuf>,
+    /// 헤드리스 로그를 사람용 줄 대신 한 줄 JSON 으로 (journald·Loki 로 바로).
+    pub log_json: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +71,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Command {
             "--help" | "-h" => return Command::Help,
             "--headless" => opts.headless = true,
             "--no-update" => opts.no_update = true,
+            "--log-json" => opts.log_json = true,
             "--env-file" => {
                 let Some(v) = it.next() else {
                     return Command::Error("--env-file 뒤에 파일 경로가 없습니다".into());

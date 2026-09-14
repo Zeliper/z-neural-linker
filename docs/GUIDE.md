@@ -789,6 +789,23 @@ systemctl --user status neural-linker-app
 journalctl --user -u neural-linker-app -f
 ```
 
+#### 로그를 JSON 으로 (`--log-json`)
+
+`--log-json` 을 주면 stdout 한 줄이 이벤트 하나인 JSON 이 됩니다. journald 가 그대로 받아
+필드로 질의할 수 있습니다. 유닛의 `ExecStart` 에 붙이세요.
+
+```sh
+journalctl --user -u neural-linker-app -o cat | jq -c 'select(.kind=="error")'
+```
+
+`kind` 는 `started`·`stopped`·`log`·`error`·`value`·`widget`·`preview`·`stats` 중 하나이고,
+`ts` 는 언제나 RFC 3339(UTC)입니다. `stats` 의 `tick`·`hz`·`tick_ms` 는 숫자라 그대로 집계할 수
+있습니다. 이미지는 크기만 실립니다 — 픽셀을 로그에 넣으면 한 줄이 메가바이트가 됩니다.
+`nl run --log-json` 이 같은 모양을 내므로 개발과 운영 로그를 한데 모아 볼 수 있습니다.
+
+JSON 모드에서는 **stdout 이 이벤트 전용**입니다. 배너나 안내 같은 사람용 줄은 stderr 로 갑니다.
+그래야 `jq` 로 바로 걸러도 파싱이 깨지지 않습니다. journald 는 두 스트림을 모두 받습니다.
+
 로그아웃한 뒤에도 돌게 하려면 한 번만:
 
 ```sh
@@ -1004,6 +1021,7 @@ nl run p.nlproj                              # 파이프라인을 헤드리스�
 nl run p.nlproj --pipeline "XOR 시험" --for 10 --device cpu
 nl run p.nlproj --arm-input                  # 마우스·키보드 싱크를 무장 (실제 입력이 나간다)
 nl run p.nlproj --tls-cert certs/server.crt --tls-key certs/server.key   # HTTP 서버 노드를 https 로
+nl run p.nlproj --log-json                   # 사람용 줄 대신 한 줄 JSON (journald·Loki 로 바로)
 
 nl record out/ --monitor 0 --fps 4 --for 30            # 화면을 찍어 학습용 폴더로
 nl record out/ --x 100 --y 100 --width 800 --height 600 --label-keys "0,1,2"

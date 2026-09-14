@@ -542,6 +542,79 @@ fn a_multi_input_multi_output_model_answers_through_the_deployed_app() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `nl run --log-json` 이 내는 것이 **전부** 한 줄 JSON 인지.
+///
+/// 수집기는 한 줄이라도 다른 모양이 섞이면 그 줄에서 멈춘다. 사람용 머리말·꼬리말이 새어
+/// 나오지 않는지까지 본다. 가볍고 런타임 바이너리도 필요 없어 `NL_E2E` 없이 늘 돈다.
+#[test]
+fn run_log_json_emits_only_parsable_lines() {
+    let dir = temp_dir("logjson");
+    let proj = dir.join("xor.nlproj");
+    run("nl sample", Command::new(NL).arg("sample").arg(&proj));
+    // 고정 포트를 피해 빈 포트로 옮긴다 — 다른 시험과 나란히 돌 수 있어야 한다.
+    let addr = rebind_http_server(&proj, nl_core::sample::API_BIND);
+    eprintln!("이 시험의 주소: {addr}");
+
+    let out = run(
+        "nl run --log-json",
+        Command::new(NL).args(["run"]).arg(&proj).args([
+            "--pipeline",
+            "추론 API",
+            "--for",
+            "2",
+            "--device",
+            "cpu",
+            "--log-json",
+        ]),
+    );
+    let text = stdout(&out);
+    assert!(!text.trim().is_empty(), "아무것도 내지 않았다");
+
+    let mut kinds: Vec<String> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("{}행이 JSON 이 아니다: {e}\n{line}", i + 1));
+        let o = v
+            .as_object()
+            .unwrap_or_else(|| panic!("{}행이 객체가 아니다: {line}", i + 1));
+        let ts = o
+            .get("ts")
+            .and_then(|x| x.as_str())
+            .unwrap_or_else(|| panic!("ts 가 없다: {line}"));
+        assert!(ts.ends_with('Z'), "ts 가 UTC RFC3339 가 아니다: {ts}");
+        let kind = o
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .unwrap_or_else(|| panic!("kind 가 없다: {line}"));
+        kinds.push(kind.to_string());
+    }
+    assert!(kinds.contains(&"started".to_string()), "started 가 없다: {kinds:?}");
+    assert!(kinds.contains(&"stopped".to_string()), "stopped 가 없다: {kinds:?}");
+    assert!(kinds.iter().any(|k| k == "log"), "log 가 하나도 없다: {kinds:?}");
+    eprintln!("{}줄, kind: {kinds:?}", kinds.len());
+
+    // 사람용 형식은 기본으로 그대로여야 한다 (JSON 이 아닌 줄이 나온다).
+    let plain = run(
+        "nl run (사람용)",
+        Command::new(NL)
+            .args(["run"])
+            .arg(&proj)
+            .args(["--pipeline", "추론 API", "--for", "2", "--device", "cpu"]),
+    );
+    let ptext = stdout(&plain);
+    assert!(ptext.contains("실행"), "사람용 머리말이 사라졌다:\n{ptext}");
+    assert!(ptext.contains("종료"), "사람용 꼬리말이 사라졌다:\n{ptext}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(ptext.lines().next().unwrap_or("")).is_err(),
+        "기본 출력이 JSON 이 돼 버렸다"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// 모델이 올라올 때까지 503 을 넘기며 다시 보낸다.
 fn post_json_until_ok(url: &str, body: &[u8]) -> Option<Reply> {
     let mut headers = std::collections::BTreeMap::new();

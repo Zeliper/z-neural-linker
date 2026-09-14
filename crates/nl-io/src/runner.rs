@@ -2927,6 +2927,84 @@ fn argmax(v: &[f32]) -> Option<i64> {
     Some(best.0 as i64)
 }
 
+// ───────────────────────────── 구조화 로그 ─────────────────────────────
+
+/// [`RunnerEvent`] 하나를 한 줄 JSON 으로.
+///
+/// 서비스로 돌릴 때 journald·Loki 같은 수집기가 그대로 먹을 수 있게 하려는 것이다. 사람이 읽는
+/// 형식은 명령마다 다르지만 **이 모양은 한 군데서만 정한다** — 빌더·`nl run`·배포 런타임이 같은
+/// 줄을 내야 로그를 한데 모아 볼 수 있다.
+///
+/// 키는 언제나 `ts`·`kind` 가 있고, 나머지는 그 이벤트에 해당할 때만 붙는다.
+///
+/// | `kind` | 함께 나오는 키 |
+/// | --- | --- |
+/// | `started`·`stopped` | (없음) |
+/// | `log` | `level`(`info`), `message` |
+/// | `error` | `level`(`error`), `message`, 노드가 있으면 `node` |
+/// | `value` | `node`, `value` |
+/// | `widget` | `widget`, `value` |
+/// | `preview` | `node`, `width`, `height` |
+/// | `stats` | `tick`, `tick_ms`, `hz` |
+///
+/// 이미지는 **크기만** 넣는다. 픽셀을 로그에 실으면 한 줄이 메가바이트가 된다 —
+/// `value` 의 이미지도 `value_to_json` 이 크기와 바이트 수로 접는다.
+pub fn event_json(ev: &RunnerEvent) -> serde_json::Value {
+    use serde_json::json;
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    match ev {
+        RunnerEvent::Started => json!({ "ts": ts, "kind": "started" }),
+        RunnerEvent::Stopped => json!({ "ts": ts, "kind": "stopped" }),
+        RunnerEvent::Log(message) => json!({
+            "ts": ts,
+            "kind": "log",
+            "level": "info",
+            "message": message,
+        }),
+        RunnerEvent::Error { node, message } => {
+            let mut o = json!({
+                "ts": ts,
+                "kind": "error",
+                "level": "error",
+                "message": message,
+            });
+            // 노드 없는 오류(실행기 자체)는 키를 아예 빼 둔다. `null` 보다 없는 편이 질의가 쉽다.
+            if let Some(n) = node {
+                o["node"] = json!(n.short());
+            }
+            o
+        }
+        RunnerEvent::Value { node, value } => json!({
+            "ts": ts,
+            "kind": "value",
+            "node": node.short(),
+            "value": value_to_json(value),
+        }),
+        RunnerEvent::Widget { widget, value } => json!({
+            "ts": ts,
+            "kind": "widget",
+            "widget": widget.short(),
+            "value": value_to_json(value),
+        }),
+        RunnerEvent::ValuePreview {
+            node, width, height, ..
+        } => json!({
+            "ts": ts,
+            "kind": "preview",
+            "node": node.short(),
+            "width": width,
+            "height": height,
+        }),
+        RunnerEvent::Stats { tick, tick_ms, hz } => json!({
+            "ts": ts,
+            "kind": "stats",
+            "tick": tick,
+            "tick_ms": tick_ms,
+            "hz": hz,
+        }),
+    }
+}
+
 /// `{{value}}` 치환·stdout·파일 출력에 쓰는 JSON 표현.
 /// JSON 값은 그대로, 텍스트는 따옴표 붙은 JSON 문자열이 된다 (템플릿이 `{"m": {{value}}}` 형태여도 깨지지 않게).
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
@@ -3708,6 +3786,103 @@ mod tests {
 
     fn st() -> NodeState {
         NodeState::default()
+    }
+
+    // ── 구조화 로그 ────────────────────────────────────────────────────
+
+    /// 다섯 종류의 키 집합을 못 박는다. 수집기의 질의가 여기에 기대므로 말없이 바뀌면 안 된다.
+    #[test]
+    fn event_json_keys_are_fixed_per_kind() {
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().expect("객체").keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let node = PNodeId::from_u128(0x1234);
+
+        let started = event_json(&RunnerEvent::Started);
+        assert_eq!(keys(&started), ["kind", "ts"]);
+        assert_eq!(started["kind"], "started");
+
+        let stopped = event_json(&RunnerEvent::Stopped);
+        assert_eq!(keys(&stopped), ["kind", "ts"]);
+        assert_eq!(stopped["kind"], "stopped");
+
+        let log = event_json(&RunnerEvent::Log("열림".into()));
+        assert_eq!(keys(&log), ["kind", "level", "message", "ts"]);
+        assert_eq!(log["level"], "info");
+        assert_eq!(log["message"], "열림");
+
+        let err = event_json(&RunnerEvent::Error {
+            node: Some(node),
+            message: "깨짐".into(),
+        });
+        assert_eq!(keys(&err), ["kind", "level", "message", "node", "ts"]);
+        assert_eq!(err["level"], "error");
+        assert_eq!(err["node"], node.short());
+
+        // 노드 없는 오류는 `node` 키 자체가 없다 — `null` 보다 없는 편이 질의가 쉽다.
+        let bare = event_json(&RunnerEvent::Error {
+            node: None,
+            message: "실행기".into(),
+        });
+        assert_eq!(keys(&bare), ["kind", "level", "message", "ts"]);
+
+        let value = event_json(&RunnerEvent::Value {
+            node,
+            value: Value::Numbers(vec![1.0, 2.0]),
+        });
+        assert_eq!(keys(&value), ["kind", "node", "ts", "value"]);
+        assert_eq!(value["value"], serde_json::json!([1.0, 2.0]));
+
+        let stats = event_json(&RunnerEvent::Stats {
+            tick: 7,
+            tick_ms: 1.5,
+            hz: 60.0,
+        });
+        assert_eq!(keys(&stats), ["hz", "kind", "tick", "tick_ms", "ts"]);
+        // 숫자로 넣는다. 문자열이면 수집기에서 집계가 안 된다.
+        assert!(stats["tick"].is_number() && stats["hz"].is_number() && stats["tick_ms"].is_number());
+        assert_eq!(stats["tick"], 7);
+    }
+
+    /// 이미지는 크기만 싣는다. 픽셀을 넣으면 한 줄이 메가바이트가 된다.
+    #[test]
+    fn images_never_put_pixels_in_the_log() {
+        let node = PNodeId::from_u128(9);
+        let big = vec![7u8; 64 * 64 * 4];
+        let preview = event_json(&RunnerEvent::ValuePreview {
+            node,
+            width: 64,
+            height: 64,
+            rgba: big.clone(),
+        });
+        let mut k: Vec<String> = preview.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        assert_eq!(k, ["height", "kind", "node", "ts", "width"]);
+        assert_eq!(preview["width"], 64);
+
+        let as_value = event_json(&RunnerEvent::Value {
+            node,
+            value: Value::Image {
+                width: 64,
+                height: 64,
+                rgba: big,
+            },
+        });
+        let text = as_value.to_string();
+        assert!(text.len() < 300, "이미지 줄이 너무 길다 ({} 바이트)", text.len());
+        assert_eq!(as_value["value"]["image"]["width"], 64);
+        assert_eq!(as_value["value"]["image"]["bytes"], 64 * 64 * 4);
+    }
+
+    /// `ts` 는 RFC 3339 다. 수집기가 시각으로 파싱한다.
+    #[test]
+    fn the_timestamp_parses_as_rfc3339() {
+        let v = event_json(&RunnerEvent::Started);
+        let ts = v["ts"].as_str().expect("ts 는 문자열");
+        chrono::DateTime::parse_from_rfc3339(ts).unwrap_or_else(|e| panic!("{ts}: {e}"));
+        assert!(ts.ends_with('Z'), "UTC 여야 한다: {ts}");
     }
 
     // ── 화면 캡처 스레드 ───────────────────────────────────────────────
