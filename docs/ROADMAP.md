@@ -114,9 +114,13 @@
 
 ## M3 — 모델 관리·고급 레이어·상호운용 · **진행 중**
 
-- [ ] 레이어: LSTM/GRU, MultiHeadAttention, Transformer 블록, Residual 템플릿 — **엔진 담당 작업 중**
-      (아직 메인에 없다. `Embedding` 과 `Transform::Tokenize` 는 들어왔다 — `89cee6e`)
-- [ ] HTTP 서버 TLS — **io 담당 작업 중** (아직 메인에 없다. 지금은 토큰 인증 + 루프백 제한으로 막는다 — `5632065`)
+- [x] HTTP 서버 TLS — `Source::HttpServer` 에 인증서를 주면 https 로 연다(rustls + ring, 시스템 OpenSSL 불필요).
+      토큰 규칙은 TLS 와 무관하게 그대로다 — `1e87de1`
+- [ ] `nl tls-cert` 로 자체 서명 인증서 만들기 — **io 담당 진행 중**. 지금은 PEM 을 손으로 준비해야 한다
+- [ ] 레이어: `Lstm`·`Gru`·`MultiHeadAttention` — **병합 대기** (`agent/engine` `360f26e`).
+      `[L, D]` 를 받아 `return_sequence` 에 따라 `[L, H]` 나 마지막 상태 `[H]` 를 내고, 어텐션은 `[L, D] → [L, D]` 다.
+      burn 의 `nn` 모듈 대신 파라미터 텐서 + 게이트 수식으로 직접 구현했다
+- [ ] Transformer 블록·Residual 템플릿. **미착수** (`Embedding` 과 `Transform::Tokenize` 는 들어왔다 — `89cee6e`)
 - [ ] `Binding::ModelOutput` 의 `field` 로 다출력 갈라 보내기. 지금은 같은 모델을 가리키는 위젯이
       모두 같은 값을 받는다 — 모델이 출력을 여럿 낼 때 필요하다
 - [ ] 모델 레지스트리: 실행 기록 비교(지표 표), 버전 태그, 가중치 내보내기/가져오기. **미착수**

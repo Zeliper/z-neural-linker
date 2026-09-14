@@ -57,11 +57,22 @@
 - `nl` 명령 — `inspect`·`devices`·`train`·`infer`·`run`·`record`·`build`·`sample`.
   스크립트·CI 용이라 종료 코드가 계약이다
 
+**보안 · 전송**
+- 인바운드 HTTP 서버에 **TLS 옵션** — `Source::HttpServer` 에 인증서를 주면 https 로 연다(`TlsConfig { cert_pem, key_pem }`).
+  rustls + ring 이라 시스템 OpenSSL 이 필요 없고, 핸드셰이크 위쪽 HTTP 처리는 평문과 같은 코드다.
+  토큰 규칙은 TLS 와 무관하게 그대로다 — TLS 는 도청을 막고 토큰은 호출자를 가린다 (`1e87de1`)
+
 **시험·CI**
 - `egui_kittest` 인프로세스 스냅샷 골든(컴포지터 불필요)
 - 헤드리스 sway `tools/uitest` 시나리오 러너 + PPM 골든 비교
 - 종단 시험 `NL_E2E=1` — sample → train → infer → build → 배포판 HTTP 추론까지 한 줄로
-- GitHub·Forgejo Actions 두 벌(`ci.yml`·`release.yml`), Windows 러너 잡
+- GitHub·Forgejo Actions 두 벌(`ci.yml`·`release.yml`), Windows 러너 잡 —
+  `nl-gui`·`nl-runtime` 까지 돈다(스냅샷은 어댑터가 없으면 스스로 건너뛴다)
+- 전체 검증 러너 `scripts/verify-all.sh` — 포맷·클리피·테스트·릴리스 빌드·종단 시험, `--gui` 면 헤드리스
+  시나리오까지. 한 단계가 실패해도 끝까지 돌고 마지막에 실패 목록과 단계별 로그 경로를 낸다 (`ae81f8a`)
+- uitest 하네스 안정화 — `[nl-app] input ready` 마커로 키를 받을 수 있는 시점을 기다리고, `key-until` 로
+  로그가 나올 때까지 키를 다시 보내며, `UITEST_SHOT_DIR` 로 캡처가 저장소에 떨어지지 않게 한다 (`6c6b6a2`)
+- 앱 아이콘 일습 — 손으로 쓴 SVG 에서 PNG·ICO 를 만들어 실행 파일·설치 프로그램·데스크톱 항목에 연결 (`49ccb46`)
 
 ### 변경
 
@@ -70,6 +81,7 @@
 - 샘플 프로젝트를 `nl-cli` 에서 `nl-core` 로 옮겨 빌더와 CLI 가 같은 것을 만들게 했다
 - 릴리스 단계의 실제 내용을 `packaging/lib.sh` 한 곳으로 모아 워크플로와 로컬 스크립트가 같은 함수를 쓴다
 - 릴리스 프로필에서 `nl-*` 패키지의 `overflow-checks` 를 켰다(보안 리뷰 권고)
+- 전 크레이트 포맷을 정리하고 **CI 의 `cargo fmt --check` 를 강제로 바꿨다**(`continue-on-error` 제거) (`6149b01`)
 
 ### 보안
 
@@ -102,6 +114,19 @@
 - `:0` 으로 바인드할 때 `Host` 검사가 400 을 내던 것
 - 헤드리스 스모크 테스트가 무한 대기하던 것(`--run-for`)
 
+## 병합 대기
+
+아직 `main` 에 들어오지 않았지만 곧 합쳐질 것들이다. 릴리스 전에 이 절을 비우고 위로 옮긴다.
+
+- **순환·어텐션 레이어** `Lstm`·`Gru`·`MultiHeadAttention` — `agent/engine` `360f26e`.
+  `Lstm`/`Gru { hidden, bidirectional, return_sequence }` 는 `[L, D]` 를 받아 `return_sequence` 면 `[L, H]`,
+  아니면 마지막 상태 `[H]` 를 낸다(양방향이면 `H` 가 두 배). `MultiHeadAttention { heads, dropout }` 은
+  셀프 어텐션으로 `[L, D] → [L, D]` 다(`D % heads == 0`). 셋 다 burn 의 `nn` 모듈 대신 파라미터 텐서와
+  게이트 수식으로 직접 구현했다 — 그래프가 런타임에 정해져 `Module` 파생을 쓸 수 없기 때문이다.
+  형상 규칙·safetensors 왕복·학습 시험이 함께 들어온다
+- **`nl tls-cert`** — 자체 서명 인증서를 만드는 CLI 하위 명령. io 담당 **진행 중**.
+  지금은 인증서·개인키 PEM 을 손으로 준비해 `TlsConfig` 에 넣어야 한다
+
 ## 알려진 제한
 
 첫 릴리스 시점에 남아 있는 것들이다. 고칠 계획이 있는 것과 환경 탓인 것을 함께 적는다.
@@ -114,4 +139,5 @@
 | NVK 드라이버 GPU | 오픈소스 NVK(nouveau) 드라이버의 NVIDIA GPU 는 wgpu 컴퓨트가 죽는다. `Auto` 가 `probe` 로 걸러 다른 장치를 고른다. 공식 드라이버를 깔면 잡힌다 |
 | Windows 자동 업데이트 | `latest.json` 에 Windows 자산을 아직 넣지 않는다. 자기 자신을 바꿔칠 수 없어 설치 프로그램이 필요한데 CI 러너에 Inno Setup 이 없다. 그때까지 Windows 사용자는 zip 을 받아 덮어쓴다 |
 | 서명 키 미발급 | 공개키가 아직 코드에 박혀 있지 않아 자동 업데이트가 꺼진 상태다. 발급 절차는 `docs/RELEASE.md` |
-| 미처리 낮음 3건 | 로그에 전체 경로가 찍히는 것(L5), unmaintained 의존성 3건(L23), `Cargo.lock` 의 도달 불가 항목(L25). 뒤 둘은 상위 크레이트가 고정한 것이라 손댈 수 없다 |
+| 순환 레이어 성능 | `Lstm`·`Gru` 는 시퀀스 길이에 **선형인 커널 호출**을 낸다. 시점마다 게이트를 한 번씩 계산하므로 길이가 수백이면 눈에 띄게 느리다. 짧은 시퀀스를 먼저 써 보라 |
+| 미처리 낮음 2건 | unmaintained 의존성 3건(L23)과 `Cargo.lock` 의 도달 불가 항목(L25). 둘 다 상위 크레이트가 버전을 고정한 것이라 손댈 수 없다 |
