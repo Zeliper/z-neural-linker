@@ -62,6 +62,14 @@ ureq = { version = "3", features = ["json"] }
 # (webpki-roots 내장 인증서를 쓰므로 OS 인증서 저장소도 필요 없다).
 tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tiny_http = "0.12"
+# HTTP 서버 노드의 TLS(선택). ureq·tungstenite 가 이미 끌어오는 것과 **같은 0.23** 을 쓰고,
+# 암호 제공자도 트리에 이미 있는 ring 으로 맞춘다 — 기본값인 aws-lc-rs 는 cmake·nasm 을 요구해
+# "시스템 개발 라이브러리 없이 빌드된다" 는 이 저장소의 전제를 깬다.
+rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
+rustls-pemfile = "2"
+# 시험에서만 쓴다 — 자체 서명 인증서를 만들어 진짜 TLS 왕복을 돌린다.
+# 기본 기능이 ring 이라 여기서도 aws-lc-rs 가 따라오지 않는다.
+rcgen = "0.14"
 sysinfo = "0.39"
 csv = "1"
 # 명령줄 도구(nl-cli)

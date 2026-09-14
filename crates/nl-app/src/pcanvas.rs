@@ -797,10 +797,13 @@ pub fn source_palette() -> Vec<Source> {
             widget: WidgetId::from_u128(0),
         },
         // 토큰을 미리 채워 둔다 — 나중에 바깥 주소로 바꿔도 인증 없이 열리는 일이 없다.
+        // TLS 는 비워 둔다: 팔레트의 기본값은 루프백이라 인증서가 필요 없고,
+        // 없는 파일을 가리킨 채로 시작하면 새 노드가 곧바로 오류를 낸다.
         Source::HttpServer {
             bind: DEFAULT_HTTP_BIND.into(),
             path: DEFAULT_HTTP_PATH.into(),
             token: Some(nl_core::pipeline::new_token()),
+            tls: None,
         },
     ]
 }

@@ -25,7 +25,7 @@ pub use model::{
 pub use ops::{apply_op, apply_ops, diff_ops, inverse_ops, Op};
 pub use payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
 pub use pipeline::{host_of_bind, is_loopback_bind, new_token, TOKEN_LEN};
-pub use pipeline::{InputAction, Link, Logic, PNode, PNodeKind, Pipeline, Region, Sink, Source};
+pub use pipeline::{InputAction, Link, Logic, PNode, PNodeKind, Pipeline, Region, Sink, Source, TlsConfig};
 pub use sample::{
     api_pipeline, new_project, quadrants_cnn_project, xor_project, SampleFactory, API_BIND, API_PATH, SAMPLES,
 };

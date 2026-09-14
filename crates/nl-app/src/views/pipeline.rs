@@ -252,7 +252,7 @@ pub fn inspect_node(
             if matches!(source, Source::Manual) {
                 manual_sender(ui, state, nid, &mut actions, live.running);
             }
-            if let Source::HttpServer { bind, path, token } = source {
+            if let Source::HttpServer { bind, path, token, .. } = source {
                 http_server_tester(ui, bind, path, token.as_deref(), live.running);
             }
         }
@@ -443,7 +443,9 @@ fn source_editor(
         Source::GuiEvent { widget } => {
             changed |= widget_picker(ui, widget, ctx, "이 위젯의 이벤트를 받습니다", "src-widget");
         }
-        Source::HttpServer { bind, path, token } => {
+        // `tls` 는 아직 인스펙터에 없다 — 인증서 파일 선택 UI 는 별도 작업이다.
+        // 그때까지 프로젝트 파일에 적힌 값은 그대로 보존된다(여기서 건드리지 않으므로).
+        Source::HttpServer { bind, path, token, .. } => {
             ui.label(RichText::new("주소:포트").color(COL_WEAK).size(11.0));
             changed |= ui
                 .add(egui::TextEdit::singleline(bind).desired_width(f32::INFINITY))

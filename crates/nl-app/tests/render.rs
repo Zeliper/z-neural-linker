@@ -224,6 +224,7 @@ fn http_server_and_reply_render_and_validate() {
                     bind: "127.0.0.1:8787".into(),
                     path: "/infer".into(),
                     token: None,
+                    tls: None,
                 },
             },
             [80.0, 460.0],

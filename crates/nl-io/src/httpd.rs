@@ -17,10 +17,20 @@
 //! keep-alive 를 하지 않는다. 응답마다 `Connection: close` 를 붙이고 소켓을 닫는다. 연결 하나가
 //! 요청 하나다 — 상태가 없어 동시 연결 수 세기가 정확해지고, 파이프라인의 "요청 하나씩" 규칙과도 맞는다.
 //! HTTP/1.0 요청도 받는다(응답은 언제나 `HTTP/1.1`).
+//!
+//! ## TLS
+//! `Source::HttpServer` 에 인증서를 주면 [`TlsAcceptor`] 가 accept 직후 핸드셰이크를 끝내고
+//! [`Conn::Tls`] 를 돌려준다. 그 위쪽 HTTP 처리는 평문과 **글자 하나 다르지 않다** — 전송 계층만
+//! 갈아 끼운다. 유일하게 TLS 만 쓰는 것은 rustls 이고, 암호 제공자는 `ring` 이라 시스템
+//! 개발 라이브러리가 필요 없다.
+//!
+//! TLS 는 도청과 중간자를 막을 뿐 **누가 부를 수 있는지는 정하지 않는다**. 토큰 규칙은
+//! TLS 여부와 상관없이 그대로다.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// 요청 라인 + 헤더를 **다 받기까지** 허용하는 총 시간.
 ///
@@ -35,6 +45,162 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// 헤더 줄 수 상한. 넘으면 431.
 pub const MAX_HEADERS: usize = 64;
+
+/// TLS 핸드셰이크를 끝내기까지 허용하는 총 시간.
+///
+/// 평문 쪽 [`HEADER_TIMEOUT`] 과 같은 이유로 둔다 — 핸드셰이크를 한 바이트씩 흘리면서
+/// 스레드를 붙잡는 상대를 여기서 끊는다. 읽기 한 번의 타임아웃만으로는 부족하다.
+pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 평문이거나 TLS 인 연결. 이 위쪽 HTTP 코드는 어느 쪽인지 알 필요가 없다.
+pub enum Conn {
+    Plain(TcpStream),
+    /// rustls 세션은 읽기와 쓰기가 한 덩어리라 `try_clone` 으로 나눌 수 없다.
+    /// 그래서 평문 쪽도 핸들을 나누지 않고 이 하나로 읽고 쓴다.
+    Tls(Box<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>),
+}
+
+impl Conn {
+    /// 밑에 깔린 TCP 소켓. 타임아웃과 셧다운은 TLS 여부와 무관하게 여기에 건다.
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Conn::Plain(s) => s,
+            Conn::Tls(s) => &s.sock,
+        }
+    }
+
+    pub fn set_read_timeout(&self, d: Option<Duration>) -> std::io::Result<()> {
+        self.tcp().set_read_timeout(d)
+    }
+
+    fn shutdown_write(&self) {
+        let _ = self.tcp().shutdown(Shutdown::Write);
+    }
+}
+
+impl Read for Conn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.read(buf),
+            Conn::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.write(buf),
+            Conn::Tls(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Conn::Plain(s) => s.flush(),
+            Conn::Tls(s) => s.flush(),
+        }
+    }
+}
+
+/// 인증서·키를 읽어 둔 TLS 받개. 연결마다 세션 하나를 만든다.
+pub struct TlsAcceptor {
+    config: Arc<rustls::ServerConfig>,
+}
+
+impl TlsAcceptor {
+    /// PEM 바이트에서 만든다. **서버를 열기 전에** 불러서, 인증서가 잘못되면
+    /// 소켓을 열기도 전에 실패하게 한다 — 반쯤 열린 채로 도는 상태를 만들지 않는다.
+    pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, String> {
+        let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("인증서 PEM 을 읽지 못했다: {e}"))?;
+        if certs.is_empty() {
+            return Err("인증서 PEM 에 인증서가 없다 (`-----BEGIN CERTIFICATE-----` 가 보이는지 확인하라)".into());
+        }
+        let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))
+            .map_err(|e| format!("개인키 PEM 을 읽지 못했다: {e}"))?
+            .ok_or_else(|| "개인키 PEM 에 키가 없다 (PKCS#8·PKCS#1·SEC1 중 하나여야 한다)".to_string())?;
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            // 키가 인증서와 맞지 않으면 여기서 걸린다. 실행 중이 아니라 준비 단계에서 알게 된다.
+            .with_single_cert(certs, key)
+            .map_err(|e| format!("인증서와 키가 맞지 않는다: {e}"))?;
+        Ok(Self {
+            config: Arc::new(config),
+        })
+    }
+
+    /// 핸드셰이크를 끝내고 연결을 돌려준다. [`TLS_HANDSHAKE_TIMEOUT`] 안에 못 끝내면 오류.
+    ///
+    /// 평문으로 말을 거는 상대는 첫 바이트가 TLS 레코드가 아니라서 여기서 바로 끊긴다.
+    pub fn accept(&self, mut stream: TcpStream) -> Result<Conn, String> {
+        let mut conn =
+            rustls::ServerConnection::new(self.config.clone()).map_err(|e| format!("TLS 세션을 만들지 못했다: {e}"))?;
+        let deadline = Instant::now() + TLS_HANDSHAKE_TIMEOUT;
+        while conn.is_handshaking() {
+            let mut io = DeadlineIo {
+                inner: &mut stream,
+                deadline,
+            };
+            // `complete_io` 는 막힐 때까지 안에서 돈다. 그래서 마감은 `DeadlineIo` 가
+            // **읽기 한 번마다** 확인한다 — 그러지 않으면 1바이트씩 흘리는 상대에게 붙잡힌다.
+            match conn.complete_io(&mut io) {
+                Ok(_) => {}
+                Err(e) => return Err(format!("TLS 핸드셰이크 실패: {e}")),
+            }
+        }
+        // 핸드셰이크가 끝났으니 평문과 같은 타임아웃으로 돌려놓는다.
+        stream
+            .set_read_timeout(Some(HEADER_TIMEOUT))
+            .map_err(|e| format!("읽기 타임아웃을 걸지 못했다: {e}"))?;
+        stream
+            .set_write_timeout(Some(WRITE_TIMEOUT))
+            .map_err(|e| format!("쓰기 타임아웃을 걸지 못했다: {e}"))?;
+        Ok(Conn::Tls(Box::new(rustls::StreamOwned::new(conn, stream))))
+    }
+}
+
+/// 마감을 **읽기·쓰기 한 번마다** 다시 거는 어댑터.
+///
+/// 소켓 타임아웃만 걸어 두면 상대가 조금씩 보내는 동안 매번 갱신돼 전체 시간이 무한해진다.
+/// 남은 시간을 계산해 다시 걸어야 총 시간이 묶인다 — 평문 쪽 `read_line` 과 같은 수법이다.
+struct DeadlineIo<'a> {
+    inner: &'a mut TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineIo<'_> {
+    fn left(&self) -> std::io::Result<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TLS 핸드셰이크 시간 초과",
+            ));
+        }
+        Ok(left)
+    }
+}
+
+impl Read for DeadlineIo<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.left()?;
+        self.inner.set_read_timeout(Some(left))?;
+        self.inner.read(buf)
+    }
+}
+
+impl Write for DeadlineIo<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let left = self.left()?;
+        self.inner.set_write_timeout(Some(left))?;
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 /// 읽기·쓰기 준비가 끝난 연결을 넘겨주는 리스너.
 pub struct Server {
@@ -83,9 +249,9 @@ pub struct Request {
     query: String,
     /// 이름은 소문자로 눕혀 둔다.
     headers: Vec<(String, String)>,
-    reader: BufReader<TcpStream>,
-    /// 응답을 쓰는 쪽. 같은 소켓의 두 번째 핸들이다.
-    writer: TcpStream,
+    /// 읽기와 쓰기를 함께 하는 하나의 연결. TLS 세션은 둘로 쪼갤 수 없어서,
+    /// 평문 쪽도 핸들을 나누지 않고 여기로 맞췄다. 쓰기는 `io.get_mut()` 으로 한다.
+    io: BufReader<Conn>,
     body: BodyKind,
     /// 응답을 이미 보냈는가. 안 보냈으면 드롭될 때 500 을 보낸다.
     answered: bool,
@@ -131,13 +297,11 @@ impl BodyError {
 }
 
 impl Request {
-    /// 소켓에서 요청 라인과 헤더를 읽는다. 본문은 건드리지 않는다.
-    pub fn read_head(stream: TcpStream) -> Result<Self, (TcpStream, HeadError)> {
-        let writer = match stream.try_clone() {
-            Ok(w) => w,
-            Err(e) => return Err((stream, HeadError::new(500, format!("소켓을 복제하지 못했다: {e}")))),
-        };
-        let mut reader = BufReader::new(stream);
+    /// 연결에서 요청 라인과 헤더를 읽는다. 본문은 건드리지 않는다.
+    ///
+    /// 실패하면 연결을 **돌려준다** — 호출부가 그 위에 상태 코드를 적어 보낼 수 있게.
+    pub fn read_head(conn: Conn) -> Result<Self, (Conn, HeadError)> {
+        let mut reader = BufReader::new(conn);
         let mut budget = MAX_HEADER_BYTES;
         // 머리를 다 받기까지의 마감. 천천히 흘리는 상대를 여기서 끊는다.
         let deadline = std::time::Instant::now() + HEADER_TIMEOUT;
@@ -192,8 +356,7 @@ impl Request {
             path,
             query,
             headers,
-            reader,
-            writer,
+            io: reader,
             body,
             answered: false,
         })
@@ -225,7 +388,7 @@ impl Request {
     ///
     /// 여기서부터는 읽기 타임아웃이 [`BODY_TIMEOUT`] 으로 늘어난다 — 큰 본문은 시간이 걸려도 정상이다.
     pub fn read_body(&mut self, limit: u64) -> Result<Vec<u8>, BodyError> {
-        let _ = self.reader.get_ref().set_read_timeout(Some(BODY_TIMEOUT));
+        let _ = self.io.get_ref().set_read_timeout(Some(BODY_TIMEOUT));
         match self.body {
             BodyKind::None => Ok(Vec::new()),
             BodyKind::Sized(n) => {
@@ -234,7 +397,7 @@ impl Request {
                 }
                 let mut buf = Vec::new();
                 // 선언 길이를 믿고 통째로 잡지 않는다 — 서버가 부는 대로 메모리를 내주지 않으려는 것이다.
-                let read = Read::take(&mut self.reader, n).read_to_end(&mut buf);
+                let read = Read::take(&mut self.io, n).read_to_end(&mut buf);
                 match read {
                     Ok(got) if got as u64 == n => Ok(buf),
                     Ok(got) => Err(BodyError::new(400, format!("본문이 짧다 ({got}/{n} 바이트)"))),
@@ -250,7 +413,7 @@ impl Request {
         let mut out: Vec<u8> = Vec::new();
         loop {
             let mut line = String::new();
-            self.reader
+            self.io
                 .read_line(&mut line)
                 .map_err(|e| BodyError::new(400, format!("청크 길이를 읽지 못했다: {e}")))?;
             let head = line.trim_end_matches(['\r', '\n']);
@@ -264,7 +427,7 @@ impl Request {
             if size == 0 {
                 // 마지막 청크 뒤의 트레일러와 빈 줄을 흘려보낸다.
                 let mut tail = String::new();
-                while self.reader.read_line(&mut tail).is_ok() {
+                while self.io.read_line(&mut tail).is_ok() {
                     let t = tail.trim_end_matches(['\r', '\n']).to_owned();
                     tail.clear();
                     if t.is_empty() {
@@ -278,12 +441,12 @@ impl Request {
             }
             let start = out.len();
             out.resize(start + size as usize, 0);
-            self.reader
+            self.io
                 .read_exact(&mut out[start..])
                 .map_err(|e| BodyError::new(400, format!("청크 데이터를 읽지 못했다: {e}")))?;
             // 데이터 뒤의 CRLF.
             let mut crlf = [0u8; 2];
-            self.reader
+            self.io
                 .read_exact(&mut crlf)
                 .map_err(|e| BodyError::new(400, format!("청크 끝을 읽지 못했다: {e}")))?;
         }
@@ -292,9 +455,9 @@ impl Request {
     /// 남은 본문을 버린다. 응답만 하고 끝낼 때, 상대가 다 보내기 전에 닫으면
     /// 운영체제가 RST 를 보내 응답이 유실될 수 있어 조금은 읽어 준다.
     fn drain(&mut self, limit: u64) {
-        let _ = self.reader.get_ref().set_read_timeout(Some(Duration::from_millis(200)));
+        let _ = self.io.get_ref().set_read_timeout(Some(Duration::from_millis(200)));
         let mut sink = std::io::sink();
-        let _ = std::io::copy(&mut Read::take(&mut self.reader, limit), &mut sink);
+        let _ = std::io::copy(&mut Read::take(&mut self.io, limit), &mut sink);
     }
 
     /// 응답을 보내고 연결을 닫는다. 소비하므로 한 번만 답할 수 있다.
@@ -314,12 +477,12 @@ impl Request {
             reason = reason(status),
             len = body.len()
         );
-        self.writer.write_all(head.as_bytes())?;
+        self.io.get_mut().write_all(head.as_bytes())?;
         if !body.is_empty() {
-            self.writer.write_all(body)?;
+            self.io.get_mut().write_all(body)?;
         }
-        self.writer.flush()?;
-        let _ = self.writer.shutdown(Shutdown::Write);
+        self.io.get_mut().flush()?;
+        self.io.get_ref().shutdown_write();
         Ok(())
     }
 }
@@ -338,16 +501,16 @@ impl Drop for Request {
                  \r\n",
                 body.len()
             );
-            let _ = self.writer.write_all(head.as_bytes());
-            let _ = self.writer.write_all(body);
-            let _ = self.writer.flush();
-            let _ = self.writer.shutdown(Shutdown::Write);
+            let _ = self.io.get_mut().write_all(head.as_bytes());
+            let _ = self.io.get_mut().write_all(body);
+            let _ = self.io.get_mut().flush();
+            self.io.get_ref().shutdown_write();
         }
     }
 }
 
 /// 머리를 읽지 못한 소켓에 상태 코드만 적어 보낸다.
-pub fn respond_raw(mut stream: TcpStream, status: u16, message: &str) {
+pub fn respond_raw(mut conn: Conn, status: u16, message: &str) {
     let body = format!(
         "{{\"error\":{},\"status\":{status}}}",
         serde_json::Value::String(message.to_owned())
@@ -362,15 +525,15 @@ pub fn respond_raw(mut stream: TcpStream, status: u16, message: &str) {
         reason = reason(status),
         len = body.len()
     );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
-    let _ = stream.flush();
-    let _ = stream.shutdown(Shutdown::Write);
+    let _ = conn.write_all(head.as_bytes());
+    let _ = conn.write_all(body.as_bytes());
+    let _ = conn.flush();
+    conn.shutdown_write();
 }
 
 /// CRLF 까지 한 줄. 남은 예산을 깎고, 다 쓰면 431. `deadline` 을 넘기면 408.
 fn read_line(
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut BufReader<Conn>,
     budget: &mut usize,
     deadline: std::time::Instant,
 ) -> Result<String, HeadError> {

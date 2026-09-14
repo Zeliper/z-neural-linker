@@ -508,7 +508,15 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// 서버 소켓을 열고 수신 스레드를 띄운다.
-fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<HttpServerState, String> {
+///
+/// `tls` 는 **이미 만들어진** 받개다. 인증서 읽기·검증은 이 함수에 오기 전에 끝나 있어야
+/// 소켓을 열어 놓고 실패하는 일이 없다.
+fn start_http_server(
+    bind: &str,
+    path: &str,
+    token: Option<&str>,
+    tls: Option<Arc<crate::httpd::TlsAcceptor>>,
+) -> Result<HttpServerState, String> {
     // 인증 없이 바깥에 여는 것은 거부한다. 이 서버는 파이프라인을 구동하므로,
     // 열어 두면 그 주소에 닿는 누구나 모델을 돌리고 (싱크에 따라) 입력까지 보낼 수 있다.
     // **소켓을 열기 전에** 본다 — 잠깐이라도 무방비로 열려 있으면 안 된다.
@@ -534,6 +542,7 @@ fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<Http
     let inflight = Arc::new(AtomicUsize::new(0));
     let handoff = ConnContext {
         want_path: Arc::new(want),
+        tls,
         policy,
         ready: ready.clone(),
         inflight: inflight.clone(),
@@ -553,6 +562,18 @@ fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<Http
         stop,
         handle: Some(handle),
     })
+}
+
+/// 프로젝트 폴더 안에서 인증서와 키를 읽어 TLS 받개를 만든다.
+///
+/// 두 경로 모두 [`resolve_inside`] 를 지난다 — 설정 파일에 `../../etc/ssl/private/...` 을 적어
+/// 남의 키를 읽어 가는 길을 막는다. 개인키는 비밀이라 **내용을 오류 메시지에 담지 않는다**.
+fn load_tls(base_dir: &Path, cfg: &nl_core::TlsConfig) -> Result<crate::httpd::TlsAcceptor, String> {
+    let cert_path = resolve_inside(base_dir, &cfg.cert_pem).map_err(|e| format!("인증서 {e}"))?;
+    let key_path = resolve_inside(base_dir, &cfg.key_pem).map_err(|e| format!("개인키 {e}"))?;
+    let cert = std::fs::read(&cert_path).map_err(|e| format!("인증서를 읽지 못했다 ({}): {e}", cert_path.display()))?;
+    let key = std::fs::read(&key_path).map_err(|e| format!("개인키를 읽지 못했다 ({}): {e}", key_path.display()))?;
+    crate::httpd::TlsAcceptor::from_pem(&cert, &key)
 }
 
 /// 경로 비교를 위해 앞에 `/` 를 붙이고 뒤쪽 `/` 는 뗀다. 빈 값은 `/`.
@@ -586,7 +607,17 @@ fn http_accept_loop(server: &crate::httpd::Server, ctx: &ConnContext, stop: &Ato
 
         // 처리 중인 연결이 너무 많다. 머리도 읽지 않고 돌려보낸다 (slowloris 완화).
         if inflight.load(Ordering::SeqCst) >= HTTP_MAX_CONNECTIONS {
-            crate::httpd::respond_raw(stream, 503, "연결이 너무 많다. 잠시 뒤 다시 시도하라");
+            if ctx.tls.is_some() {
+                // TLS 인데 평문 503 을 적어 보내면 상대는 프로토콜 오류로 볼 뿐이다.
+                // 핸드셰이크를 해 주는 것이야말로 지금 아끼려는 그 일이므로 그냥 닫는다.
+                drop(stream);
+            } else {
+                crate::httpd::respond_raw(
+                    crate::httpd::Conn::Plain(stream),
+                    503,
+                    "연결이 너무 많다. 잠시 뒤 다시 시도하라",
+                );
+            }
             continue;
         }
         inflight.fetch_add(1, Ordering::SeqCst);
@@ -606,6 +637,9 @@ fn http_accept_loop(server: &crate::httpd::Server, ctx: &ConnContext, stop: &Ato
 #[derive(Clone)]
 struct ConnContext {
     want_path: Arc<String>,
+    /// 있으면 https. 핸드셰이크는 accept 루프가 아니라 **연결 스레드**가 한다 —
+    /// 느린 핸드셰이크 하나가 새 연결 받는 것을 막으면 안 되기 때문이다.
+    tls: Option<Arc<crate::httpd::TlsAcceptor>>,
     policy: Arc<AccessPolicy>,
     ready: Arc<AtomicBool>,
     inflight: Arc<AtomicUsize>,
@@ -628,7 +662,20 @@ fn http_conn_thread(stream: std::net::TcpStream, c: &ConnContext) {
     let _guard = InflightGuard(c.inflight.clone());
     let at = Instant::now();
 
-    let Some(mut request) = head_phase(stream, c) else {
+    // TLS 면 여기서 핸드셰이크를 끝낸다. 실패하면 답할 길이 없으니 조용히 닫는다 —
+    // 평문으로 말을 건 상대나 인증서를 거부한 상대가 여기로 온다.
+    let conn = match &c.tls {
+        Some(acceptor) => match acceptor.accept(stream) {
+            Ok(conn) => conn,
+            Err(why) => {
+                log::debug!("TLS 핸드셰이크를 끝내지 못했다: {why}");
+                return;
+            }
+        },
+        None => crate::httpd::Conn::Plain(stream),
+    };
+
+    let Some(mut request) = head_phase(conn, c) else {
         // 이미 답하고 끝났다.
         return;
     };
@@ -666,11 +713,11 @@ fn http_conn_thread(stream: std::net::TcpStream, c: &ConnContext) {
 /// 머리를 읽고 본문까지 갈 요청이면 돌려준다. 여기서 답하고 끝났으면 `None`.
 ///
 /// 본문을 읽을 필요가 없는 응답(404·401·403·503·405·413·431·408)은 전부 여기서 끝난다.
-fn head_phase(stream: std::net::TcpStream, c: &ConnContext) -> Option<crate::httpd::Request> {
-    let request = match crate::httpd::Request::read_head(stream) {
+fn head_phase(conn: crate::httpd::Conn, c: &ConnContext) -> Option<crate::httpd::Request> {
+    let request = match crate::httpd::Request::read_head(conn) {
         Ok(r) => r,
-        Err((sock, e)) => {
-            crate::httpd::respond_raw(sock, e.status, &e.message);
+        Err((conn, e)) => {
+            crate::httpd::respond_raw(conn, e.status, &e.message);
             return None;
         }
     };
@@ -1379,10 +1426,25 @@ fn run_loop(
     let mut servers: HashMap<PNodeId, HttpServerState> = HashMap::new();
     for id in &order {
         let PNodeKind::Source {
-            source: Source::HttpServer { bind, path, token },
+            source: Source::HttpServer { bind, path, token, tls },
         } = &pipeline.nodes[id].kind
         else {
             continue;
+        };
+        // 인증서·키는 **소켓을 열기 전에** 읽고 검증한다. 반쯤 열린 서버를 만들지 않으려는 것이고,
+        // 경로는 `resolve_inside` 로 프로젝트 폴더 안으로 묶어 아무 키나 읽지 못하게 한다.
+        let acceptor = match tls {
+            None => None,
+            Some(cfg) => match load_tls(&base_dir, cfg) {
+                Ok(a) => Some(Arc::new(a)),
+                Err(why) => {
+                    let _ = etx.send(RunnerEvent::Error {
+                        node: Some(*id),
+                        message: format!("HTTP 서버 TLS: {why}"),
+                    });
+                    continue;
+                }
+            },
         };
         // 환경 변수가 있으면 번들에 박힌 토큰 대신 그것을 쓴다.
         let overridden = token_override(bind);
@@ -1392,10 +1454,11 @@ fn run_loop(
             )));
         }
         let effective = overridden.as_deref().or(token.as_deref());
-        match start_http_server(bind, path, effective) {
+        let scheme = if acceptor.is_some() { "https" } else { "http" };
+        match start_http_server(bind, path, effective, acceptor) {
             Ok(srv) => {
                 let _ = etx.send(RunnerEvent::Log(format!(
-                    "HTTP 서버 http://{}{} 열림 ({})",
+                    "HTTP 서버 {scheme}://{}{} 열림 ({})",
                     srv.local_addr(),
                     normalize_path(path),
                     if effective.is_some_and(|t| !t.trim().is_empty()) {
@@ -3422,6 +3485,7 @@ mod tests {
                     bind: bind.into(),
                     path: path.into(),
                     token: token.map(str::to_string),
+                    tls: None,
                 },
             },
             [0.0, 0.0],
@@ -3446,6 +3510,250 @@ mod tests {
             .unwrap_or_else(|| panic!("주소가 없다: {line}"));
         let end = rest.find(['/', ' ']).unwrap_or(rest.len());
         rest[..end].to_owned()
+    }
+
+    // ── TLS ────────────────────────────────────────────────────────────────
+    //
+    // 인증서는 시험이 돌 때마다 새로 만든다. 저장소에 키를 넣어 두면 그 자체가 비밀 유출이고,
+    // 만료가 있어 언젠가 반드시 깨진다.
+
+    /// `127.0.0.1` 용 자체 서명 인증서 한 장. `(인증서 PEM, 키 PEM)`.
+    fn self_signed() -> (String, String) {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("인증서 매개변수");
+        // ureq 는 주소로 붙으므로 IP SAN 이 없으면 이름 검증에서 떨어진다.
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress(std::net::IpAddr::from([127, 0, 0, 1])));
+        let key = rcgen::KeyPair::generate().expect("키 생성");
+        let cert = params.self_signed(&key).expect("자체 서명");
+        (cert.pem(), key.serialize_pem())
+    }
+
+    /// 인증서와 키를 `base_dir` 안에 두고 `TlsConfig`(상대 경로)를 돌려준다.
+    fn write_pem(base: &Path, cert: &str, key: &str) -> nl_core::TlsConfig {
+        std::fs::write(base.join("server.crt"), cert).expect("인증서 쓰기");
+        std::fs::write(base.join("server.key"), key).expect("키 쓰기");
+        nl_core::TlsConfig {
+            cert_pem: "server.crt".into(),
+            key_pem: "server.key".into(),
+        }
+    }
+
+    fn tls_server_node(p: &mut Pipeline, bind: &str, path: &str, tls: nl_core::TlsConfig) -> PNodeId {
+        p.add_node(PNode::new(
+            PNodeKind::Source {
+                source: Source::HttpServer {
+                    bind: bind.into(),
+                    path: path.into(),
+                    token: None,
+                    tls: Some(tls),
+                },
+            },
+            [0.0, 0.0],
+        ))
+    }
+
+    /// `HTTP 서버 https://127.0.0.1:39481/infer 열림 (…)` 에서 주소만 뽑는다.
+    fn wait_tls_server_up(h: &RunnerHandle) -> String {
+        let ev = wait_for(
+            h,
+            Duration::from_secs(10),
+            |e| matches!(e, RunnerEvent::Log(m) if m.contains("HTTP 서버 https://")),
+        )
+        .expect("HTTPS 서버가 열리지 않았다");
+        let RunnerEvent::Log(line) = ev else {
+            panic!("로그가 아니다")
+        };
+        let rest = line
+            .split("https://")
+            .nth(1)
+            .unwrap_or_else(|| panic!("주소가 없다: {line}"));
+        let end = rest.find(['/', ' ']).unwrap_or(rest.len());
+        rest[..end].to_owned()
+    }
+
+    /// 그 인증서 하나만 믿는 클라이언트. 시스템 신뢰 목록은 쓰지 않는다.
+    fn client_trusting(cert_pem: &str) -> ureq::Agent {
+        let cert = ureq::tls::Certificate::from_pem(cert_pem.as_bytes()).expect("인증서 파싱");
+        let tls = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::new_with_certs(&[cert]))
+            .build();
+        ureq::Agent::config_builder().tls_config(tls).build().into()
+    }
+
+    /// 진짜 TLS 로 한 바퀴 돈다 — 핸드셰이크, 요청, 파이프라인, 응답.
+    #[test]
+    fn an_https_server_answers_a_post() {
+        let base = tmp_dir("tls-roundtrip");
+        let (cert, key) = self_signed();
+        let tls = write_pem(&base, &cert, &key);
+
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = tls_server_node(&mut p, ANY_ADDR, "/infer", tls);
+        let pick = p.add_node(PNode::new(
+            PNodeKind::Logic {
+                logic: Logic::Select { index: 1 },
+            },
+            [1.0, 0.0],
+        ));
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [2.0, 0.0],
+        ));
+        p.add_link(server, pick).unwrap();
+        p.add_link(pick, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, base, DevicePref::Cpu)
+            .start()
+            .unwrap();
+        let addr = wait_tls_server_up(&h);
+        let agent = client_trusting(&cert);
+
+        let mut res = agent
+            .post(format!("https://{addr}/infer"))
+            .content_type("application/json")
+            .send("[1, 9, 2]")
+            .expect("https 요청이 실패했다");
+        assert_eq!(res.status(), 200);
+        let body = res.body_mut().read_to_string().expect("본문");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).expect("JSON"),
+            serde_json::json!(9)
+        );
+
+        // 두 번째 연결도 새 핸드셰이크로 받는다 (연결 하나가 요청 하나다).
+        let mut res2 = agent
+            .post(format!("https://{addr}/infer"))
+            .content_type("application/json")
+            .send("[5, 7, 3]")
+            .expect("두 번째 https 요청이 실패했다");
+        let body2 = res2.body_mut().read_to_string().expect("본문");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body2).expect("JSON"),
+            serde_json::json!(7)
+        );
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// TLS 포트에 평문으로 말을 걸면 HTTP 응답 없이 끊긴다.
+    ///
+    /// 여기서 평문 404 나 400 이 돌아오면 그게 더 나쁘다 — 내용이 그대로 전선에 나가기 때문이다.
+    #[test]
+    fn a_plaintext_request_to_a_tls_port_gets_no_http_response() {
+        let base = tmp_dir("tls-plaintext");
+        let (cert, key) = self_signed();
+        let tls = write_pem(&base, &cert, &key);
+
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = tls_server_node(&mut p, ANY_ADDR, "/infer", tls);
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, base, DevicePref::Cpu)
+            .start()
+            .unwrap();
+        let addr = wait_tls_server_up(&h);
+
+        use std::io::Write as _;
+        let mut sock = std::net::TcpStream::connect(&addr).expect("연결");
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        sock.write_all(b"POST /infer HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n[]")
+            .expect("쓰기");
+        let mut got = Vec::new();
+        let _ = sock.read_to_end(&mut got);
+        let text = String::from_utf8_lossy(&got);
+        assert!(!text.starts_with("HTTP/"), "평문 포트처럼 답했다: {text:?}");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(2)));
+    }
+
+    /// 인증서와 키가 짝이 아니면 **소켓을 열기 전에** 실패한다.
+    #[test]
+    fn a_mismatched_key_fails_before_the_socket_opens() {
+        let (cert_a, _key_a) = self_signed();
+        let (_cert_b, key_b) = self_signed();
+        let err = crate::httpd::TlsAcceptor::from_pem(cert_a.as_bytes(), key_b.as_bytes())
+            .err()
+            .expect("짝이 아닌 키가 통과했다");
+        assert!(err.contains("맞지 않는다"), "{err}");
+
+        // 인증서 자리에 아무 글자나 있으면 그것도 준비 단계에서 걸린다.
+        let err = crate::httpd::TlsAcceptor::from_pem(b"not a pem", key_b.as_bytes())
+            .err()
+            .expect("빈 인증서가 통과했다");
+        assert!(err.contains("인증서"), "{err}");
+
+        // 키 자리가 비어 있어도 마찬가지.
+        let err = crate::httpd::TlsAcceptor::from_pem(cert_a.as_bytes(), b"not a pem")
+            .err()
+            .expect("빈 키가 통과했다");
+        assert!(err.contains("개인키"), "{err}");
+    }
+
+    /// 잘못된 인증서를 단 파이프라인은 오류를 내고 그 서버를 열지 않는다.
+    #[test]
+    fn a_broken_certificate_reports_an_error_and_opens_no_server() {
+        let base = tmp_dir("tls-broken");
+        std::fs::write(base.join("server.crt"), "쓰레기").unwrap();
+        std::fs::write(base.join("server.key"), "쓰레기").unwrap();
+
+        let mut p = Pipeline::new("api");
+        p.tick_hz = 120.0;
+        let server = tls_server_node(
+            &mut p,
+            ANY_ADDR,
+            "/infer",
+            nl_core::TlsConfig {
+                cert_pem: "server.crt".into(),
+                key_pem: "server.key".into(),
+            },
+        );
+        let reply = p.add_node(PNode::new(
+            PNodeKind::Sink {
+                sink: Sink::HttpReply { server },
+            },
+            [1.0, 0.0],
+        ));
+        p.add_link(server, reply).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, base, DevicePref::Cpu)
+            .start()
+            .unwrap();
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Error { message, .. } if message.contains("HTTP 서버 TLS")),
+        );
+        assert!(ev.is_some(), "인증서 오류가 보고되지 않았다");
+        h.stop();
+    }
+
+    /// 인증서 경로는 프로젝트 폴더 밖으로 나갈 수 없다.
+    #[test]
+    fn a_certificate_path_cannot_escape_the_project_folder() {
+        let base = tmp_dir("tls-escape");
+        let err = load_tls(
+            &base,
+            &nl_core::TlsConfig {
+                cert_pem: "../../etc/ssl/private/server.key".into(),
+                key_pem: "server.key".into(),
+            },
+        )
+        .err()
+        .expect("바깥 경로가 통과했다");
+        assert!(err.contains("인증서"), "{err}");
     }
 
     #[test]
@@ -3700,7 +4008,7 @@ mod tests {
     #[test]
     fn requests_before_ready_get_503_and_are_not_queued() {
         // 서버가 직접 :0 으로 열고 실제 주소를 알려 준다 — 포트를 미리 잡아 두지 않는다.
-        let Ok(mut srv) = start_http_server(ANY_ADDR, "/infer", None) else {
+        let Ok(mut srv) = start_http_server(ANY_ADDR, "/infer", None, None) else {
             panic!("서버를 열지 못했다");
         };
         assert!(!srv.ready.load(Ordering::SeqCst), "처음에는 준비 전이다");
@@ -4093,18 +4401,18 @@ mod tests {
     #[test]
     fn opening_a_public_port_without_a_token_is_refused() {
         // `HttpServerState` 는 Debug 가 아니라 `unwrap_err` 를 못 쓴다.
-        let Err(err) = start_http_server("0.0.0.0:0", "/x", None) else {
+        let Err(err) = start_http_server("0.0.0.0:0", "/x", None, None) else {
             panic!("토큰 없이 0.0.0.0 에 열렸다");
         };
         assert!(err.contains("토큰 없이 열 수 없다"), "{err}");
         // 토큰이 있으면 열린다 (0 번 포트라 실제로 바인드된다).
         // `HttpServerState` 는 Debug 가 아니라 `expect` 를 못 쓴다.
-        let Ok(mut ok) = start_http_server("0.0.0.0:0", "/x", Some("t")) else {
+        let Ok(mut ok) = start_http_server("0.0.0.0:0", "/x", Some("t"), None) else {
             panic!("토큰이 있으면 열려야 한다");
         };
         ok.shutdown();
         // 루프백은 토큰 없이도 열린다.
-        let Ok(mut lo) = start_http_server("127.0.0.1:0", "/x", None) else {
+        let Ok(mut lo) = start_http_server("127.0.0.1:0", "/x", None, None) else {
             panic!("루프백은 열려야 한다");
         };
         lo.shutdown();

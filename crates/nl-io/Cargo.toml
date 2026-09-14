@@ -18,6 +18,9 @@ parking_lot.workspace = true
 image.workspace = true
 ureq.workspace = true
 tungstenite.workspace = true
+# `Source::HttpServer` 의 tls 옵션. 인증서가 없으면 한 줄도 돌지 않는다.
+rustls.workspace = true
+rustls-pemfile.workspace = true
 sysinfo.workspace = true
 # 녹화 meta.json 의 시작 시각(RFC 3339)
 chrono.workspace = true
@@ -26,6 +29,8 @@ chrono.workspace = true
 # `http.rs` 의 왕복 시험이 띄우는 로컬 서버. 인바운드 서버(`Source::HttpServer`)는
 # `src/httpd.rs` 가 std 만으로 직접 구현하므로 일반 의존성에는 없다.
 tiny_http.workspace = true
+# TLS 왕복 시험용 자체 서명 인증서.
+rcgen.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb.workspace = true
