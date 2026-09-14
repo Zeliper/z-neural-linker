@@ -2,6 +2,7 @@
 //! 공개 API 는 이 파일의 re-export 가 전부다.
 
 pub mod http;
+pub mod httpd;
 pub mod input;
 pub mod record;
 pub mod resources;

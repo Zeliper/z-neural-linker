@@ -87,7 +87,7 @@ use nl_core::payload::PayloadSpec;
 use nl_core::{DevicePref, InputAction, Logic, PNodeId, PNodeKind, Pipeline, Project, Sink, Source, WidgetId};
 use nl_engine::{HostTensor, Session, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -361,7 +361,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// 수신 스레드 → 틱 루프. 값과 아직 응답하지 않은 요청을 함께 넘긴다.
 struct HttpIncoming {
     value: Value,
-    request: tiny_http::Request,
+    request: crate::httpd::Request,
     /// 요청이 **서버에 도착한** 시각. 큐에서 기다린 시간까지 제한에 넣으려고 여기서 잰다.
     /// (`pending` 으로 옮겨질 때 재면 큐에서 5분을 기다린 요청도 그때부터 다시 10초를 받는다.)
     at: Instant,
@@ -381,12 +381,13 @@ struct HttpServerState {
     /// 수신 스레드가 넣는 요청.
     rx: Receiver<HttpIncoming>,
     /// 아직 응답하지 않은 요청 (FIFO). 위 규칙상 0개나 1개다.
-    pending: VecDeque<(Instant, tiny_http::Request)>,
+    pending: VecDeque<(Instant, crate::httpd::Request)>,
     /// 채널에서 꺼내 두었지만 아직 파이프라인에 넣지 않은 요청 (FIFO).
     /// 시간 초과 회수가 여기까지 훑어야 해서 채널에 두지 않고 옮겨 놓는다.
     queued: VecDeque<HttpIncoming>,
-    /// 수신 스레드를 깨우기 위해 공유한다.
-    server: Arc<tiny_http::Server>,
+    /// 리스너. accept 스레드와 함께 들고 있어, 실제로 묶인 주소를 알려 줄 수 있다
+    /// (`:0` 으로 열면 운영체제가 포트를 고른다).
+    server: Arc<crate::httpd::Server>,
     /// 모델이 다 올라왔는가. 꺼져 있는 동안 들어온 요청은 **큐에 넣지 않고** 곧바로 503 으로 돌려보낸다.
     /// 서버를 모델보다 먼저 여는 대신, 아직 답할 수 없는 요청을 물고 있지 않으려는 것이다.
     ready: Arc<AtomicBool>,
@@ -397,10 +398,15 @@ struct HttpServerState {
 }
 
 impl HttpServerState {
+    /// 실제로 묶인 주소. 설정이 `:0` 이면 운영체제가 고른 포트가 여기 들어 있다.
+    fn local_addr(&self) -> std::net::SocketAddr {
+        self.server.local_addr()
+    }
+
     /// 대기 중인 요청에 모두 같은 상태로 답하고 수신 스레드를 접는다.
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.server.unblock();
+        // accept 는 논블로킹이라 깨울 것이 없다. 다음 폴링에서 stop 을 본다.
         while let Some((_, req)) = self.pending.pop_front() {
             let _ = respond_json(req, 503, "파이프라인이 멈춰 요청을 처리하지 못했다");
         }
@@ -421,36 +427,21 @@ impl HttpServerState {
 }
 
 /// JSON 본문으로 답한다. 2xx 는 값 그대로, 그 밖에는 `{"error": ...}` 로 감싼다.
-fn respond_json(request: tiny_http::Request, status: u16, body: &str) -> Result<(), String> {
+fn respond_json(request: crate::httpd::Request, status: u16, body: &str) -> Result<(), String> {
     let payload = if (200..300).contains(&status) {
         body.to_owned()
     } else {
         serde_json::json!({ "error": body, "status": status }).to_string()
     };
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..])
-        .map_err(|_| "Content-Type 헤더를 만들지 못했다".to_string())?;
-    let response = tiny_http::Response::from_string(payload)
-        .with_status_code(status)
-        .with_header(header)
-        .with_header(nosniff()?);
-    request.respond(response).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
-}
-
-/// 브라우저가 본문을 보고 형식을 멋대로 추측하지 못하게 한다.
-/// 우리 응답은 Content-Type 이 정확하므로 추측이 끼어들 이유가 없다.
-fn nosniff() -> Result<tiny_http::Header, String> {
-    tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..])
-        .map_err(|_| "X-Content-Type-Options 헤더를 만들지 못했다".to_string())
+    request
+        .respond(status, "application/json; charset=utf-8", payload.as_bytes())
+        .map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
 }
 
 /// 이미지 값을 PNG 로 답한다.
-fn respond_png(request: tiny_http::Request, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+fn respond_png(request: crate::httpd::Request, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let png = encode_png(width, height, rgba)?;
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..])
-        .map_err(|_| "Content-Type 헤더를 만들지 못했다".to_string())?;
-    let response =
-        tiny_http::Response::from_data(png).with_status_code(200).with_header(header).with_header(nosniff()?);
-    request.respond(response).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
+    request.respond(200, "image/png", &png).map_err(|e| format!("HTTP 응답 전송 실패: {e}"))
 }
 
 /// RGBA8 → PNG 바이트.
@@ -476,13 +467,11 @@ fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<Http
             "{bind} 은 바깥에서 닿는 주소라 토큰 없이 열 수 없다              (HttpServer 노드에 token 을 넣거나 127.0.0.1 에 묶어라)"
         ));
     }
-    let server = tiny_http::Server::http(bind)
-        .map(Arc::new)
-        .map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
+    let server = crate::httpd::Server::bind(bind).map(Arc::new).map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
     // 틱 루프로 넘기는 큐는 상한이 있다. 넘치면 붙잡지 않고 503 으로 돌려보낸다.
     let (tx, rx) = crossbeam_channel::bounded(HTTP_QUEUE_LIMIT);
     // accept 와 본문 읽기를 나눈다. 느린 클라이언트는 워커 하나만 묶고 accept 는 계속 돈다.
-    let (raw_tx, raw_rx) = crossbeam_channel::bounded::<tiny_http::Request>(HTTP_BODY_WORKERS * 2);
+    let (raw_tx, raw_rx) = crossbeam_channel::bounded::<std::net::TcpStream>(HTTP_BODY_WORKERS * 2);
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicBool::new(false));
     let policy = Arc::new(policy);
@@ -492,19 +481,20 @@ fn start_http_server(bind: &str, path: &str, token: Option<&str>) -> Result<Http
     let mut workers = Vec::with_capacity(HTTP_BODY_WORKERS);
     for i in 0..HTTP_BODY_WORKERS {
         let (rrx, ptx, fly) = (raw_rx.clone(), tx.clone(), inflight.clone());
+        let (pol, path, rdy) = (policy.clone(), want.clone(), ready.clone());
         let w = std::thread::Builder::new()
             .name(format!("nl-http-body-{i}"))
-            .spawn(move || http_body_worker(&rrx, &ptx, &fly))
+            .spawn(move || http_body_worker(&rrx, &path, &pol, &ptx, &fly, &rdy))
             .map_err(|e| format!("HTTP 본문 워커 생성 실패: {e}"))?;
         workers.push(w);
     }
     drop(tx);
     drop(raw_rx);
 
-    let (s2, r2, srv2, want2, pol2) = (stop.clone(), ready.clone(), server.clone(), want, policy);
+    let (s2, srv2) = (stop.clone(), server.clone());
     let handle = std::thread::Builder::new()
         .name("nl-http-server".into())
-        .spawn(move || http_accept_loop(&srv2, &want2, &pol2, &raw_tx, &s2, &r2, &inflight))
+        .spawn(move || http_accept_loop(&srv2, &raw_tx, &s2, &inflight))
         .map_err(|e| format!("HTTP 수신 스레드 생성 실패: {e}"))?;
     Ok(HttpServerState {
         rx,
@@ -528,89 +518,42 @@ fn normalize_path(p: &str) -> String {
     with_slash.trim_end_matches('/').to_owned()
 }
 
-/// accept 전용 루프. 요청을 받아 **싸게 판별할 수 있는 것만** 보고 워커에게 넘긴다.
+/// accept 전용 루프. 소켓을 받아 타임아웃만 걸고 곧바로 워커에게 넘긴다.
 ///
-/// 본문을 여기서 읽으면 `Content-Length: 8MB` 를 선언하고 1초에 1바이트씩 보내는 클라이언트 하나가
-/// 이 루프 전체를 막는다. 그래서 읽기는 워커가 한다 (M3).
-#[allow(clippy::too_many_arguments)]
+/// 여기서는 **한 바이트도 읽지 않는다**. 머리를 읽는 순간 느린 상대가 이 루프를 붙잡기 때문이다.
+/// 읽기는 전부 워커가 하고, 워커는 소켓 타임아웃으로 보호된다.
 fn http_accept_loop(
-    server: &tiny_http::Server,
-    want_path: &str,
-    policy: &AccessPolicy,
-    raw: &Sender<tiny_http::Request>,
+    server: &crate::httpd::Server,
+    raw: &Sender<std::net::TcpStream>,
     stop: &AtomicBool,
-    ready: &AtomicBool,
     inflight: &AtomicUsize,
 ) {
     while !stop.load(Ordering::SeqCst) {
-        let request = match server.recv_timeout(HTTP_SERVER_POLL) {
-            Ok(Some(r)) => r,
-            // 시간이 지났을 뿐이다. stop 을 다시 본다.
-            Ok(None) => continue,
+        let stream = match server.accept() {
+            Ok(Some(s)) => s,
+            // 아직 아무도 오지 않았다. stop 을 다시 본다.
+            Ok(None) => {
+                std::thread::sleep(HTTP_SERVER_POLL);
+                continue;
+            }
             Err(_) => break,
         };
 
-        // 처리 중인 요청이 너무 많다. 붙잡지 말고 흘려보낸다 (slowloris 완화).
-        //
-        // tiny_http 0.12 는 연결마다 스레드를 만들고 상한이 없다. `Server::num_connections()` 는
-        // `unimplemented!()` 라 부를 수 없어, 워커에 넘긴 뒤 아직 안 끝난 요청을 직접 센다.
-        // 연결 자체를 막지는 못하지만 본문을 읽어 주지 않으므로 자원 소모가 거기서 멈춘다.
-        if inflight.load(Ordering::SeqCst) > HTTP_MAX_CONNECTIONS {
-            let _ = respond_json(request, 503, "요청이 너무 많다. 잠시 뒤 다시 시도하라");
+        // 처리 중인 연결이 너무 많다. 머리도 읽지 않고 돌려보낸다 (slowloris 완화).
+        if inflight.load(Ordering::SeqCst) >= HTTP_MAX_CONNECTIONS {
+            crate::httpd::respond_raw(stream, 503, "연결이 너무 많다. 잠시 뒤 다시 시도하라");
             continue;
         }
 
-        let url = request.url().to_owned();
-        let got_path = match url.split_once('?') {
-            Some((p, _)) => normalize_path(p),
-            None => normalize_path(&url),
-        };
-        if got_path != want_path {
-            let _ = respond_json(request, 404, &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {want_path})"));
-            continue;
-        }
-
-        // 누가 보냈는지부터 본다. 인증·출처 확인은 준비 상태보다 앞이다 —
-        // 아직 준비되지 않았다는 사실조차 아무에게나 알려 줄 이유가 없다.
-        let deny = policy.check(
-            header_value(&request, "origin").as_deref(),
-            header_value(&request, "host").as_deref(),
-            header_value(&request, "authorization").as_deref(),
-            header_value(&request, "x-nl-token").as_deref(),
-        );
-        if let Err((status, why)) = deny {
-            let _ = respond_json(request, status, &why);
-            continue;
-        }
-
-        // 모델이 아직 안 올라왔다. 물고 있지 말고 곧바로 돌려보낸다 — 클라이언트가 재시도하면 된다.
-        if !ready.load(Ordering::SeqCst) {
-            let _ = respond_json(request, 503, MODEL_LOADING);
-            continue;
-        }
-
-        let method = request.method().as_str().to_ascii_uppercase();
-        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH") {
-            let _ = respond_json(request, 405, &format!("{method} 은 지원하지 않는다 (GET, POST, PUT, PATCH 만)"));
-            continue;
-        }
-
-        // Content-Length 가 있으면 본문을 읽기 전에 거른다.
-        if request.body_length().map(|n| n as u64 > MAX_HTTP_REQUEST_BYTES).unwrap_or(false) {
-            let _ = respond_json(request, 413, &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"));
-            continue;
-        }
-
-        // 워커가 모두 바쁘면 더 받아도 쌓이기만 한다.
-        match raw.try_send(request) {
+        match raw.try_send(stream) {
             Ok(()) => {
                 inflight.fetch_add(1, Ordering::SeqCst);
             }
-            Err(crossbeam_channel::TrySendError::Full(req)) => {
-                let _ = respond_json(req, 503, "요청이 밀렸다. 잠시 뒤 다시 시도하라");
+            Err(crossbeam_channel::TrySendError::Full(s)) => {
+                crate::httpd::respond_raw(s, 503, "요청이 밀렸다. 잠시 뒤 다시 시도하라");
             }
-            Err(crossbeam_channel::TrySendError::Disconnected(req)) => {
-                let _ = respond_json(req, 503, "서버가 멈추는 중이다");
+            Err(crossbeam_channel::TrySendError::Disconnected(s)) => {
+                crate::httpd::respond_raw(s, 503, "서버가 멈추는 중이다");
                 break;
             }
         }
@@ -626,31 +569,83 @@ impl Drop for InflightGuard<'_> {
     }
 }
 
-/// 본문을 읽어 값으로 바꾸는 워커. 느린 클라이언트는 워커 하나만 묶는다.
-fn http_body_worker(raw: &Receiver<tiny_http::Request>, tx: &Sender<HttpIncoming>, inflight: &AtomicUsize) {
-    for mut request in raw.iter() {
-        // 이 요청을 어떻게 끝내든 처리 중 수는 줄어든다.
+/// 연결 하나를 끝까지 처리하는 워커: 머리 읽기 → 정책 → 본문 → 값.
+///
+/// 느린 클라이언트는 워커 하나만 묶고, 그마저도 소켓 타임아웃(머리 5초·본문 30초)에 끊긴다.
+#[allow(clippy::too_many_arguments)]
+fn http_body_worker(
+    raw: &Receiver<std::net::TcpStream>,
+    want_path: &str,
+    policy: &AccessPolicy,
+    tx: &Sender<HttpIncoming>,
+    inflight: &AtomicUsize,
+    ready: &AtomicBool,
+) {
+    for stream in raw.iter() {
+        // 이 연결을 어떻게 끝내든 처리 중 수는 줄어든다.
         let _guard = InflightGuard(inflight);
         let at = Instant::now();
-        let url = request.url().to_owned();
-        let query = url.split_once('?').map(|(_, q)| q.to_owned()).unwrap_or_default();
 
-        // 길이를 모르는(청크) 본문도 상한에서 끊는다.
-        let mut buf = Vec::new();
-        // `as_reader()` 는 `&mut dyn Read` 다. 점 호출은 trait object 로 역참조되어 `take` 를 못 쓰므로 UFCS 로 부른다.
-        let reader: &mut dyn Read = request.as_reader();
-        let read = std::io::Read::take(reader, MAX_HTTP_REQUEST_BYTES + 1).read_to_end(&mut buf);
-        if let Err(e) = read {
-            let _ = respond_json(request, 400, &format!("본문을 읽지 못했다: {e}"));
+        let mut request = match crate::httpd::Request::read_head(stream) {
+            Ok(r) => r,
+            Err((sock, e)) => {
+                crate::httpd::respond_raw(sock, e.status, &e.message);
+                continue;
+            }
+        };
+
+        let got_path = normalize_path(request.path());
+        if got_path != want_path {
+            let _ = respond_json(
+                request,
+                404,
+                &format!("{got_path} 은 이 서버가 받는 경로가 아니다 (받는 경로: {want_path})"),
+            );
             continue;
         }
-        if buf.len() as u64 > MAX_HTTP_REQUEST_BYTES {
+
+        // 누가 보냈는지부터 본다. 인증·출처 확인은 준비 상태보다 앞이다 —
+        // 아직 준비되지 않았다는 사실조차 아무에게나 알려 줄 이유가 없다.
+        let deny = policy.check(
+            request.header("origin"),
+            request.header("host"),
+            request.header("authorization"),
+            request.header("x-nl-token"),
+        );
+        if let Err((status, why)) = deny {
+            let _ = respond_json(request, status, &why);
+            continue;
+        }
+
+        // 모델이 아직 안 올라왔다. 물고 있지 말고 곧바로 돌려보낸다 — 클라이언트가 재시도하면 된다.
+        if !ready.load(Ordering::SeqCst) {
+            let _ = respond_json(request, 503, MODEL_LOADING);
+            continue;
+        }
+
+        let method = request.method().to_owned();
+        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH") {
+            let _ = respond_json(request, 405, &format!("{method} 은 지원하지 않는다 (GET, POST, PUT, PATCH 만)"));
+            continue;
+        }
+
+        // 길이를 알려 줬으면 읽기 전에 거른다.
+        if request.declared_len().is_some_and(|n| n > MAX_HTTP_REQUEST_BYTES) {
             let _ = respond_json(request, 413, &format!("본문이 너무 크다 (상한 {MAX_HTTP_REQUEST_BYTES} 바이트)"));
             continue;
         }
 
-        let content_type = header_value(&request, "content-type").unwrap_or_default();
-        let value = match body_to_value(&content_type, buf, &query) {
+        let query = request.query().to_owned();
+        let content_type = request.header("content-type").unwrap_or_default().to_owned();
+        let body = match request.read_body(MAX_HTTP_REQUEST_BYTES) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = respond_json(request, e.status, &e.message);
+                continue;
+            }
+        };
+
+        let value = match body_to_value(&content_type, body, &query) {
             Ok(v) => v,
             Err(msg) => {
                 let _ = respond_json(request, 400, &msg);
@@ -670,15 +665,6 @@ fn http_body_worker(raw: &Receiver<tiny_http::Request>, tx: &Sender<HttpIncoming
             }
         }
     }
-}
-
-/// 요청 헤더 하나를 소문자 이름으로 찾는다.
-fn header_value(request: &tiny_http::Request, name: &str) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str().to_owned())
 }
 
 /// `image/png; charset=x` → `image/png`.
@@ -1268,7 +1254,8 @@ fn run_loop(
         match start_http_server(bind, path, effective) {
             Ok(srv) => {
                 let _ = etx.send(RunnerEvent::Log(format!(
-                    "HTTP 서버 http://{bind}{} 열림 ({})",
+                    "HTTP 서버 http://{}{} 열림 ({})",
+                    srv.local_addr(),
                     normalize_path(path),
                     if effective.is_some_and(|t| !t.trim().is_empty()) { "토큰 필요" } else { "루프백 전용" }
                 )));
@@ -2370,6 +2357,8 @@ mod tests {
     static ARMED_OFF: AtomicBool = AtomicBool::new(false);
 
     use super::*;
+    // 소켓을 직접 다루는 시험이 여럿이라 여기서만 쓴다 (본 코드의 읽기는 `httpd` 가 한다).
+    use std::io::Read as _;
     use nl_core::pipeline::{PNode, PNodeKind};
     use nl_core::{ModelDef, Sink, Source};
 
@@ -3846,6 +3835,232 @@ mod tests {
             std::env::remove_var(format!("{HTTP_TOKEN_ENV_PREFIX}{port}"));
             std::env::remove_var(HTTP_TOKEN_ENV);
         }
+    }
+
+    // ── M2: 느린 클라이언트와 헤더 폭탄 ──
+
+    /// 서버를 하나 띄우고 그 주소를 돌려준다 (`HttpServer → HttpReply`).
+    fn serve_echo(tag: &str) -> (RunnerHandle, String) {
+        let addr = free_addr();
+        let mut p = Pipeline::new("echo");
+        p.tick_hz = 120.0;
+        let server = http_server_node(&mut p, &addr, "/infer");
+        let reply = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::HttpReply { server } }, [1.0, 0.0]));
+        p.add_link(server, reply).unwrap();
+        let h = Runner::new(Project::new("p"), p, tmp_dir(tag), DevicePref::Cpu).start().unwrap();
+        wait_server_up(&h);
+        assert!(
+            wait_for(&h, Duration::from_secs(5), |e| matches!(e, RunnerEvent::Log(m) if m.contains("요청 받기 시작")))
+                .is_some(),
+            "준비 완료 로그가 오지 않았다"
+        );
+        (h, addr)
+    }
+
+    /// 응답의 상태 줄만 읽는다.
+    fn status_line(raw: &[u8]) -> String {
+        String::from_utf8_lossy(raw).lines().next().unwrap_or_default().to_owned()
+    }
+
+    /// 헤더를 1바이트씩 천천히 보내는 클라이언트는 타임아웃으로 끊기고,
+    /// 그동안에도 다른 요청은 정상으로 처리된다.
+    #[test]
+    fn a_slowloris_client_is_cut_off_and_others_keep_working() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("slowloris");
+
+        // 느린 연결: 요청 줄만 보내고 헤더를 아주 천천히 흘린다.
+        let mut slow = std::net::TcpStream::connect(&addr).expect("붙지 못했다");
+        slow.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        slow.write_all(b"POST /infer HTTP/1.1\r\n").unwrap();
+        slow.flush().unwrap();
+        let slow_started = Instant::now();
+        // 헤더를 1바이트씩 아주 천천히. 머리 전체 마감(5초)보다 훨씬 오래 걸리게 잡는다 —
+        // 읽기 한 번은 언제나 제때 끝나므로, 마감이 없으면 이 연결은 영원히 산다.
+        let dribble = std::thread::spawn(move || {
+            for b in "X-Slow: ".bytes().chain(std::iter::repeat_n(b'a', 60)) {
+                if slow.write_all(&[b]).is_err() || slow.flush().is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            let mut raw = Vec::new();
+            let _ = slow.read_to_end(&mut raw);
+            raw
+        });
+
+        // 느린 연결이 살아 있는 동안 정상 요청이 통과해야 한다.
+        std::thread::sleep(Duration::from_millis(300));
+        let res = crate::http::call(
+            "POST",
+            &format!("http://{addr}/infer"),
+            &BTreeMap::new(),
+            Some("[1,2]"),
+            Duration::from_secs(5),
+        )
+        .expect("느린 연결 때문에 정상 요청이 막혔다");
+        assert_eq!(res.status, 200, "본문: {}", res.body);
+
+        // 느린 쪽은 머리 마감(5초)에 끊긴다. 흘리기만 했다면 27초가 걸렸을 분량이다.
+        let raw = dribble.join().expect("느린 클라이언트 스레드");
+        let elapsed = slow_started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "느린 연결이 끊기지 않았다 ({elapsed:?}) — 머리 마감이 동작하지 않는다"
+        );
+        let line = status_line(&raw);
+        assert!(
+            line.contains("408") || line.contains("431") || line.contains("400"),
+            "끊긴 이유가 분명하지 않다: {line:?}"
+        );
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// 헤더를 끝없이 보내면 431 로 끊는다 — 메모리가 늘지 않는다.
+    #[test]
+    fn a_header_bomb_is_cut_with_431() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("headerbomb");
+
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        sock.write_all(b"POST /infer HTTP/1.1\r\nHost: 127.0.0.1\r\n").unwrap();
+        // 상한(16KB)을 확실히 넘기도록 넉넉히 보낸다. 중간에 끊기면 그것이 정상이다.
+        for i in 0..4000 {
+            let line = format!("X-Pad-{i}: {}\r\n", "a".repeat(64));
+            if sock.write_all(line.as_bytes()).is_err() {
+                break;
+            }
+        }
+        let _ = sock.flush();
+        let mut raw = Vec::new();
+        let _ = sock.read_to_end(&mut raw);
+        let line = status_line(&raw);
+        assert!(line.contains("431"), "헤더 폭탄이 431 로 끊기지 않았다: {line}");
+
+        // 서버는 멀쩡하다.
+        let res = crate::http::call(
+            "POST",
+            &format!("http://{addr}/infer"),
+            &BTreeMap::new(),
+            Some("[3]"),
+            Duration::from_secs(5),
+        )
+        .expect("헤더 폭탄 뒤 서버가 죽었다");
+        assert_eq!(res.status, 200);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// 헤더 **개수**가 많아도 끊는다.
+    #[test]
+    fn too_many_headers_are_cut_with_431() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("manyheaders");
+
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        sock.write_all(b"POST /infer HTTP/1.1\r\n").unwrap();
+        // 짧은 헤더를 상한(64개)보다 많이 — 바이트 예산에는 걸리지 않는 크기다.
+        for i in 0..200 {
+            let _ = sock.write_all(format!("X-{i}: 1\r\n").as_bytes());
+        }
+        let _ = sock.flush();
+        let mut raw = Vec::new();
+        let _ = sock.read_to_end(&mut raw);
+        assert!(status_line(&raw).contains("431"), "{}", status_line(&raw));
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// 본문이 있는 요청에 `Content-Length` 가 없으면 411.
+    #[test]
+    fn a_post_without_content_length_is_411() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("nolength");
+
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        sock.write_all(b"POST /infer HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let _ = sock.flush();
+        let mut raw = Vec::new();
+        let _ = sock.read_to_end(&mut raw);
+        assert!(status_line(&raw).contains("411"), "{}", status_line(&raw));
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// 청크 전송도 받는다.
+    #[test]
+    fn a_chunked_body_is_accepted() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("chunked");
+
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        sock.write_all(
+            b"POST /infer HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+              Transfer-Encoding: chunked\r\n\r\n",
+        )
+        .unwrap();
+        // `[1,2]` 를 두 조각으로.
+        sock.write_all(b"3\r\n[1,\r\n2\r\n2]\r\n0\r\n\r\n").unwrap();
+        let _ = sock.flush();
+        let mut raw = Vec::new();
+        let _ = sock.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert!(text.starts_with("HTTP/1.1 200"), "{}", &text[..text.len().min(200)]);
+        assert!(text.trim_end().ends_with("[1,2]"), "본문이 다르다: {text}");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// HTTP/1.0 요청도 받는다.
+    #[test]
+    fn http_1_0_requests_are_accepted() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("http10");
+
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        sock.write_all(b"POST /infer HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n[1]")
+            .unwrap();
+        let _ = sock.flush();
+        let mut raw = Vec::new();
+        let _ = sock.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert!(text.starts_with("HTTP/1.1 200"), "{}", &text[..text.len().min(200)]);
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
+    }
+
+    /// 응답에는 언제나 보안 헤더와 `Connection: close` 가 붙는다.
+    #[test]
+    fn responses_carry_the_expected_headers() {
+        use std::io::Write as _;
+        let (h, addr) = serve_echo("headers");
+
+        let mut sock = std::net::TcpStream::connect(&addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        sock.write_all(b"POST /infer HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n[1]")
+            .unwrap();
+        let _ = sock.flush();
+        let mut raw = Vec::new();
+        let _ = sock.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        for want in ["x-content-type-options: nosniff", "connection: close", "content-length:", "content-type:"] {
+            assert!(text.contains(want), "{want} 가 없다:\n{text}");
+        }
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(3)));
     }
 
     #[test]

@@ -21,7 +21,10 @@ tungstenite.workspace = true
 sysinfo.workspace = true
 # 녹화 meta.json 의 시작 시각(RFC 3339)
 chrono.workspace = true
-# 인바운드 HTTP 서버 (`Source::HttpServer`) + 시험용 로컬 서버
+
+[dev-dependencies]
+# `http.rs` 의 왕복 시험이 띄우는 로컬 서버. 인바운드 서버(`Source::HttpServer`)는
+# `src/httpd.rs` 가 std 만으로 직접 구현하므로 일반 의존성에는 없다.
 tiny_http.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
