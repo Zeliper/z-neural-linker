@@ -98,6 +98,30 @@ pub struct DatasetInfo {
     pub target_shape: Vec<usize>,
     #[serde(default)]
     pub classes: Vec<String>,
+    /// `classes` 중 샘플이 하나도 없는 클래스의 인덱스 (오름차순).
+    ///
+    /// 녹화 폴더는 라벨을 `0..=max` 로 잡기 때문에 중간이 비어 있을 수 있고, 이미지 폴더는 빈 클래스
+    /// 폴더가 남아 있을 수 있다. 비어 있는 클래스는 학습되지 않으므로 UI 가 경고할 수 있게 알린다.
+    #[serde(default)]
+    pub empty_classes: Vec<usize>,
+}
+
+impl DatasetInfo {
+    /// 비어 있는 클래스가 있으면 사람이 읽을 경고 문장.
+    pub fn empty_class_warning(&self) -> Option<String> {
+        if self.empty_classes.is_empty() {
+            return None;
+        }
+        let names: Vec<String> = self
+            .empty_classes
+            .iter()
+            .map(|&i| match self.classes.get(i) {
+                Some(n) => format!("{i}({n})"),
+                None => i.to_string(),
+            })
+            .collect();
+        Some(format!("샘플이 하나도 없는 클래스: {} — 이 클래스는 학습되지 않습니다", names.join(", ")))
+    }
 }
 
 impl DatasetSpec {

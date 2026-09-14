@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,12 @@ static CACHE: OnceLock<Vec<(DeviceInfo, Handle)>> = OnceLock::new();
 
 fn cache() -> &'static [(DeviceInfo, Handle)] {
     CACHE.get_or_init(build_list)
+}
+
+/// 이미 만들어진 장치 목록만 본다 (없으면 `None`). 어댑터 열거는 수백 ms 걸릴 수 있어
+/// UI 스레드에서 강제로 만들면 안 된다.
+fn cache_if_ready() -> Option<&'static [(DeviceInfo, Handle)]> {
+    CACHE.get().map(|v| v.as_slice())
 }
 
 fn cpu_info() -> DeviceInfo {
@@ -347,37 +354,76 @@ fn concrete_entry(pref: DevicePref) -> Result<(DeviceInfo, Handle), String> {
 
 // ───────────────────────────── 선택 ─────────────────────────────
 
+/// `Auto` 가 고른 구체 장치. 프로세스 수명 동안 한 번만 정해진다.
+static AUTO_PICK: OnceLock<DevicePref> = OnceLock::new();
+
+/// `Auto` 후보 탐색이 실제로 돈 횟수 (테스트가 "장치당 경고 한 번" 을 확인한다).
+static AUTO_DECISIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// `Auto` 의 결정. 후보를 순서대로 검사하고 **딱 한 번만** 고른다.
+///
+/// `OnceLock::get_or_init` 이라 여러 스레드가 동시에 불러도 탐색은 한 번이고, 따라서 건너뛴 장치에 대한
+/// `log::warn!` 도 장치당 한 번만 나간다.
+fn auto_pick() -> DevicePref {
+    *AUTO_PICK.get_or_init(|| {
+        AUTO_DECISIONS.fetch_add(1, Ordering::SeqCst);
+        for p in auto_candidates() {
+            match probe(p) {
+                Ok(t) => {
+                    log::info!("자동 장치 선택: {} 검사 통과 ({:.0} ms)", label_of(p), t.as_secs_f64() * 1000.0);
+                    return p;
+                }
+                Err(e) => log::warn!("자동 장치 선택: {} 를 건너뜁니다 — {e}", label_of(p)),
+            }
+        }
+        log::info!("자동 장치 선택: 쓸 만한 GPU 가 없어 CPU 를 씁니다");
+        DevicePref::Cpu
+    })
+}
+
 /// `Auto` = 이산 GPU → 통합 GPU → CPU 순서로 **`probe` 를 통과하는 첫 장치**.
 /// 드라이버가 깨진 GPU(예: 파이프라인 생성 실패)는 건너뛴다. 소프트웨어 래스터라이저(`OtherGpu`)는
-/// CPU 보다 느려 후보에 넣지 않는다.
+/// CPU 보다 느려 후보에 넣지 않는다. 결정과 그 과정의 로그는 프로세스당 한 번뿐이다.
 ///
 /// 명시적인 `Cpu`/`Gpu{index}` 는 검사 없이 그대로 존중한다 — 사용자가 고른 장치를 말없이 바꾸지 않는다.
 /// 그 장치가 실제로 죽으면 `train::start` 나 `Session::load` 가 오류로 알린다.
 /// 없는 `Gpu{index}` 만 CPU 로 떨어진다.
 ///
-/// 첫 `Auto` 호출은 GPU 셰이더 컴파일 때문에 수 초에서 수십 초가 걸릴 수 있다 (그 뒤로는 캐시).
+/// **UI 스레드에서 부르지 말 것.** 첫 `Auto` 호출은 GPU 셰이더 컴파일 때문에 수십 초가 걸릴 수 있다.
+/// 화면을 그리는 쪽은 [`resolve_cached`] 를 쓰고, 이 함수와 [`probe`] 는 백그라운드 스레드에서 부른다.
 pub fn resolve(pref: DevicePref) -> Resolved {
     let (info, _) = resolve_entry(pref);
     Resolved { pref: info.pref, info }
 }
 
+/// 이미 정해진 결과만 돌려준다 — 장치 열거도, 검사도, 스레드 생성도 하지 않는다.
+///
+/// 상태바처럼 매 프레임 도는 코드가 쓰라고 있는 함수다. 아직 아무것도 정해지지 않았으면 `None` 이니
+/// 백그라운드에서 [`resolve`] 나 [`probe`] 를 한 번 불러 준 뒤부터 값이 나온다.
+pub fn resolve_cached(pref: DevicePref) -> Option<Resolved> {
+    let list = cache_if_ready()?;
+    let target = match pref {
+        DevicePref::Auto => *AUTO_PICK.get()?,
+        other => other,
+    };
+    let pick = match target {
+        DevicePref::Gpu { index } => list.iter().find(|(d, _)| d.pref == DevicePref::Gpu { index }),
+        // Cpu 는 항상 첫 항목. Auto 는 위에서 구체값으로 바뀌었다.
+        _ => None,
+    };
+    let (info, _) = pick.unwrap_or(list.first()?);
+    Some(Resolved { pref: info.pref, info: info.clone() })
+}
+
 pub(crate) fn resolve_entry(pref: DevicePref) -> (DeviceInfo, Handle) {
     let list = cache();
-    let pick = match pref {
-        DevicePref::Cpu => None,
+    let target = match pref {
+        DevicePref::Auto => auto_pick(),
+        other => other,
+    };
+    let pick = match target {
         DevicePref::Gpu { index } => list.iter().find(|(d, _)| d.pref == DevicePref::Gpu { index }),
-        DevicePref::Auto => auto_candidates().into_iter().find(|p| {
-            match probe(*p) {
-                Ok(t) => {
-                    log::info!("자동 장치 선택: {} 검사 통과 ({:.0} ms)", label_of(*p), t.as_secs_f64() * 1000.0);
-                    true
-                }
-                Err(e) => {
-                    log::warn!("자동 장치 선택: {} 를 건너뜁니다 — {e}", label_of(*p));
-                    false
-                }
-            }
-        }).and_then(|p| list.iter().find(|(d, _)| d.pref == p)),
+        _ => None,
     };
     let (info, handle) = pick.unwrap_or(&list[0]);
     (info.clone(), handle.clone())
@@ -400,13 +446,21 @@ fn label_of(pref: DevicePref) -> String {
 
 /// GUI 콤보/툴팁용 한 줄 설명: 이름 · 백엔드 · (있으면) 검사 결과.
 ///
-/// **검사를 새로 돌리지 않는다** — `probe_cached` 만 본다. UI 스레드가 20 초 멈추면 안 되기 때문이다.
-/// 검사 결과를 보이고 싶으면 백그라운드에서 `probe(pref)` 를 먼저 부르면 된다.
+/// **아무것도 새로 하지 않는다** — 장치 열거도 검사도 강제하지 않고 이미 있는 것만 읽는다.
+/// UI 스레드가 멈추면 안 되기 때문이다. 준비되기 전에는 "준비 중"/"미검사" 로 나오므로,
+/// 백그라운드에서 [`resolve`] 나 [`probe`] 를 한 번 불러 준 뒤부터 온전한 설명이 나온다.
 pub fn describe(pref: DevicePref) -> String {
     if pref == DevicePref::Auto {
-        return "자동 — 이산 GPU → 통합 GPU → CPU 중 실제로 동작하는 첫 장치".into();
+        return match AUTO_PICK.get() {
+            Some(p) => format!("자동 → {}", describe(*p)),
+            None => "자동 — 이산 GPU → 통합 GPU → CPU 중 실제로 동작하는 첫 장치".into(),
+        };
     }
-    let Some((info, _)) = cache().iter().find(|(d, _)| d.pref == pref) else {
+    let Some(list) = cache_if_ready() else {
+        // 아직 어댑터를 훑지 않았다 — UI 스레드에서 강제로 훑지 않는다.
+        return format!("{} — 장치 목록 준비 중", pref.label());
+    };
+    let Some((info, _)) = list.iter().find(|(d, _)| d.pref == pref) else {
         return format!("{} — 없는 장치", pref.label());
     };
     let mut s = format!("{} · {}", info.name, info.backend);
@@ -461,6 +515,40 @@ mod tests {
     #[test]
     fn describe_explains_auto_without_probing() {
         assert!(describe(DevicePref::Auto).starts_with("자동"));
+        // 목록이 준비된 뒤에도 검사를 강제하지 않는다.
+        let _ = enumerate();
+        let d = describe(DevicePref::Cpu);
+        assert!(d.contains("CPU"), "{d}");
+    }
+
+    #[test]
+    fn resolve_cached_never_probes_and_matches_resolve() {
+        // 구체 장치는 목록만 있으면 바로 나온다.
+        let _ = enumerate();
+        let cached = resolve_cached(DevicePref::Cpu).expect("CPU 는 목록에 항상 있다");
+        assert_eq!(cached, resolve(DevicePref::Cpu));
+        assert_eq!(cached.pref, DevicePref::Cpu);
+
+        // 없는 GPU 는 resolve 와 똑같이 CPU 로 떨어진다.
+        assert_eq!(resolve_cached(DevicePref::Gpu { index: 99 }), Some(resolve(DevicePref::Gpu { index: 99 })));
+    }
+
+    #[test]
+    fn auto_is_decided_once_so_warnings_do_not_repeat() {
+        let before = AUTO_DECISIONS.load(Ordering::SeqCst);
+        let first = resolve(DevicePref::Auto);
+        let after_first = AUTO_DECISIONS.load(Ordering::SeqCst);
+        assert!(after_first <= before + 1, "탐색이 두 번 이상 돌았습니다");
+
+        // 몇 번을 더 불러도 탐색(=경고 로그)은 다시 돌지 않는다.
+        for _ in 0..5 {
+            assert_eq!(resolve(DevicePref::Auto), first);
+        }
+        assert_eq!(AUTO_DECISIONS.load(Ordering::SeqCst), after_first, "Auto 탐색이 반복되었습니다");
+
+        // 결정된 뒤에는 비차단 조회가 같은 답을 준다.
+        assert_eq!(resolve_cached(DevicePref::Auto), Some(first));
+        assert!(describe(DevicePref::Auto).starts_with("자동 → "));
     }
 
     #[test]

@@ -18,6 +18,28 @@ pub struct Sample {
 /// 합성 데이터의 고정 시드 — `DataSource::Synthetic` 에는 시드 필드가 없고, 같은 스펙이면 같은 데이터여야 한다.
 const SYNTHETIC_SEED: u64 = 0x5EED_1234;
 
+/// CSV 타깃을 분류로 볼 수 있는 최대 클래스 수. 넘으면 회귀로 본다.
+const CSV_MAX_INFERRED_CLASSES: usize = 256;
+
+/// 클래스별 샘플 수를 세어 하나도 없는 클래스의 인덱스를 돌려준다 (오름차순).
+fn empty_class_indices(class_count: usize, targets: impl Iterator<Item = usize>) -> Vec<usize> {
+    let mut seen = vec![false; class_count];
+    for t in targets {
+        if let Some(slot) = seen.get_mut(t) {
+            *slot = true;
+        }
+    }
+    seen.iter().enumerate().filter(|(_, &v)| !v).map(|(i, _)| i).collect()
+}
+
+/// 샘플들의 타깃을 클래스 인덱스로 읽는다 (타깃이 스칼라 1 개일 때만 의미가 있다).
+fn target_classes(samples: &[Sample]) -> impl Iterator<Item = usize> + '_ {
+    samples.iter().filter_map(|s| {
+        let v = *s.target.data.first()?;
+        (v >= 0.0 && v.fract() == 0.0).then_some(v as usize)
+    })
+}
+
 /// 소스를 훑어 샘플 수·형상·클래스를 알아낸다 (데이터 뷰 "스캔", 학습 전 점검).
 ///
 /// 이미지 소스는 파일을 전부 디코드하지 않고 개수만 세고 첫 장으로 형상을 잡는다.
@@ -62,11 +84,13 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
     match source {
         DataSource::Synthetic { kind, samples } => {
             let (i, t, classes) = kind.shapes();
+            // 합성 데이터는 규칙상 모든 클래스가 나오므로 빈 클래스가 없다.
             Ok(DatasetInfo {
                 samples: *samples,
                 input_shape: i,
                 target_shape: t,
                 classes: classes.map(|c| (0..c).map(|k| k.to_string()).collect()).unwrap_or_default(),
+                empty_classes: vec![],
             })
         }
         DataSource::ImageFolder { path } => {
@@ -75,9 +99,13 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
             let mut samples = 0usize;
             let mut first: Option<PathBuf> = None;
             let mut names = Vec::new();
-            for (name, cdir) in &classes {
+            let mut empty_classes = Vec::new();
+            for (i, (name, cdir)) in classes.iter().enumerate() {
                 names.push(name.clone());
                 let files = image_files(cdir)?;
+                if files.is_empty() {
+                    empty_classes.push(i);
+                }
                 if first.is_none() {
                     first = files.first().cloned();
                 }
@@ -94,7 +122,7 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
                     None => vec![],
                 },
             };
-            Ok(DatasetInfo { samples, input_shape, target_shape: vec![1], classes: names })
+            Ok(DatasetInfo { samples, input_shape, target_shape: vec![1], classes: names, empty_classes })
         }
         _ => {
             // CSV·녹화는 전부 읽어야 정확하다 (행/줄 수 기준이라 비용이 크지 않다).
@@ -169,11 +197,14 @@ fn synthetic(kind: SyntheticKind, n: usize) -> Result<(Vec<Sample>, DatasetInfo)
         });
     }
 
+    let names: Vec<String> = classes.map(|c| (0..c).map(|k| k.to_string()).collect()).unwrap_or_default();
+    let empty_classes = empty_class_indices(names.len(), target_classes(&out));
     let info = DatasetInfo {
         samples: out.len(),
         input_shape: in_shape,
         target_shape,
-        classes: classes.map(|c| (0..c).map(|k| k.to_string()).collect()).unwrap_or_default(),
+        classes: names,
+        empty_classes,
     };
     Ok((out, info))
 }
@@ -247,13 +278,41 @@ fn load_csv(
     if out.is_empty() {
         bail!("CSV 에서 읽은 행이 없습니다: {}", path.display());
     }
+    let (classes, empty_classes) = csv_classes(&out, tg_idx.len());
     let info = DatasetInfo {
         samples: out.len(),
         input_shape: vec![in_idx.len()],
         target_shape: vec![tg_idx.len()],
-        classes: vec![],
+        classes,
+        empty_classes,
     };
     Ok((out, info))
+}
+
+/// CSV 타깃을 분류로 볼 수 있는지 추론한다.
+///
+/// 타깃이 **한 열**이고 값이 전부 음이 아닌 정수이며 최대값이 작을 때만 분류로 본다
+/// (클래스 `0..=max`). 그 밖에는 회귀로 보고 클래스를 비워 둔다 — 실수 타깃이나 여러 열은
+/// 분류가 아니다. 분류로 보이면 중간에 빠진 클래스도 함께 알린다.
+fn csv_classes(out: &[Sample], target_cols: usize) -> (Vec<String>, Vec<usize>) {
+    if target_cols != 1 {
+        return (vec![], vec![]);
+    }
+    let mut max = 0usize;
+    for s in out {
+        match s.target.data.first() {
+            Some(&v) if v >= 0.0 && v.fract() == 0.0 && (v as usize) < CSV_MAX_INFERRED_CLASSES => {
+                max = max.max(v as usize)
+            }
+            _ => return (vec![], vec![]),
+        }
+    }
+    if max == 0 {
+        return (vec![], vec![]); // 전부 0 이면 분류라고 단정할 수 없다
+    }
+    let names: Vec<String> = (0..=max).map(|i| i.to_string()).collect();
+    let empty = empty_class_indices(names.len(), target_classes(out));
+    (names, empty)
 }
 
 // ───────────────────────────── 이미지 ─────────────────────────────
@@ -354,11 +413,13 @@ fn load_image_folder(
     if out.is_empty() {
         bail!("이미지 폴더에서 읽은 파일이 없습니다: {}", dir.display());
     }
+    let empty_classes = empty_class_indices(names.len(), target_classes(&out));
     let info = DatasetInfo {
         samples: out.len(),
         input_shape: shape.unwrap_or_default(),
         target_shape: vec![1],
         classes: names,
+        empty_classes,
     };
     Ok((out, info))
 }
@@ -407,11 +468,15 @@ fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Re
     if out.is_empty() {
         bail!("녹화 폴더에서 읽은 프레임이 없습니다: {}", dir.display());
     }
+    // 라벨은 0..=max 로 잡되(연속 인덱스 유지), 프레임이 하나도 없는 라벨은 따로 알린다.
+    let names: Vec<String> = (0..=max_label).map(|i| i.to_string()).collect();
+    let empty_classes = empty_class_indices(names.len(), target_classes(&out));
     let info = DatasetInfo {
         samples: out.len(),
         input_shape: shape.unwrap_or_default(),
         target_shape: vec![1],
-        classes: (0..=max_label).map(|i| i.to_string()).collect(),
+        classes: names,
+        empty_classes,
     };
     Ok((out, info))
 }
@@ -493,6 +558,82 @@ mod tests {
         assert_eq!(scanned.input_shape, vec![1, 4, 6]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recorded_folder_reports_labels_with_no_frames() {
+        let dir = tmp("recorded-gap");
+        let frames = dir.join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        write_png(&frames.join("a.png"), 4, 4, 0);
+        write_png(&frames.join("b.png"), 4, 4, 64);
+        // 라벨 0 과 3 만 쓰인다 → 1, 2 는 비어 있다.
+        std::fs::write(
+            dir.join("labels.jsonl"),
+            "{\"frame\":\"a.png\",\"label\":0}\n{\"frame\":\"b.png\",\"label\":3}\n",
+        )
+        .unwrap();
+
+        let (_, info) = load_recorded(&dir, None, None).unwrap();
+        assert_eq!(info.classes, vec!["0", "1", "2", "3"], "클래스는 0..=max 를 유지해야 한다");
+        assert_eq!(info.empty_classes, vec![1, 2]);
+        let w = info.empty_class_warning().expect("경고 문장");
+        assert!(w.contains('1') && w.contains('2'), "{w}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn image_folder_reports_empty_class_dirs() {
+        let dir = tmp("imgfolder-empty");
+        for name in ["cat", "dog", "ghost"] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        write_png(&dir.join("cat/1.png"), 4, 4, 0);
+        write_png(&dir.join("dog/1.png"), 4, 4, 90);
+        // ghost 폴더는 비어 있다.
+
+        let (_, loaded) = load_image_folder(&dir, None, None).unwrap();
+        assert_eq!(loaded.classes, vec!["cat", "dog", "ghost"]);
+        assert_eq!(loaded.empty_classes, vec![2]);
+
+        // scan 도 파일을 열지 않고 같은 답을 내야 한다.
+        let scanned =
+            scan_source(&DataSource::ImageFolder { path: dir.to_string_lossy().into() }, Path::new("."), None)
+                .unwrap();
+        assert_eq!(scanned.empty_classes, vec![2]);
+        assert_eq!(scanned.samples, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn csv_infers_classes_only_when_targets_look_categorical() {
+        let dir = tmp("csv-classes");
+        let p = dir.join("c.csv");
+
+        // 정수 라벨 0, 1, 3 → 클래스 0..=3, 2 는 비어 있다.
+        std::fs::write(&p, "x,y\n0.5,0\n0.6,1\n0.7,3\n").unwrap();
+        let (_, info) = load_csv(&p, &["x".into()], &["y".into()], true, None).unwrap();
+        assert_eq!(info.classes, vec!["0", "1", "2", "3"]);
+        assert_eq!(info.empty_classes, vec![2]);
+
+        // 실수 타깃은 회귀 — 클래스를 만들지 않는다.
+        std::fs::write(&p, "x,y\n0.5,1.5\n0.6,2.5\n").unwrap();
+        let (_, info) = load_csv(&p, &["x".into()], &["y".into()], true, None).unwrap();
+        assert!(info.classes.is_empty() && info.empty_classes.is_empty());
+
+        // 타깃이 여러 열이어도 회귀.
+        std::fs::write(&p, "x,a,b\n0.5,0,1\n0.6,1,0\n").unwrap();
+        let (_, info) = load_csv(&p, &["x".into()], &["a".into(), "b".into()], true, None).unwrap();
+        assert!(info.classes.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn synthetic_has_no_empty_classes() {
+        for kind in SyntheticKind::ALL {
+            let (_, info) = synthetic(kind, 200).unwrap();
+            assert!(info.empty_classes.is_empty(), "{kind:?} 에 빈 클래스: {:?}", info.empty_classes);
+        }
     }
 
     #[test]

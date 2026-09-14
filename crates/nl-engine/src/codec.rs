@@ -27,6 +27,8 @@ enum Mid {
     Img { c: usize, h: usize, w: usize, data: Vec<f32> },
     Vec { shape: Vec<usize>, data: Vec<f32> },
     Json(serde_json::Value),
+    /// `Tokenize` 가 정수 인덱스로 바꿔 주기를 기다리는 문자열.
+    Text(String),
 }
 
 impl Mid {
@@ -35,6 +37,7 @@ impl Mid {
             Mid::Img { c, h, w, data } => Ok((vec![c, h, w], data)),
             Mid::Vec { shape, data } => Ok((shape, data)),
             Mid::Json(_) => bail!("JSON 값은 JsonPointer 로 숫자를 꺼낸 뒤에야 텐서가 됩니다"),
+            Mid::Text(_) => bail!("Text 값은 Tokenize 로 인덱스를 만든 뒤에야 텐서가 됩니다"),
         }
     }
 }
@@ -145,7 +148,12 @@ fn start(field: &Field, value: &Value) -> Result<Mid> {
             Value::Json(j) => Ok(Mid::Json(j.clone())),
             other => bail!("Json 필드에는 Json 값이 필요합니다 (지금 {})", kind_of(other)),
         },
-        FieldKind::Text => bail!("Text 필드는 모델 입력으로 인코딩할 수 없습니다"),
+        FieldKind::Text => match value {
+            Value::Text(t) => Ok(Mid::Text(t.clone())),
+            Value::Number(n) => Ok(Mid::Text(n.to_string())),
+            Value::Json(serde_json::Value::String(t)) => Ok(Mid::Text(t.clone())),
+            other => bail!("Text 필드에는 Text 값이 필요합니다 (지금 {})", kind_of(other)),
+        },
     }
 }
 
@@ -320,8 +328,31 @@ fn apply_encode(mid: Mid, t: &Transform) -> Result<Mid> {
             }
             Ok(rebuild(shape, data))
         }
+        Transform::Tokenize { vocab, max_len } => {
+            let Mid::Text(text) = mid else {
+                bail!("Tokenize 는 Text 필드에만 쓸 수 있습니다");
+            };
+            Ok(Mid::Vec { shape: vec![*max_len], data: tokenize(&text, vocab, *max_len)? })
+        }
         Transform::MapLabel => bail!("MapLabel 은 디코드 전용입니다"),
     }
+}
+
+/// 문자 단위 토큰화. 인덱스는 1 부터 (0 = 패딩 겸 미지 문자), 길이는 `max_len` 으로 맞춘다.
+fn tokenize(text: &str, vocab: &str, max_len: usize) -> Result<Vec<f32>> {
+    if vocab.is_empty() {
+        bail!("Tokenize 의 vocab 이 비어 있습니다");
+    }
+    if max_len == 0 {
+        bail!("Tokenize 의 max_len 은 1 이상이어야 합니다");
+    }
+    let table: Vec<char> = vocab.chars().collect();
+    let mut out = vec![0.0f32; max_len];
+    for (slot, ch) in out.iter_mut().zip(text.chars()) {
+        // 없는 문자는 0 (미지) 으로 둔다.
+        *slot = table.iter().position(|&v| v == ch).map_or(0.0, |i| (i + 1) as f32);
+    }
+    Ok(out)
 }
 
 fn rebuild(shape: Vec<usize>, data: Vec<f32>) -> Mid {
@@ -414,6 +445,7 @@ fn apply_decode(cur: Dec, t: &Transform, field: &Field) -> Result<Dec> {
             bail!("이미지 변환({t:?})은 디코드에 쓸 수 없습니다")
         }
         Transform::JsonPointer { .. } => bail!("JsonPointer 는 인코드 전용입니다"),
+        Transform::Tokenize { .. } => bail!("Tokenize 는 인코드 전용입니다"),
     })
 }
 
@@ -535,6 +567,47 @@ mod tests {
         let t = encode(&f, &Value::Json(j)).unwrap();
         assert_eq!(t.shape, vec![1, 3]);
         assert_eq!(t.data, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn text_tokenizes_into_a_padded_index_tensor() {
+        let mut f = Field::new("t", FieldKind::Text);
+        f.encode = vec![Transform::Tokenize { vocab: "abc".into(), max_len: 5 }];
+        // 인덱스는 1 부터, 없는 문자('z')와 남는 자리는 0.
+        let t = encode(&f, &Value::Text("cabz".into())).unwrap();
+        assert_eq!(t.shape, vec![1, 5]);
+        assert_eq!(t.data, vec![3.0, 1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(f.tensor_shape(), Some(vec![5]), "형상 계산이 Tokenize 를 반영해야 한다");
+
+        // 긴 문자열은 잘린다.
+        let t = encode(&f, &Value::Text("aaaaaaa".into())).unwrap();
+        assert_eq!(t.data, vec![1.0; 5]);
+    }
+
+    #[test]
+    fn text_without_tokenize_is_rejected() {
+        let f = Field::new("t", FieldKind::Text);
+        assert_eq!(f.tensor_shape(), None);
+        let e = encode(&f, &Value::Text("hi".into())).unwrap_err().to_string();
+        assert!(e.contains("Tokenize"), "{e}");
+    }
+
+    #[test]
+    fn tokenize_rejects_bad_settings_and_wrong_fields() {
+        let mut f = Field::new("t", FieldKind::Text);
+        f.encode = vec![Transform::Tokenize { vocab: String::new(), max_len: 4 }];
+        assert!(encode(&f, &Value::Text("x".into())).is_err(), "빈 vocab");
+
+        f.encode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 0 }];
+        assert!(encode(&f, &Value::Text("x".into())).is_err(), "max_len 0");
+
+        let mut g = Field::new("v", FieldKind::Vector { len: 2 });
+        g.encode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 2 }];
+        assert!(encode(&g, &Value::Numbers(vec![1.0, 2.0])).is_err(), "Text 가 아닌 필드");
+
+        let mut h = Field::new("t", FieldKind::Text);
+        h.decode = vec![Transform::Tokenize { vocab: "ab".into(), max_len: 2 }];
+        assert!(decode(&h, &HostTensor::new(vec![1, 2], vec![1.0, 2.0])).is_err(), "디코드 전용 아님");
     }
 
     #[test]

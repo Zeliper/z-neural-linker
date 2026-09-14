@@ -799,6 +799,7 @@ pub fn transform_palette() -> Vec<Transform> {
         Transform::Threshold { value: 0.5 },
         Transform::MapLabel,
         Transform::JsonPointer { pointer: "/value".into() },
+        Transform::Tokenize { vocab: "abcdefghijklmnopqrstuvwxyz ".into(), max_len: 32 },
     ]
 }
 
@@ -815,6 +816,7 @@ pub fn transform_label(t: &Transform) -> &'static str {
         Transform::Threshold { .. } => "임계값",
         Transform::MapLabel => "라벨 이름",
         Transform::JsonPointer { .. } => "JSON 포인터",
+        Transform::Tokenize { .. } => "문자 토큰화",
     }
 }
 
@@ -898,6 +900,12 @@ fn transform_params(ui: &mut egui::Ui, t: &mut Transform, salt: usize) -> bool {
             changed |= ui
                 .add(egui::TextEdit::singleline(pointer).desired_width(110.0).id_salt(("ptr", salt)))
                 .changed();
+        }
+        Transform::Tokenize { vocab, max_len } => {
+            changed |= ui
+                .add(egui::TextEdit::singleline(vocab).desired_width(110.0).id_salt(("vocab", salt)))
+                .changed();
+            changed |= ui.add(egui::DragValue::new(max_len).prefix("len ").range(1..=4096)).changed();
         }
         Transform::Grayscale | Transform::Argmax | Transform::Softmax | Transform::MapLabel => {}
     }
