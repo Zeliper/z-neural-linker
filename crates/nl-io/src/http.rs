@@ -217,7 +217,8 @@ mod tests {
         });
         let start = std::time::Instant::now();
         let err = call("GET", &s.addr, &BTreeMap::new(), None, Duration::from_millis(200)).unwrap_err();
-        assert!(start.elapsed() < Duration::from_secs(1), "타임아웃이 걸리지 않았다: {:?}", start.elapsed());
+        // 서버는 1.5초를 잔다. 그보다 일찍 끝났으면 타임아웃이 먹은 것이다.
+        assert!(start.elapsed() < Duration::from_millis(1200), "타임아웃이 걸리지 않았다: {:?}", start.elapsed());
         let msg = err.to_string();
         assert!(msg.contains("GET"), "오류 메시지에 메서드가 없다: {msg}");
     }

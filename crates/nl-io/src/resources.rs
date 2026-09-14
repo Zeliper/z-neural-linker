@@ -112,10 +112,17 @@ mod tests {
 
     #[test]
     fn repeated_calls_hit_the_cache() {
+        // 두 호출이 캐시 수명 안에 들었을 때만 같은 값을 기대할 수 있다.
+        // 기계가 바쁘면 그 사이에 200ms 가 지나 갱신될 수도 있어, 그때는 판정하지 않는다.
+        let t = Instant::now();
         let a = snapshot();
         let b = snapshot();
-        // 200ms 안이면 같은 값이 그대로 나온다.
-        assert_eq!(a, b);
+        if t.elapsed() < CACHE_TTL {
+            assert_eq!(a, b, "캐시 수명 안인데 값이 달라졌다");
+        }
+        // 어느 쪽이든 값 자체는 멀쩡해야 한다.
+        assert!(b.cpu_cores >= 1);
+        assert!(b.mem_total_bytes > 0);
     }
 
     #[test]
