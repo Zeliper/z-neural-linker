@@ -401,7 +401,10 @@ impl Request {
                 match read {
                     Ok(got) if got as u64 == n => Ok(buf),
                     Ok(got) => Err(BodyError::new(400, format!("본문이 짧다 ({got}/{n} 바이트)"))),
-                    Err(e) => Err(BodyError::new(400, format!("본문을 읽지 못했다: {e}"))),
+                    Err(e) => Err(BodyError::new(
+                        400,
+                        format!("본문을 읽지 못했다: {}", describe_io_error(&e)),
+                    )),
                 }
             }
             BodyKind::Chunked => self.read_chunked(limit),
@@ -552,7 +555,7 @@ fn read_line(
             Err(e) if is_timeout(&e) => {
                 return Err(HeadError::new(408, "머리를 보내는 데 너무 오래 걸린다"));
             }
-            Err(e) => return Err(HeadError::new(400, format!("읽기 실패: {e}"))),
+            Err(e) => return Err(HeadError::new(400, format!("읽기 실패: {}", describe_io_error(&e)))),
         }
         if *budget == 0 {
             return Err(HeadError::new(
@@ -570,6 +573,37 @@ fn read_line(
         raw.pop();
     }
     String::from_utf8(raw).map_err(|_| HeadError::new(400, "머리에 UTF-8 이 아닌 바이트가 있다"))
+}
+
+/// 운영체제 소켓 오류를 사람이 읽을 수 있는 한국어로. 원본 메시지는 괄호에 남긴다.
+///
+/// 이유가 둘이다. 첫째, 같은 상황의 오류 번호가 플랫폼마다 다르다 — 주소가 이미 쓰이는 중이면
+/// Linux 는 98, Windows 는 10048 이다. 둘째, **wine 에서는 원본 메시지가 사람이 못 읽는다**:
+/// `FormatMessageW` 가 실패해 `OS Error 10048 (FormatMessageW() returned error 317)` 만 남는다.
+/// 번호를 우리가 직접 풀어 주면 어느 쪽에서든 읽힌다.
+///
+/// 모르는 번호는 원본을 그대로 쓴다 — 틀린 설명을 붙이는 것보다 낫다.
+pub fn describe_io_error(e: &std::io::Error) -> String {
+    let Some(code) = e.raw_os_error() else {
+        return e.to_string();
+    };
+    let why = match code {
+        // ── Windows (winsock) ──
+        10048 => Some("그 주소와 포트를 이미 다른 프로그램이 쓰고 있다"),
+        10013 => Some("그 주소에 묶을 권한이 없다 (낮은 포트이거나 방화벽 정책)"),
+        10060 => Some("상대가 제때 답하지 않았다 (시간 초과)"),
+        10061 => Some("상대가 연결을 거부했다 (그 포트에서 듣는 프로그램이 없다)"),
+        // ── Linux ──
+        98 => Some("그 주소와 포트를 이미 다른 프로그램이 쓰고 있다"),
+        13 => Some("그 주소에 묶을 권한이 없다 (1024 미만 포트는 관리자 권한이 필요하다)"),
+        110 => Some("상대가 제때 답하지 않았다 (시간 초과)"),
+        111 => Some("상대가 연결을 거부했다 (그 포트에서 듣는 프로그램이 없다)"),
+        _ => None,
+    };
+    match why {
+        Some(text) => format!("{text} ({e})"),
+        None => e.to_string(),
+    }
 }
 
 fn is_timeout(e: &std::io::Error) -> bool {
@@ -687,6 +721,37 @@ mod tests {
                 .status,
             501
         );
+    }
+
+    /// 코드 → 문구 매핑. 같은 상황의 번호가 플랫폼마다 달라서 둘 다 같은 말로 풀려야 한다.
+    #[test]
+    fn os_error_codes_map_to_the_same_korean_text() {
+        use std::io::Error;
+        let d = |code: i32| describe_io_error(&Error::from_raw_os_error(code));
+
+        // 짝이 되는 번호끼리 같은 설명이어야 한다 (Windows, Linux).
+        for (win, linux, needle) in [
+            (10048, 98, "이미 다른 프로그램이"),
+            (10013, 13, "권한이 없다"),
+            (10060, 110, "시간 초과"),
+            (10061, 111, "연결을 거부했다"),
+        ] {
+            assert!(d(win).contains(needle), "{win}: {}", d(win));
+            assert!(d(linux).contains(needle), "{linux}: {}", d(linux));
+        }
+
+        // 원본 메시지를 괄호로 남긴다 — 번호를 잃으면 검색이 안 된다.
+        let text = d(10048);
+        assert!(text.contains("(") && text.contains(")"), "원본이 없다: {text}");
+        assert!(text.contains("10048"), "번호가 사라졌다: {text}");
+
+        // 모르는 번호는 원본 그대로. 틀린 설명을 붙이지 않는다.
+        let unknown = Error::from_raw_os_error(999_999);
+        assert_eq!(describe_io_error(&unknown), unknown.to_string());
+
+        // OS 번호가 없는 오류(우리가 만든 것)도 그대로.
+        let made = Error::other("우리가 만든 오류");
+        assert_eq!(describe_io_error(&made), "우리가 만든 오류");
     }
 
     #[test]

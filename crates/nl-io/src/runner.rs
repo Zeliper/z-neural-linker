@@ -528,7 +528,7 @@ fn start_http_server(
     }
     let server = crate::httpd::Server::bind(bind)
         .map(Arc::new)
-        .map_err(|e| format!("{bind} 을 열지 못했다: {e}"))?;
+        .map_err(|e| format!("{bind} 을 열지 못했다: {}", crate::httpd::describe_io_error(&e)))?;
     // 접근 정책은 **실제로 묶인 주소**로 만든다. 설정이 `:0` 이면 운영체제가 포트를 골라 주는데,
     // 설정 문자열로 만들면 `Host` 검사가 포트 0 을 기대해 모든 요청을 400 으로 막는다.
     let policy = AccessPolicy::new(&server.local_addr().to_string(), token);

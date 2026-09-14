@@ -38,7 +38,7 @@ pub fn run(args: Args<'_>) -> Result<i32> {
 
     println!("{} 자체 서명 인증서를 만들었다", green("완료"));
     println!("  {} {}", dim("인증서"), made.cert.display());
-    println!("  {} {}   {}", dim("개인키"), made.key.display(), dim("(0600)"));
+    println!("  {} {}   {}", dim("개인키"), made.key.display(), dim(key_mode_note()));
     println!();
     println!("{}", bold("파이프라인에 붙이기"));
     println!(
@@ -65,7 +65,33 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         dim("nl build 는 경로만 적고 인증서 파일은 넣지 않는다. 설치한 기계의 실행 파일 옆에 두어라.")
     );
     println!("  · 이 인증서는 자체 서명이다. 공개 서비스에는 제대로 발급받은 것을 써라.");
+    if let Some(extra) = key_mode_warning() {
+        println!("  · {}", yellow(extra));
+    }
     Ok(0)
+}
+
+/// 개인키 줄 끝에 붙이는 권한 표시. 유닉스에서만 실제로 권한을 걸 수 있다.
+#[cfg(unix)]
+fn key_mode_note() -> &'static str {
+    "(0600)"
+}
+
+/// Windows 에는 유닉스 권한 비트가 없다. 없는 보호를 있다고 말하지 않는다 —
+/// wine 에서 실제로 0644 로 만들어지는 것을 확인했다.
+#[cfg(not(unix))]
+fn key_mode_note() -> &'static str {
+    "(권한 비트 없음)"
+}
+
+#[cfg(unix)]
+fn key_mode_warning() -> Option<&'static str> {
+    None
+}
+
+#[cfg(not(unix))]
+fn key_mode_warning() -> Option<&'static str> {
+    Some("이 플랫폼에는 파일 권한 비트가 없다 — 키 파일을 사용자 폴더 밖에 두지 마라.")
 }
 
 /// 인증서와 키를 만들어 `<out_dir>/certs/` 에 쓴다.
@@ -237,6 +263,23 @@ mod tests {
             .filter(|s| matches!(s, rcgen::SanType::IpAddress(_)))
             .count();
         assert_eq!(ips, 2, "IP 두 개가 IP SAN 이어야 한다");
+    }
+
+    /// 권한 표시는 플랫폼이 실제로 할 수 있는 것만 말해야 한다.
+    ///
+    /// 예전에는 어디서나 `(0600)` 을 찍었는데, Windows 에서는 권한 비트가 없어 실제 파일이
+    /// 0644 로 만들어졌다(wine 에서 확인). 없는 보호를 있다고 말하면 안 된다.
+    #[test]
+    fn the_permission_note_matches_the_platform() {
+        let note = key_mode_note();
+        assert!(!note.is_empty());
+        if cfg!(unix) {
+            assert_eq!(note, "(0600)");
+            assert!(key_mode_warning().is_none(), "유닉스에 경고가 붙었다");
+        } else {
+            assert!(!note.contains("0600"), "권한을 못 거는데 0600 이라고 한다: {note}");
+            assert!(key_mode_warning().is_some(), "경고가 없다");
+        }
     }
 
     #[test]
