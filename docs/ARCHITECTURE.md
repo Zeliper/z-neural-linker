@@ -438,6 +438,9 @@ Forgejo 인스턴스는 `app.ini` 에 `[actions] DEFAULT_ACTIONS_URL = github` �
 3. `cargo clippy --workspace --all-targets -- -D warnings`
 4. `cargo test --workspace` (`NL_SNAPSHOT_REQUIRED=1`)
 5. `cargo build --release -p nl-runtime` — 배포 런타임의 릴리스 빌드가 깨지면 배포가 막힌다.
+6. 별도 잡 `windows`(`windows-latest`) — `cargo test -p nl-core -p nl-io -p nl-cli -p nl-bundle -p nl-update -p nl-engine`.
+   개발 기계에서는 `cargo xwin` 으로 컴파일만 볼 수 있어, 소켓 타임아웃·경로처럼 **실제로 돌려 봐야 아는 것**을 여기서 잡는다.
+   GUI 크레이트는 뺐다(러너에 GPU·CJK 글꼴이 없어 스냅샷이 의미 없다). Linux 잡과 독립이라 한쪽이 깨져도 다른 쪽 결과는 그대로 보인다.
 
 `NL_SNAPSHOT_REQUIRED=1` 은 **렌더 백엔드가 없어 건너뛰는 것**을 실패로 바꾼다. cargo 가 통과한 테스트의
 출력을 삼켜서, 이 장치가 없으면 스냅샷이 조용히 통과해 버린다. 반면 **글꼴이 없어 건너뛰는 것**은 실패로
