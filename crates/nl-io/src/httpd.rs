@@ -389,6 +389,17 @@ impl Request {
     /// 여기서부터는 읽기 타임아웃이 [`BODY_TIMEOUT`] 으로 늘어난다 — 큰 본문은 시간이 걸려도 정상이다.
     pub fn read_body(&mut self, limit: u64) -> Result<Vec<u8>, BodyError> {
         let _ = self.io.get_ref().set_read_timeout(Some(BODY_TIMEOUT));
+        let out = self.read_body_inner(limit);
+        if out.is_ok() {
+            // **다 읽었다고 표시한다.** 이걸 안 하면 `respond` 가 `drain` 으로 들어가,
+            // 이미 끝난 본문을 200ms 동안 더 기다린다 — 요청마다 200ms 가 그냥 붙는다.
+            // 실패했을 때는 그대로 둔다: 상대가 아직 보내는 중일 수 있어 조금은 읽어 줘야 한다.
+            self.body = BodyKind::None;
+        }
+        out
+    }
+
+    fn read_body_inner(&mut self, limit: u64) -> Result<Vec<u8>, BodyError> {
         match self.body {
             BodyKind::None => Ok(Vec::new()),
             BodyKind::Sized(n) => {
@@ -720,6 +731,86 @@ mod tests {
                 .unwrap_err()
                 .status,
             501
+        );
+    }
+
+    /// 본문을 다 읽고 나면 `respond` 가 더 기다리지 않아야 한다.
+    ///
+    /// 예전에는 `read_body` 뒤에도 `BodyKind` 가 그대로라 `respond` 가 `drain` 으로 들어갔고,
+    /// 상대는 더 보낼 것이 없는데 200ms 읽기 타임아웃을 꽉 채웠다. 요청마다 200ms 가 붙어
+    /// 처리량이 초당 4건에 묶였다(30분 부하 점검에서 발견).
+    #[test]
+    fn a_fully_read_body_is_not_drained_again() {
+        use std::io::Write as _;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let client = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).expect("connect");
+            s.set_nodelay(true).ok();
+            let body = b"[1,2,3]";
+            let head = format!("POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\n\r\n", body.len());
+            s.write_all(head.as_bytes()).unwrap();
+            s.write_all(body).unwrap();
+            // **쓰기 쪽을 닫지 않는다.** 진짜 클라이언트처럼 응답을 기다린다 —
+            // 닫아 버리면 드레인이 EOF 로 곧장 끝나 이 시험이 의미가 없다.
+            let start = Instant::now();
+            let mut got = Vec::new();
+            let _ = Read::read_to_end(&mut s, &mut got);
+            (start.elapsed(), got)
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        let mut req = Request::read_head(Conn::Plain(stream))
+            .map_err(|(_, e)| e)
+            .expect("head");
+        assert_eq!(req.read_body(1024).expect("body"), b"[1,2,3]");
+        req.respond(200, "application/json", b"[]").expect("respond");
+
+        let (elapsed, got) = client.join().expect("client");
+        assert!(
+            String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"),
+            "{:?}",
+            String::from_utf8_lossy(&got)
+        );
+        // 드레인이 남아 있으면 여기서 200ms 를 꽉 채운다. 넉넉히 잡아도 100ms 안에 끝나야 한다.
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "응답이 {elapsed:?} 걸렸다 — 본문을 또 기다린 것으로 보인다"
+        );
+    }
+
+    /// 본문을 읽지 않고 답할 때는 여전히 조금 읽어 준다 — 안 그러면 RST 로 응답이 유실된다.
+    #[test]
+    fn an_unread_body_is_still_drained_before_answering() {
+        use std::io::Write as _;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let client = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).expect("connect");
+            s.set_nodelay(true).ok();
+            let body = vec![b'a'; 4096];
+            let head = format!("POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: {}\r\n\r\n", body.len());
+            s.write_all(head.as_bytes()).unwrap();
+            s.write_all(&body).unwrap();
+            let mut got = Vec::new();
+            let _ = Read::read_to_end(&mut s, &mut got);
+            got
+        });
+
+        let (stream, _) = listener.accept().expect("accept");
+        let req = Request::read_head(Conn::Plain(stream))
+            .map_err(|(_, e)| e)
+            .expect("head");
+        // 본문을 읽지 않고 곧바로 404 로 답한다 (경로가 틀렸을 때의 길).
+        req.respond(404, "application/json", b"{}").expect("respond");
+
+        let got = client.join().expect("client");
+        assert!(
+            String::from_utf8_lossy(&got).starts_with("HTTP/1.1 404"),
+            "응답이 유실됐다: {:?}",
+            String::from_utf8_lossy(&got)
         );
     }
 
