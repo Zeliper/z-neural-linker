@@ -5319,6 +5319,7 @@ name = "nl-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "burn",
  "chrono",
  "crossbeam-channel",
@@ -5326,6 +5327,7 @@ dependencies = [
  "half",
  "image",
  "log",
+ "memmap2",
  "nl-core",
  "parking_lot",
  "pollster 0.4.0",

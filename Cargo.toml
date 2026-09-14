@@ -32,6 +32,8 @@ rayon = "1"
 # ML 엔진: burn 0.21 안정판. CPU = ndarray, GPU = wgpu(Vulkan/DX12/Metal — 드라이버 SDK 불필요)
 burn = { version = "0.21", default-features = false }
 safetensors = "0.8"
+base64 = "0.22"
+memmap2 = "0.9"
 # 장치 열거용 wgpu — burn(cubecl-wgpu)이 쓰는 것과 같은 메이저 버전이어야 한다.
 wgpu = "29"
 pollster = "0.4"

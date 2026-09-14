@@ -65,7 +65,7 @@ pub enum MouseButton {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Sink {
-    /// 입력값(정수 인덱스) → actions[index].
+    /// 입력값(정수 인덱스) → `actions[index]`.
     MouseKeyboard { actions: Vec<InputAction>, #[serde(default)] cooldown_ms: u64 },
     /// `body_template` 안의 `{{value}}` 를 입력 JSON 으로 치환.
     HttpCall { method: String, url: String, #[serde(default)] headers: BTreeMap<String, String>, #[serde(default)] body_template: String },

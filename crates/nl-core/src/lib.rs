@@ -24,6 +24,6 @@ pub use model::{
 pub use ops::{apply_op, apply_ops, diff_ops, inverse_ops, Op};
 pub use payload::{Dtype, Field, FieldKind, PayloadSpec, Transform};
 pub use pipeline::{Link, Logic, PNode, PNodeKind, Pipeline, Sink, Source, InputAction, Region};
-pub use shape::{infer, Dim, GraphError, Shape, ShapeReport};
+pub use shape::{infer, Dim, GraphError, Shape, ShapeReport, MAX_RANK};
 pub use train::{DevicePref, EpochMetrics, Loss, LrSchedule, Metric, Optimizer, RunRecord, RunStatus, TrainConfig};
 pub use validate::{validate, Issue, Severity};

@@ -15,13 +15,16 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::ops::ConvOptions;
 use burn::tensor::{activation, module, Distribution, ElementConversion, Int, Shape, Tensor, TensorData};
 use nl_core::model::{Act, Graph, LayerKind, ModelDef};
-use nl_core::shape::{self, ShapeReport};
+use nl_core::shape::{self, ShapeReport, MAX_RANK};
 use nl_core::NodeId;
 use std::collections::{BTreeMap, BTreeSet};
 
 // ───────────────────────────── DynTensor ─────────────────────────────
 
-/// 랭크를 런타임 값으로 들고 다니는 텐서. 지원 랭크는 1..5 (배치 차원 포함).
+/// 랭크를 런타임 값으로 들고 다니는 텐서. 지원 랭크는 1..=[`MAX_RANK`] (배치 차원 포함).
+///
+/// 상한은 `nl_core::shape::MAX_RANK` 와 같은 값이어야 한다 — 그래야 편집기의 형상 검사와
+/// 실행이 같은 계약을 본다. 아래 `const _:` 가 둘이 어긋나면 컴파일을 막는다.
 #[derive(Clone, Debug)]
 pub enum DynTensor<B: Backend> {
     R1(Tensor<B, 1>),
@@ -30,6 +33,9 @@ pub enum DynTensor<B: Backend> {
     R4(Tensor<B, 4>),
     R5(Tensor<B, 5>),
 }
+
+// DynTensor 는 R1..R5 만 담는다. nl-core 의 상한이 바뀌면 여기도 함께 바꿔야 한다.
+const _: () = assert!(MAX_RANK == 5, "DynTensor 의 변형 수와 nl_core::shape::MAX_RANK 가 어긋납니다");
 
 /// 랭크별 단형화를 한 곳에 모으는 매크로 — 단항 연산.
 macro_rules! map_t {
@@ -119,7 +125,7 @@ impl<B: Backend> DynTensor<B> {
                     3 => DynTensor::R3($t.reshape(sh)),
                     4 => DynTensor::R4($t.reshape(sh)),
                     5 => DynTensor::R5($t.reshape(sh)),
-                    n => bail!("지원하지 않는 랭크 {n} (최대 5)"),
+                    n => bail!("지원하지 않는 랭크 {n} (최대 {MAX_RANK})"),
                 }
             }};
         }
@@ -263,7 +269,7 @@ impl<B: Backend> DynTensor<B> {
             3 => DynTensor::R3(Tensor::from_data(data, device)),
             4 => DynTensor::R4(Tensor::from_data(data, device)),
             5 => DynTensor::R5(Tensor::from_data(data, device)),
-            n => bail!("지원하지 않는 랭크 {n} (최대 5)"),
+            n => bail!("지원하지 않는 랭크 {n} (최대 {MAX_RANK})"),
         })
     }
 
@@ -413,6 +419,16 @@ impl<B: Backend> Model<B> {
 
     /// 저장된 파라미터를 얹는다. 이름·형상이 맞지 않으면 오류.
     pub fn load_host_params(&mut self, map: &BTreeMap<String, HostTensor>) -> Result<()> {
+        let extra: Vec<&String> = map.keys().filter(|k| !self.params.contains_key(*k)).collect();
+        if !extra.is_empty() {
+            let shown: Vec<&str> = extra.iter().take(5).map(|s| s.as_str()).collect();
+            log::warn!(
+                "체크포인트에 이 모델에 없는 파라미터가 {} 개 있습니다 (무시합니다): {}{}",
+                extra.len(),
+                shown.join(", "),
+                if extra.len() > shown.len() { " …" } else { "" }
+            );
+        }
         for (name, want) in self.params.iter().map(|(k, v)| (k.clone(), v.dims())).collect::<Vec<_>>() {
             let got = map
                 .get(&name)
@@ -669,14 +685,18 @@ impl<B: Backend> Model<B> {
             LayerKind::Mul => ins[0].clone().try_mul(ins[1].clone()),
             LayerKind::Concat { dim } => concat(ins[0].clone(), ins[1].clone(), dim + 1),
 
-            LayerKind::Embedding { dim, .. } => {
+            LayerKind::Embedding { vocab, dim } => {
                 let t = x()?;
                 let d = t.dims();
                 if d.len() < 2 {
                     bail!("Embedding 입력은 [B, …] 여야 합니다 (지금 {d:?})");
                 }
                 let len: usize = d[1..].iter().product();
-                let idx = t.reshape(&[d[0], len])?.into_r2()?.int();
+                let flat = t.reshape(&[d[0], len])?;
+                // 인덱스는 작은 텐서라 한 번 호스트로 내려 검사한다. 검사가 없으면 범위를 넘길 때
+                // 백엔드 깊은 곳에서 터지고(ndarray) wgpu 는 조용히 엉뚱한 값을 읽는다.
+                check_embedding_indices(&flat.to_host(), *vocab)?;
+                let idx = flat.into_r2()?.int();
                 let w = self.p(id, P_WEIGHT)?.into_r2()?;
                 let out = module::embedding(w, idx);
                 let mut target = d.clone();
@@ -755,9 +775,15 @@ fn batch_norm<B: Backend>(
         // running 통계는 학습 대상이 아니므로 그래프에서 떼어 낸다.
         let mom = momentum as f64;
         let m_flat = mean.detach().reshape(&[c])?;
-        let v_flat = var.clone().detach().reshape(&[c])?;
-        let new_mean = running_mean.mul_scalar(1.0 - mom).try_add(m_flat.mul_scalar(mom))?;
-        let new_var = running_var.mul_scalar(1.0 - mom).try_add(v_flat.mul_scalar(mom))?;
+        // running_var 만 불편 추정치(n/(n-1))로 갱신한다 — PyTorch 와 같은 규약이다.
+        // 정규화 자체는 편향 분산을 쓴다(위 `var`). n = 채널당 표본 수.
+        let n: usize = reduce.iter().map(|&d| dims[d]).product();
+        let unbiased = if n > 1 { n as f64 / (n - 1) as f64 } else { 1.0 };
+        let v_flat = var.clone().detach().reshape(&[c])?.mul_scalar(unbiased);
+        // running 통계는 학습 대상이 아니다. require_grad 가 걸린 적이 없어 현재 백엔드에서는
+        // 노드가 생기지 않지만, 백엔드 동작에 기대지 않도록 명시적으로 떼어 둔다.
+        let new_mean = running_mean.detach().mul_scalar(1.0 - mom).try_add(m_flat.mul_scalar(mom))?.detach();
+        let new_var = running_var.detach().mul_scalar(1.0 - mom).try_add(v_flat.mul_scalar(mom))?.detach();
         (centered.try_div(var.add_scalar(eps as f64).sqrt())?, Some((new_mean, new_var)))
     } else {
         let mean = running_mean.reshape(&pshape)?;
@@ -791,6 +817,24 @@ fn layer_norm<B: Backend>(
 
 // ───────────────────────────── 작은 도우미 ─────────────────────────────
 
+/// Embedding 인덱스가 `0..vocab` 안의 정수인지 확인한다.
+///
+/// 실수 입력은 `Tensor::int()` 가 **0 방향으로 절단**하므로 0.9 가 조용히 0 이 된다.
+/// 정규화를 거친 값을 Embedding 에 물리는 흔한 실수를 여기서 잡는다.
+fn check_embedding_indices(host: &HostTensor, vocab: usize) -> Result<()> {
+    for (i, &v) in host.data.iter().enumerate() {
+        if !v.is_finite() || v.fract() != 0.0 {
+            bail!(
+                "Embedding 입력 {i} 번째 값 {v} 가 정수가 아닙니다 — 인덱스는 0 이상 {vocab} 미만의                  정수여야 합니다 (소수부는 버려지므로 조용히 틀린 결과가 됩니다)"
+            );
+        }
+        if v < 0.0 || v as usize >= vocab {
+            bail!("Embedding 입력 {i} 번째 값 {v} 가 vocab {vocab} 범위 밖입니다 (0 이상 {vocab} 미만)");
+        }
+    }
+    Ok(())
+}
+
 fn random_dyn<B: Backend>(shape: &[usize], d: Distribution, device: &B::Device) -> Result<DynTensor<B>> {
     let sh = Shape::from(shape.to_vec());
     Ok(match shape.len() {
@@ -799,7 +843,7 @@ fn random_dyn<B: Backend>(shape: &[usize], d: Distribution, device: &B::Device) 
         3 => DynTensor::R3(Tensor::random(sh, d, device)),
         4 => DynTensor::R4(Tensor::random(sh, d, device)),
         5 => DynTensor::R5(Tensor::random(sh, d, device)),
-        n => bail!("지원하지 않는 랭크 {n} (최대 5)"),
+        n => bail!("지원하지 않는 랭크 {n} (최대 {MAX_RANK})"),
     })
 }
 

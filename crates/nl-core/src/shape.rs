@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
+/// 엔진이 실행할 수 있는 최대 텐서 랭크 (배치 차원 포함).
+///
+/// `nl-engine` 의 `DynTensor` 가 랭크 1..5 만 담는다. 여기서 같은 상한을 걸어 두어야 편집기의
+/// "문제" 탭이 깨끗한데 학습 버튼에서만 실패하는 일이 없다. 엔진은 이 상수를 참조한다.
+pub const MAX_RANK: usize = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Dim {
     Batch,
@@ -197,6 +203,17 @@ fn invalid(msg: impl Into<String>) -> GraphError {
     GraphError::InvalidParam { message: msg.into() }
 }
 
+/// 형상이 엔진 랭크 상한 안인지 본다. 형상을 늘리는 규칙마다 통과시킨다.
+fn checked(s: Shape) -> Result<Shape, GraphError> {
+    if s.rank() > MAX_RANK {
+        return Err(mismatch(format!(
+            "랭크 {} 은 실행 가능한 최대 랭크 {MAX_RANK} 를 넘습니다 (배치 차원 포함)",
+            s.rank()
+        )));
+    }
+    Ok(s)
+}
+
 fn conv_out(n: usize, k: usize, s: usize, p: usize) -> Result<usize, GraphError> {
     if k == 0 || s == 0 {
         return Err(invalid("커널·스트라이드는 0 일 수 없음"));
@@ -216,7 +233,7 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             if shape.is_empty() || shape.contains(&0) {
                 return Err(invalid("입력 형상은 비어 있거나 0 을 포함할 수 없음"));
             }
-            Ok(Shape::from_sample(shape))
+            checked(Shape::from_sample(shape))
         }
         LayerKind::Output
         | LayerKind::Activation { .. }
@@ -283,7 +300,7 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             if want != s.numel_sample() {
                 return Err(mismatch(format!("원소 수 {} ≠ {}", s.numel_sample(), want)));
             }
-            Ok(Shape::from_sample(shape))
+            checked(Shape::from_sample(shape))
         }
         LayerKind::Add | LayerKind::Mul => {
             if inputs.len() < 2 {
@@ -310,7 +327,7 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             }
             let mut out = a.clone();
             out[*dim] = a[*dim] + b[*dim];
-            Ok(Shape::from_sample(&out))
+            checked(Shape::from_sample(&out))
         }
         LayerKind::Embedding { vocab, dim } => {
             if *vocab == 0 || *dim == 0 {
@@ -319,7 +336,7 @@ pub fn rule(kind: &LayerKind, inputs: &[Shape]) -> Result<Shape, GraphError> {
             let s = one()?;
             let mut out = s.sample();
             out.push(*dim);
-            Ok(Shape::from_sample(&out))
+            checked(Shape::from_sample(&out))
         }
     }
 }
@@ -425,6 +442,35 @@ mod tests {
         assert!(r.cycle_nodes.contains(&b) && r.cycle_nodes.contains(&c));
         assert_eq!(r.errors[&b], GraphError::Cycle);
         assert!(r.shapes.contains_key(&a), "순환 밖은 계속 추론된다");
+    }
+
+    #[test]
+    fn rank_above_the_engine_limit_is_a_shape_error() {
+        let mut g = Graph::default();
+        let i = add(&mut g, LayerKind::Input { shape: vec![1, 8, 8] });
+        // 샘플 랭크 5 → 배치 포함 6 → 실행 불가.
+        let r = add(&mut g, LayerKind::Reshape { shape: vec![1, 2, 2, 4, 4] });
+        link(&mut g, i, r);
+        let rep = infer(&g);
+        assert!(matches!(rep.errors[&r], GraphError::ShapeMismatch { .. }), "{:?}", rep.errors);
+        assert!(rep.errors[&r].to_string().contains("최대 랭크"));
+
+        // 상한 안(배치 포함 5)은 그대로 통과한다.
+        let mut g2 = Graph::default();
+        let i2 = add(&mut g2, LayerKind::Input { shape: vec![1, 8, 8] });
+        let r2 = add(&mut g2, LayerKind::Reshape { shape: vec![1, 2, 4, 8] });
+        link(&mut g2, i2, r2);
+        assert!(infer(&g2).is_ok());
+    }
+
+    #[test]
+    fn embedding_and_concat_respect_the_rank_limit() {
+        // Input [a,b,c,d] (랭크 5) → Embedding 이 랭크 6 을 만들려 한다.
+        let mut g = Graph::default();
+        let i = add(&mut g, LayerKind::Input { shape: vec![2, 2, 2, 2] });
+        let e = add(&mut g, LayerKind::Embedding { vocab: 10, dim: 4 });
+        link(&mut g, i, e);
+        assert!(matches!(infer(&g).errors[&e], GraphError::ShapeMismatch { .. }));
     }
 
     #[test]

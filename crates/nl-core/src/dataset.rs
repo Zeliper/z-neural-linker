@@ -79,7 +79,7 @@ pub struct DatasetSpec {
     pub id: DatasetId,
     pub name: String,
     pub source: DataSource,
-    /// 인코더 체인을 정하는 페이로드. 없으면 소스의 자연 표현(CSV 열 → f32, 이미지 → [C,H,W]/255).
+    /// 인코더 체인을 정하는 페이로드. 없으면 소스의 자연 표현(CSV 열 → f32, 이미지 → `[C,H,W]`/255).
     #[serde(default)]
     pub payload: Option<PayloadId>,
     #[serde(default)]
