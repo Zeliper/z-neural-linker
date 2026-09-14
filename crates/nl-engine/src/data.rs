@@ -78,6 +78,44 @@ pub fn load_all(
     load_source(&spec.source, base_dir, input_shape_hint, None)
 }
 
+/// CSV 데이터셋의 **정확한** 행 수를 센다.
+///
+/// [`scan`] 은 큰 CSV 를 앞부분만 보고 어림하므로 `DatasetInfo::samples_estimated` 가 참이 된다.
+/// UI 의 "정확히 세기" 같은 동작이 이 함수를 부른다. 값만 세고 파싱은 하지 않으므로 적재보다 훨씬 싸지만
+/// 파일 전체를 훑기는 하므로 **백그라운드에서** 부를 것.
+///
+/// 따옴표 안의 줄바꿈은 CSV 리더가 처리하므로 줄 수와 다를 수 있다. 헤더 행은 세지 않는다.
+pub fn count_csv_rows(spec: &DatasetSpec, base_dir: &Path) -> Result<usize> {
+    let DataSource::Csv { path, header, .. } = &spec.source else {
+        bail!(
+            "count_csv_rows 는 CSV 데이터셋에만 쓸 수 있습니다 (지금 {:?})",
+            spec.source
+        );
+    };
+    let resolved = resolve(base_dir, path);
+    let base = Some(base_dir);
+    check_file_size(&resolved, MAX_CSV_BYTES, "CSV 파일")?;
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(*header)
+        .from_path(&resolved)
+        .with_context(|| format!("CSV 열기 실패: {}", show(&resolved, base)))?;
+    let mut rec = csv::StringRecord::new();
+    let mut n = 0usize;
+    loop {
+        match rdr.read_record(&mut rec) {
+            Ok(true) => {
+                n += 1;
+                if n > MAX_CSV_ROWS {
+                    bail!("CSV 행 수가 상한 {MAX_CSV_ROWS} 를 넘습니다: {}", show(&resolved, base));
+                }
+            }
+            Ok(false) => return Ok(n),
+            Err(e) => bail!("CSV {}행 읽기 실패 ({}): {e}", n + 1, show(&resolved, base)),
+        }
+    }
+}
+
 /// 소스 하나를 적재한다 (`Split::Separate` 의 검증 소스도 이걸로 읽는다).
 pub fn load_source(
     source: &DataSource,
@@ -92,13 +130,21 @@ pub fn load_source(
             input_cols,
             target_cols,
             header,
-        } => load_csv(&resolve(base_dir, path), input_cols, target_cols, *header, limit),
-        DataSource::ImageFolder { path } => load_image_folder(&resolve(base_dir, path), hint, limit),
-        DataSource::Recorded { path } => load_recorded(&resolve(base_dir, path), hint, limit),
+        } => load_csv(
+            &resolve(base_dir, path),
+            input_cols,
+            target_cols,
+            *header,
+            limit,
+            Some(base_dir),
+        ),
+        DataSource::ImageFolder { path } => load_image_folder(&resolve(base_dir, path), hint, limit, Some(base_dir)),
+        DataSource::Recorded { path } => load_recorded(&resolve(base_dir, path), hint, limit, Some(base_dir)),
     }
 }
 
 fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> Result<DatasetInfo> {
+    let base = Some(base_dir);
     match source {
         DataSource::Synthetic { kind, samples } => {
             let (i, t, classes) = kind.shapes();
@@ -116,14 +162,14 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
         }
         DataSource::ImageFolder { path } => {
             let dir = resolve(base_dir, path);
-            let classes = class_dirs(&dir)?;
+            let classes = class_dirs(&dir, base)?;
             let mut samples = 0usize;
             let mut first: Option<PathBuf> = None;
             let mut names = Vec::new();
             let mut empty_classes = Vec::new();
             for (i, (name, cdir)) in classes.iter().enumerate() {
                 names.push(name.clone());
-                let files = image_files(cdir)?;
+                let files = image_files(cdir, base)?;
                 if files.is_empty() {
                     empty_classes.push(i);
                 }
@@ -136,7 +182,7 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
                 Some(h) if h.len() == 3 => h.to_vec(),
                 _ => match &first {
                     Some(p) => {
-                        let img = decode_image_file(p)?;
+                        let img = decode_image_file(p, &show(p, base))?;
                         let c = if img.color().has_color() { 3 } else { 1 };
                         vec![c, img.height() as usize, img.width() as usize]
                     }
@@ -157,7 +203,7 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
             input_cols,
             target_cols,
             header,
-        } => scan_csv(&resolve(base_dir, path), input_cols, target_cols, *header),
+        } => scan_csv(&resolve(base_dir, path), input_cols, target_cols, *header, base),
         _ => {
             // 녹화는 줄 수만 세면 되므로 전부 읽어도 비용이 크지 않다.
             Ok(load_source(source, base_dir, hint, None)?.1)
@@ -170,9 +216,15 @@ fn scan_source(source: &DataSource, base_dir: &Path, hint: Option<&[usize]>) -> 
 /// 앞 [`CSV_SCAN_ROWS`] 행만 읽어 형상·클래스를 보고, 행 수는 그 표본의 평균 바이트로 어림한다.
 /// 10 GB CSV 를 스캔 한 번에 전부 메모리에 올리던 동작을 대신한다.
 /// 표본 안에서 파일이 끝나면 그 값이 정확하므로 `samples_estimated` 는 거짓이다.
-fn scan_csv(path: &Path, input_cols: &[String], target_cols: &[String], header: bool) -> Result<DatasetInfo> {
+fn scan_csv(
+    path: &Path,
+    input_cols: &[String],
+    target_cols: &[String],
+    header: bool,
+    base: Option<&Path>,
+) -> Result<DatasetInfo> {
     check_file_size(path, MAX_CSV_BYTES, "CSV 파일")?;
-    let (sample, mut info) = load_csv(path, input_cols, target_cols, header, Some(CSV_SCAN_ROWS))?;
+    let (sample, mut info) = load_csv(path, input_cols, target_cols, header, Some(CSV_SCAN_ROWS), base)?;
 
     // 표본이 상한보다 적으면 파일을 다 본 것이다.
     if sample.len() < CSV_SCAN_ROWS {
@@ -183,7 +235,7 @@ fn scan_csv(path: &Path, input_cols: &[String], target_cols: &[String], header: 
         return Ok(info);
     };
     // 표본이 차지한 바이트를 재서 남은 부분의 행 수를 어림한다.
-    let sampled_bytes = csv_prefix_bytes(path, header, CSV_SCAN_ROWS)?;
+    let sampled_bytes = csv_prefix_bytes(path, header, CSV_SCAN_ROWS, base)?;
     if sampled_bytes == 0 {
         info.samples_estimated = true;
         return Ok(info);
@@ -198,21 +250,43 @@ fn scan_csv(path: &Path, input_cols: &[String], target_cols: &[String], header: 
 
 /// 헤더와 앞 `rows` 개 레코드가 차지하는 바이트 수. 줄바꿈이 따옴표 안에 있을 수 있어
 /// 줄 수로 세지 않고 CSV 리더의 위치를 쓴다.
-fn csv_prefix_bytes(path: &Path, header: bool, rows: usize) -> Result<u64> {
+fn csv_prefix_bytes(path: &Path, header: bool, rows: usize, base: Option<&Path>) -> Result<u64> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(header)
         .from_path(path)
-        .with_context(|| format!("CSV 열기 실패: {}", path.display()))?;
+        .with_context(|| format!("CSV 열기 실패: {}", show(path, base)))?;
     let mut rec = csv::StringRecord::new();
     let mut n = 0usize;
     while n < rows {
         match rdr.read_record(&mut rec) {
             Ok(true) => n += 1,
             Ok(false) => break,
-            Err(e) => bail!("CSV 훑기 실패 ({}): {e}", path.display()),
+            Err(e) => bail!("CSV 훑기 실패 ({}): {e}", show(path, base)),
         }
     }
     Ok(rdr.position().byte())
+}
+
+/// 오류·로그에 넣을 짧은 경로.
+///
+/// 사용자 홈 전체 경로가 그대로 찍히면 로그를 공유할 때 계정 이름과 폴더 구조가 함께 나간다.
+/// 세 단계로 줄인다: `base` 아래면 상대 경로, 아니면 홈 아래는 `~/…`, 그것도 아니면 파일 이름만.
+fn show(path: &Path, base: Option<&Path>) -> String {
+    if let Some(b) = base {
+        if let Ok(rel) = path.strip_prefix(b) {
+            let s = rel.to_string_lossy();
+            if !s.is_empty() {
+                return s.into_owned();
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Ok(rel) = path.strip_prefix(&home) {
+            return format!("~/{}", rel.to_string_lossy());
+        }
+    }
+    path.file_name()
+        .map_or_else(|| "(이름 없는 경로)".to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 fn resolve(base_dir: &Path, path: &str) -> PathBuf {
@@ -304,6 +378,7 @@ fn load_csv(
     target_cols: &[String],
     header: bool,
     limit: Option<usize>,
+    base: Option<&Path>,
 ) -> Result<(Vec<Sample>, DatasetInfo)> {
     if input_cols.is_empty() {
         bail!("CSV 입력 열이 비어 있습니다");
@@ -315,11 +390,11 @@ fn load_csv(
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(header)
         .from_path(path)
-        .with_context(|| format!("CSV 열기 실패: {}", path.display()))?;
+        .with_context(|| format!("CSV 열기 실패: {}", show(path, base)))?;
 
     let names: Vec<String> = if header {
         rdr.headers()
-            .with_context(|| format!("CSV 헤더 읽기 실패: {}", path.display()))?
+            .with_context(|| format!("CSV 헤더 읽기 실패: {}", show(path, base)))?
             .iter()
             .map(|s| s.trim().to_string())
             .collect()
@@ -354,7 +429,7 @@ fn load_csv(
     for (row, rec) in rdr.records().enumerate() {
         if out.len() >= max_rows {
             if limit.is_none() {
-                bail!("CSV 행 수가 상한 {MAX_CSV_ROWS} 를 넘습니다: {}", path.display());
+                bail!("CSV 행 수가 상한 {MAX_CSV_ROWS} 를 넘습니다: {}", show(path, base));
             }
             break;
         }
@@ -367,7 +442,10 @@ fn load_csv(
             );
         }
         if out.len().saturating_mul(per_row) > MAX_DATASET_ELEMS {
-            bail!("CSV 원소 수가 상한 {MAX_DATASET_ELEMS} 를 넘습니다: {}", path.display());
+            bail!(
+                "CSV 원소 수가 상한 {MAX_DATASET_ELEMS} 를 넘습니다: {}",
+                show(path, base)
+            );
         }
         let pick = |idx: &[usize], spec: &[&str]| -> Result<Vec<f32>> {
             idx.iter()
@@ -393,7 +471,7 @@ fn load_csv(
         });
     }
     if out.is_empty() {
-        bail!("CSV 에서 읽은 행이 없습니다: {}", path.display());
+        bail!("CSV 에서 읽은 행이 없습니다: {}", show(path, base));
     }
     let (classes, empty_classes) = csv_classes(&out, tg_idx.len());
     let info = DatasetInfo {
@@ -435,8 +513,8 @@ fn csv_classes(out: &[Sample], target_cols: usize) -> (Vec<String>, Vec<usize>) 
 
 // ───────────────────────────── 이미지 ─────────────────────────────
 
-fn class_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let rd = std::fs::read_dir(dir).with_context(|| format!("폴더 열기 실패: {}", dir.display()))?;
+fn class_dirs(dir: &Path, base: Option<&Path>) -> Result<Vec<(String, PathBuf)>> {
+    let rd = std::fs::read_dir(dir).with_context(|| format!("폴더 열기 실패: {}", show(dir, base)))?;
     let mut v: Vec<(String, PathBuf)> = rd
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
@@ -444,7 +522,7 @@ fn class_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
         .collect();
     v.sort_by(|a, b| natural_cmp(&a.0, &b.0));
     if v.is_empty() {
-        bail!("이미지 폴더에 클래스 하위 폴더가 없습니다: {}", dir.display());
+        bail!("이미지 폴더에 클래스 하위 폴더가 없습니다: {}", show(dir, base));
     }
     Ok(v)
 }
@@ -493,8 +571,8 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-fn image_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let rd = std::fs::read_dir(dir).with_context(|| format!("폴더 열기 실패: {}", dir.display()))?;
+fn image_files(dir: &Path, base: Option<&Path>) -> Result<Vec<PathBuf>> {
+    let rd = std::fs::read_dir(dir).with_context(|| format!("폴더 열기 실패: {}", show(dir, base)))?;
     let mut v: Vec<PathBuf> = rd
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -510,8 +588,8 @@ fn image_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// 이미지 파일 하나를 `[C, H, W]` f32(0..1) 로. `shape` 가 `None` 이면 파일 크기를 그대로 쓴다.
-fn load_image(path: &Path, shape: Option<&[usize]>) -> Result<HostTensor> {
-    let img = decode_image_file(path)?;
+fn load_image(path: &Path, shape: Option<&[usize]>, base: Option<&Path>) -> Result<HostTensor> {
+    let img = decode_image_file(path, &show(path, base))?;
     let (c, h, w) = match shape {
         Some(s) if s.len() == 3 => (s[0], s[1], s[2]),
         Some(s) => bail!("이미지 입력 형상은 [C, H, W] 여야 합니다 (지금 {s:?})"),
@@ -555,8 +633,13 @@ fn load_image(path: &Path, shape: Option<&[usize]>) -> Result<HostTensor> {
     Ok(HostTensor::new(vec![c, h, w], data))
 }
 
-fn load_image_folder(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Result<(Vec<Sample>, DatasetInfo)> {
-    let classes = class_dirs(dir)?;
+fn load_image_folder(
+    dir: &Path,
+    hint: Option<&[usize]>,
+    limit: Option<usize>,
+    base: Option<&Path>,
+) -> Result<(Vec<Sample>, DatasetInfo)> {
+    let classes = class_dirs(dir, base)?;
     let mut shape: Option<Vec<usize>> = hint.map(|h| h.to_vec());
     let mut out = Vec::new();
     let mut names = Vec::with_capacity(classes.len());
@@ -568,11 +651,11 @@ fn load_image_folder(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -
     for (ci, (name, cdir)) in classes.iter().enumerate() {
         names.push(name.clone());
         let mut bucket = Vec::new();
-        for f in image_files(cdir)? {
+        for f in image_files(cdir, base)? {
             if per_class.is_some_and(|p| bucket.len() >= p) {
                 break;
             }
-            let t = load_image(&f, shape.as_deref())?;
+            let t = load_image(&f, shape.as_deref(), base)?;
             if shape.is_none() {
                 shape = Some(t.shape.clone());
             }
@@ -603,7 +686,7 @@ fn load_image_folder(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -
         }
     }
     if out.is_empty() {
-        bail!("이미지 폴더에서 읽은 파일이 없습니다: {}", dir.display());
+        bail!("이미지 폴더에서 읽은 파일이 없습니다: {}", show(dir, base));
     }
     let empty_classes = empty_class_indices(names.len(), target_classes(&out));
     let info = DatasetInfo {
@@ -680,12 +763,17 @@ fn safe_frame_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Result<(Vec<Sample>, DatasetInfo)> {
+fn load_recorded(
+    dir: &Path,
+    hint: Option<&[usize]>,
+    limit: Option<usize>,
+    base: Option<&Path>,
+) -> Result<(Vec<Sample>, DatasetInfo)> {
     let labels_path = dir.join("labels.jsonl");
     let frames_dir = dir.join("frames");
     check_file_size(&labels_path, MAX_LABELS_BYTES, "라벨 파일")?;
     let text = std::fs::read_to_string(&labels_path)
-        .with_context(|| format!("라벨 파일 읽기 실패: {}", labels_path.display()))?;
+        .with_context(|| format!("라벨 파일 읽기 실패: {}", show(&labels_path, base)))?;
 
     let mut shape: Option<Vec<usize>> = hint.map(|h| h.to_vec());
     let mut out = Vec::new();
@@ -704,19 +792,19 @@ fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Re
             continue;
         }
         let rec: LabelLine = serde_json::from_str(line)
-            .with_context(|| format!("{} {}줄을 읽을 수 없습니다", labels_path.display(), i + 1))?;
+            .with_context(|| format!("{} {}줄을 읽을 수 없습니다", show(&labels_path, base), i + 1))?;
         if rec.label < 0 {
             bail!(
                 "{} {}줄: 라벨은 0 이상이어야 합니다 (지금 {})",
-                labels_path.display(),
+                show(&labels_path, base),
                 i + 1,
                 rec.label
             );
         }
         max_label = max_label.max(rec.label);
-        let name = safe_frame_name(&rec.frame).with_context(|| format!("{} {}줄", labels_path.display(), i + 1))?;
+        let name = safe_frame_name(&rec.frame).with_context(|| format!("{} {}줄", show(&labels_path, base), i + 1))?;
         let f = frames_dir.join(name);
-        let t = load_image(&f, shape.as_deref())?;
+        let t = load_image(&f, shape.as_deref(), base)?;
         if shape.is_none() {
             shape = Some(t.shape.clone());
         }
@@ -726,7 +814,7 @@ fn load_recorded(dir: &Path, hint: Option<&[usize]>, limit: Option<usize>) -> Re
         });
     }
     if out.is_empty() {
-        bail!("녹화 폴더에서 읽은 프레임이 없습니다: {}", dir.display());
+        bail!("녹화 폴더에서 읽은 프레임이 없습니다: {}", show(dir, base));
     }
     // 라벨은 0..=max 로 잡되(연속 인덱스 유지), 프레임이 하나도 없는 라벨은 따로 알린다.
     let names: Vec<String> = (0..=max_label).map(|i| i.to_string()).collect();
@@ -797,7 +885,7 @@ mod tests {
             write_png(&c.join("a.png"), 6, 4, 200);
         }
 
-        let (samples, info) = load_image_folder(&dir, Some(&[1, 2, 3]), None).unwrap();
+        let (samples, info) = load_image_folder(&dir, Some(&[1, 2, 3]), None, None).unwrap();
         assert_eq!(info.classes, vec!["alpha".to_string(), "zeta".to_string()]);
         assert_eq!(info.samples, 4);
         assert_eq!(info.input_shape, vec![1, 2, 3]);
@@ -810,7 +898,7 @@ mod tests {
         assert_eq!(samples[3].target.data, vec![1.0]);
 
         // 힌트가 없으면 첫 이미지 크기를 쓴다.
-        let (_, info2) = load_image_folder(&dir, None, None).unwrap();
+        let (_, info2) = load_image_folder(&dir, None, None, None).unwrap();
         assert_eq!(info2.input_shape, vec![1, 4, 6]);
 
         // scan 은 디코드 없이 개수를 세고 첫 장으로 형상을 잡는다.
@@ -842,7 +930,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, info) = load_recorded(&dir, None, None).unwrap();
+        let (_, info) = load_recorded(&dir, None, None, None).unwrap();
         assert_eq!(
             info.classes,
             vec!["0", "1", "2", "3"],
@@ -864,7 +952,7 @@ mod tests {
         write_png(&dir.join("dog/1.png"), 4, 4, 90);
         // ghost 폴더는 비어 있다.
 
-        let (_, loaded) = load_image_folder(&dir, None, None).unwrap();
+        let (_, loaded) = load_image_folder(&dir, None, None, None).unwrap();
         assert_eq!(loaded.classes, vec!["cat", "dog", "ghost"]);
         assert_eq!(loaded.empty_classes, vec![2]);
 
@@ -889,18 +977,18 @@ mod tests {
 
         // 정수 라벨 0, 1, 3 → 클래스 0..=3, 2 는 비어 있다.
         std::fs::write(&p, "x,y\n0.5,0\n0.6,1\n0.7,3\n").unwrap();
-        let (_, info) = load_csv(&p, &["x".into()], &["y".into()], true, None).unwrap();
+        let (_, info) = load_csv(&p, &["x".into()], &["y".into()], true, None, None).unwrap();
         assert_eq!(info.classes, vec!["0", "1", "2", "3"]);
         assert_eq!(info.empty_classes, vec![2]);
 
         // 실수 타깃은 회귀 — 클래스를 만들지 않는다.
         std::fs::write(&p, "x,y\n0.5,1.5\n0.6,2.5\n").unwrap();
-        let (_, info) = load_csv(&p, &["x".into()], &["y".into()], true, None).unwrap();
+        let (_, info) = load_csv(&p, &["x".into()], &["y".into()], true, None, None).unwrap();
         assert!(info.classes.is_empty() && info.empty_classes.is_empty());
 
         // 타깃이 여러 열이어도 회귀.
         std::fs::write(&p, "x,a,b\n0.5,0,1\n0.6,1,0\n").unwrap();
-        let (_, info) = load_csv(&p, &["x".into()], &["a".into(), "b".into()], true, None).unwrap();
+        let (_, info) = load_csv(&p, &["x".into()], &["a".into(), "b".into()], true, None, None).unwrap();
         assert!(info.classes.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -930,7 +1018,7 @@ mod tests {
         )
         .unwrap();
 
-        let (samples, info) = load_recorded(&dir, None, None).unwrap();
+        let (samples, info) = load_recorded(&dir, None, None, None).unwrap();
         assert_eq!(samples.len(), 2);
         assert_eq!(info.input_shape, vec![1, 4, 4]);
         assert_eq!(samples[0].target.data, vec![3.0]);
@@ -989,7 +1077,7 @@ mod tests {
         )
         .unwrap();
 
-        let e = format!("{:#}", load_recorded(&dir, None, None).unwrap_err());
+        let e = format!("{:#}", load_recorded(&dir, None, None, None).unwrap_err());
         assert!(e.contains("frames/"), "경계 위반을 알려야 합니다: {e}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1002,7 +1090,7 @@ mod tests {
         // 값이 수가 아니면 사용자가 쓴 열 이름이 메시지에 있어야 한다.
         let e = format!(
             "{:#}",
-            load_csv(&p, &["a".into()], &["b".into()], true, None).unwrap_err()
+            load_csv(&p, &["a".into()], &["b".into()], true, None, None).unwrap_err()
         );
         assert!(e.contains("'b'"), "사용자가 쓴 열 이름이 없습니다: {e}");
         std::fs::remove_dir_all(&dir).ok();
@@ -1016,7 +1104,7 @@ mod tests {
         // 프로젝트 파일이 정한 목표 형상이 터무니없으면 할당 전에 거절한다.
         let e = format!(
             "{:#}",
-            load_image_folder(&dir, Some(&[3, 100_000, 100_000]), None).unwrap_err()
+            load_image_folder(&dir, Some(&[3, 100_000, 100_000]), None, None).unwrap_err()
         );
         assert!(e.contains("상한"), "{e}");
         std::fs::remove_dir_all(&dir).ok();
@@ -1096,7 +1184,7 @@ mod tests {
             small.push_str(&format!("{}.5,1\n", i));
         }
         std::fs::write(&p, small).unwrap();
-        let info = scan_csv(&p, &["a".into()], &["y".into()], true).unwrap();
+        let info = scan_csv(&p, &["a".into()], &["y".into()], true, None).unwrap();
         assert_eq!(info.samples, 50);
         assert!(!info.samples_estimated, "다 읽었으면 추정이 아니다");
 
@@ -1107,7 +1195,7 @@ mod tests {
             big.push_str(&format!("{}.5,1\n", i % 100));
         }
         std::fs::write(&p, big).unwrap();
-        let info = scan_csv(&p, &["a".into()], &["y".into()], true).unwrap();
+        let info = scan_csv(&p, &["a".into()], &["y".into()], true, None).unwrap();
         assert!(info.samples_estimated, "표본만 읽었으면 추정이다");
         assert!(
             info.samples >= CSV_SCAN_ROWS,
@@ -1133,7 +1221,7 @@ mod tests {
             text.push_str(&format!("{}.5,{label}\n", i % 100));
         }
         std::fs::write(&p, text).unwrap();
-        let info = scan_csv(&p, &["a".into()], &["y".into()], true).unwrap();
+        let info = scan_csv(&p, &["a".into()], &["y".into()], true, None).unwrap();
         // 표본만 보고 "클래스 1 은 비어 있다" 고 단정하면 안 된다.
         assert!(
             info.empty_classes.is_empty(),
@@ -1144,26 +1232,103 @@ mod tests {
     }
 
     #[test]
+    fn count_csv_rows_is_exact_and_handles_quoted_newlines() {
+        let dir = tmp("count-rows");
+        let p = dir.join("q.csv");
+        // 두 번째 레코드의 값 안에 줄바꿈이 있다 — 줄 수(5)와 레코드 수(3)가 다르다.
+        std::fs::write(&p, "a,b\n1,\"두\n줄\"\n2,x\n3,y\n").unwrap();
+        let spec = DatasetSpec::new(
+            "q",
+            DataSource::Csv {
+                path: "q.csv".into(),
+                input_cols: vec!["a".into()],
+                target_cols: vec!["b".into()],
+                header: true,
+            },
+        );
+        assert_eq!(count_csv_rows(&spec, &dir).unwrap(), 3);
+
+        // 헤더가 없으면 모든 레코드를 센다.
+        std::fs::write(&p, "1,x\n2,y\n").unwrap();
+        let no_header = DatasetSpec::new(
+            "q",
+            DataSource::Csv {
+                path: "q.csv".into(),
+                input_cols: vec!["0".into()],
+                target_cols: vec!["1".into()],
+                header: false,
+            },
+        );
+        assert_eq!(count_csv_rows(&no_header, &dir).unwrap(), 2);
+
+        // CSV 가 아니면 거절한다.
+        let syn = DatasetSpec::new(
+            "s",
+            DataSource::Synthetic {
+                kind: SyntheticKind::Xor,
+                samples: 4,
+            },
+        );
+        assert!(count_csv_rows(&syn, &dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn error_messages_do_not_leak_absolute_user_paths() {
+        let dir = tmp("no-leak");
+        let spec = DatasetSpec::new(
+            "없음",
+            DataSource::Csv {
+                path: "sub/missing.csv".into(),
+                input_cols: vec!["a".into()],
+                target_cols: vec!["b".into()],
+                header: true,
+            },
+        );
+        let e = format!("{:#}", load_all(&spec, &dir, None).unwrap_err());
+        assert!(e.contains("sub/missing.csv"), "상대 경로가 보여야 합니다: {e}");
+        assert!(!e.contains(dir.to_str().unwrap()), "절대 경로가 새어 나옵니다: {e}");
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(!e.contains(home.to_str().unwrap()), "홈 경로가 새어 나옵니다: {e}");
+        }
+
+        // base 밖의 절대 경로는 파일 이름만 남는다.
+        let outside = DatasetSpec::new(
+            "밖",
+            DataSource::Csv {
+                path: "/nonexistent-dir-xyz/secret.csv".into(),
+                input_cols: vec!["a".into()],
+                target_cols: vec!["b".into()],
+                header: true,
+            },
+        );
+        let e = format!("{:#}", load_all(&outside, &dir, None).unwrap_err());
+        assert!(e.contains("secret.csv"));
+        assert!(!e.contains("/nonexistent-dir-xyz"), "상위 경로가 새어 나옵니다: {e}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn csv_reads_named_and_numbered_columns() {
         let dir = std::env::temp_dir().join(format!("nl-csv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("t.csv");
         std::fs::write(&p, "a,b,y\n1,2,3\n4,5,6\n").unwrap();
 
-        let by_name = load_csv(&p, &["a".into(), "b".into()], &["y".into()], true, None)
+        let by_name = load_csv(&p, &["a".into(), "b".into()], &["y".into()], true, None, None)
             .unwrap()
             .0;
         assert_eq!(by_name.len(), 2);
         assert_eq!(by_name[0].input.data, vec![1.0, 2.0]);
         assert_eq!(by_name[1].target.data, vec![6.0]);
 
-        let by_index = load_csv(&p, &["0".into(), "1".into()], &["2".into()], true, None)
+        let by_index = load_csv(&p, &["0".into(), "1".into()], &["2".into()], true, None, None)
             .unwrap()
             .0;
         assert_eq!(by_index, by_name);
 
         std::fs::write(&p, "1,2,3\n4,5,6\n").unwrap();
-        let no_header = load_csv(&p, &["0".into(), "1".into()], &["2".into()], false, None)
+        let no_header = load_csv(&p, &["0".into(), "1".into()], &["2".into()], false, None, None)
             .unwrap()
             .0;
         assert_eq!(no_header.len(), 2);

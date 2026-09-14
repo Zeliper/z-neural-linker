@@ -20,7 +20,7 @@ pub use tensor::HostTensor;
 pub use train::{start, TrainEvent, TrainHandle, TrainRequest};
 
 // ── 아래는 스텁 계약에 더해진 항목 ──
-pub use data::{load_all, load_source};
+pub use data::{count_csv_rows, load_all, load_source};
 pub use device::{describe, probe, probe_cached, resolve_cached, CpuB, GpuB};
 pub use exec::{param_name, DynTensor, Model};
 pub use limits::{MAX_IMAGE_DIM, MAX_IMAGE_PIXELS, MAX_TENSOR_ELEMS};

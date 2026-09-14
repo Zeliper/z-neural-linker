@@ -70,11 +70,12 @@ pub fn check_file_size(path: &std::path::Path, max: u64, what: &str) -> anyhow::
         return Ok(());
     };
     if meta.len() > max {
+        // 파일 이름만 쓴다 — 전체 경로는 로그를 공유할 때 계정 이름까지 함께 나간다.
+        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
         anyhow::bail!(
-            "{what} 이 {:.1} MiB 로 상한 {:.1} MiB 를 넘습니다: {}",
+            "{what} 이 {:.1} MiB 로 상한 {:.1} MiB 를 넘습니다: {name}",
             meta.len() as f64 / (1024.0 * 1024.0),
             max as f64 / (1024.0 * 1024.0),
-            path.display()
         );
     }
     Ok(())
@@ -103,17 +104,20 @@ pub fn decode_image(bytes: &[u8], what: &str) -> anyhow::Result<image::DynamicIm
 }
 
 /// 파일에서 이미지를 디코드한다 (같은 상한).
-pub fn decode_image_file(path: &std::path::Path) -> anyhow::Result<image::DynamicImage> {
+///
+/// `shown` 은 오류 메시지에 넣을 **짧은 경로**다. 전체 경로를 그대로 찍으면 로그를 공유할 때
+/// 계정 이름이 함께 나간다 (`data.rs:show` 참고).
+pub fn decode_image_file(path: &std::path::Path, shown: &str) -> anyhow::Result<image::DynamicImage> {
     check_file_size(path, MAX_IMAGE_ALLOC, "이미지 파일")?;
     let mut reader = image::ImageReader::open(path)
-        .map_err(|e| anyhow::anyhow!("이미지 열기 실패 ({}): {e}", path.display()))?
+        .map_err(|e| anyhow::anyhow!("이미지 열기 실패 ({shown}): {e}"))?
         .with_guessed_format()
-        .map_err(|e| anyhow::anyhow!("이미지 포맷을 알 수 없습니다 ({}): {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("이미지 포맷을 알 수 없습니다 ({shown}): {e}"))?;
     reader.limits(image_limits());
     let img = reader
         .decode()
-        .map_err(|e| anyhow::anyhow!("이미지 디코드 실패 ({}): {e}", path.display()))?;
-    check_image_size(img.width(), img.height(), &format!("이미지 {}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("이미지 디코드 실패 ({shown}): {e}"))?;
+    check_image_size(img.width(), img.height(), &format!("이미지 {shown}"))?;
     Ok(img)
 }
 
