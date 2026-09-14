@@ -17,6 +17,10 @@ use crate::{
 
 /// 추론 API 파이프라인이 여는 주소. 배포 앱을 바깥 프로그램이 호출하는 입구다.
 pub const API_BIND: &str = "127.0.0.1:8799";
+/// 사분면 CNN 샘플의 추론 API 주소.
+///
+/// XOR 과 **다른 포트**를 쓴다 — 두 샘플로 만든 앱을 같은 컴퓨터에서 동시에 띄울 수 있어야 한다.
+pub const API_BIND_CNN: &str = "127.0.0.1:8800";
 /// 추론 API 가 받는 경로.
 pub const API_PATH: &str = "/infer";
 
@@ -84,7 +88,7 @@ fn link(pl: &mut Pipeline, id: u128, from: PNodeId, to: PNodeId) {
 /// **주의**: 들어오는 값은 HTTP 본문에서 온 텍스트/JSON 이다. 그래서 이 파이프라인이 실제로 답하려면
 /// 모델의 입력 페이로드가 숫자 계열(`Vector`·`Tensor`·`Scalar`)이어야 한다. `Image` 필드는 `Value::Image`
 /// 나 3차원 텐서를 요구하므로, 이미지 모델의 API 는 지금 구조로는 답하지 못하고 시간 초과로 끝난다.
-pub fn api_pipeline(base: u128, model: ModelId, payload: PayloadId) -> Pipeline {
+pub fn api_pipeline(base: u128, bind: &str, model: ModelId, payload: PayloadId) -> Pipeline {
     let mut pl = Pipeline::new("추론 API");
     pl.id = PipelineId::from_u128(base);
     pl.tick_hz = 60.0;
@@ -93,7 +97,7 @@ pub fn api_pipeline(base: u128, model: ModelId, payload: PayloadId) -> Pipeline 
         PNodeKind::Source {
             // 샘플은 루프백(127.0.0.1)에만 묶으므로 토큰 없이도 열린다. 바깥에서 닿는 주소로 바꾸려면
             // 토큰을 함께 넣어야 한다 — 그러지 않으면 실행기가 거부한다.
-            source: Source::HttpServer { bind: API_BIND.into(), path: API_PATH.into(), token: None },
+            source: Source::HttpServer { bind: bind.into(), path: API_PATH.into(), token: None },
         },
         "요청",
         0,
@@ -202,7 +206,7 @@ pub fn xor_project() -> Project {
     link(&mut pl, 0x2_3102, PNodeId::from_u128(0x2_3004), PNodeId::from_u128(0x2_3005));
 
     // ── 파이프라인 ②: HTTP 요청 → 모델 → HTTP 응답 ──
-    let api = api_pipeline(0x2_4000, m.id, payload.id);
+    let api = api_pipeline(0x2_4000, API_BIND, m.id, payload.id);
 
     // ── 빌드 설정: 호스트 대상 하나만 미리 골라 둔다 ──
     p.settings.build = Some(BuildSpec {
@@ -283,7 +287,7 @@ pub fn quadrants_cnn_project() -> Project {
         ..TrainConfig::default()
     };
 
-    let api = api_pipeline(0x3_4000, m.id, payload.id);
+    let api = api_pipeline(0x3_4000, API_BIND_CNN, m.id, payload.id);
     p.pipelines.insert(api.id, api);
     p.payloads.insert(payload.id, payload);
     p.datasets.insert(dataset.id, dataset);
@@ -432,7 +436,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}: HTTP 서버 노드가 없다"));
             match &server.kind {
                 PNodeKind::Source { source: Source::HttpServer { bind, path, token } } => {
-                    assert_eq!(bind, API_BIND);
+                    assert!([API_BIND, API_BIND_CNN].contains(&bind.as_str()), "{name}: 모르는 주소 {bind}");
                     assert_eq!(path, API_PATH);
                     assert!(token.is_none(), "샘플은 루프백이라 토큰 없이 연다");
                     assert!(crate::pipeline::is_loopback_bind(bind), "샘플 주소가 루프백이 아니다");
@@ -450,6 +454,24 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    /// 두 샘플로 만든 앱을 동시에 띄울 수 있어야 한다 — 추론 API 주소가 겹치면 안 된다.
+    #[test]
+    fn the_two_samples_listen_on_different_ports() {
+        assert_ne!(API_BIND, API_BIND_CNN);
+        let bind_of = |p: &Project| -> String {
+            let api = p.pipelines.values().find(|x| x.name == "추론 API").expect("추론 API");
+            api.nodes
+                .values()
+                .find_map(|n| match &n.kind {
+                    PNodeKind::Source { source: Source::HttpServer { bind, .. } } => Some(bind.clone()),
+                    _ => None,
+                })
+                .expect("HTTP 서버 노드")
+        };
+        assert_eq!(bind_of(&xor_project()), API_BIND);
+        assert_eq!(bind_of(&quadrants_cnn_project()), API_BIND_CNN);
     }
 
     /// 두 샘플의 노드 id 묶음이 겹치지 않아야 한다 (한 프로젝트에 둘을 합쳐도 안전하게).
