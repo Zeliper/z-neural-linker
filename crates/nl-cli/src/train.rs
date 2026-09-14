@@ -83,6 +83,8 @@ pub fn run(args: Args<'_>) -> Result<i32> {
         base_dir: l.base_dir.clone(),
         run_dir: run_dir.clone(),
         resume_from,
+        // 명령줄은 한 번에 하나만 돌린다.
+        allow_concurrent: false,
     })
     .context("학습을 시작하지 못했다")?;
 

@@ -23,7 +23,7 @@ pub use device::{enumerate, resolve, DeviceInfo, DeviceKind, Resolved};
 pub use infer::Session;
 pub use onnx::{export as export_onnx, Batch, ExportOptions, ExportReport};
 pub use tensor::HostTensor;
-pub use train::{start, TrainEvent, TrainHandle, TrainRequest};
+pub use train::{active_count, start, TrainEvent, TrainHandle, TrainRequest};
 
 // ── 아래는 스텁 계약에 더해진 항목 ──
 pub use data::{count_csv_rows, load_all, load_source};

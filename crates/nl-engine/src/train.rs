@@ -21,7 +21,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,51 @@ pub struct TrainRequest {
     pub run_dir: PathBuf,
     /// 이 가중치에서 이어서 학습 (없으면 새로 초기화).
     pub resume_from: Option<PathBuf>,
+    /// 다른 학습이 이미 도는데도 시작할 것인가. 기본은 **거부**다 ([`start`] 참고).
+    ///
+    /// `Default` 가 `false` 라 `..Default::default()` 를 쓰는 호출부는 그대로 두면 된다.
+    pub allow_concurrent: bool,
+}
+
+// ───────────────────────────── 동시 실행 가드 ─────────────────────────────
+
+/// 이 프로세스에서 도는 학습 수.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// 지금 도는 학습 수. 앱이 "학습 시작" 버튼을 비활성화할 때 쓴다.
+///
+/// 값을 보고 [`start`] 를 부르는 사이에 다른 스레드가 끼어들 수 있으므로 **이 값으로 결정하지 말 것** —
+/// 결정은 `start` 가 원자적으로 한다. 이것은 화면에 보여 주기 위한 값이다.
+pub fn active_count() -> usize {
+    ACTIVE.load(Ordering::SeqCst)
+}
+
+/// 학습 스레드가 사는 동안 [`ACTIVE`] 를 하나 올려 둔다.
+///
+/// `Drop` 이라 스레드가 패닉해도 내려간다 — 한 번 패닉한 뒤로 영영 학습을 못 하게 되면
+/// 사용자는 앱을 다시 켜는 수밖에 없다.
+struct ActiveGuard;
+
+impl ActiveGuard {
+    /// 자리를 잡는다. `allow_concurrent` 가 아니고 이미 도는 학습이 있으면 `None`.
+    ///
+    /// 검사와 증가를 한 번의 CAS 로 묶는다. 나눠 두면 두 스레드가 동시에 통과한다.
+    fn take(allow_concurrent: bool) -> Option<Self> {
+        if allow_concurrent {
+            ACTIVE.fetch_add(1, Ordering::SeqCst);
+            return Some(Self);
+        }
+        ACTIVE
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 const RUNNING: u8 = 0;
@@ -224,9 +269,20 @@ impl TrainControl {
 
 /// 학습을 시작한다. 즉시 돌아오며, 실패도 `TrainEvent::Failed` 로 온다(스레드 생성 실패만 Err).
 pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
+    // 자리를 **스레드를 띄우기 전에** 잡는다. 띄운 뒤에 검사하면 이미 장치를 건드린 뒤다.
+    let guard = ActiveGuard::take(req.allow_concurrent).ok_or_else(|| {
+        anyhow::anyhow!(
+            "학습이 이미 진행 중입니다 ({} 개) — 끝나기를 기다리거나 \
+             정말 동시에 돌리려면 TrainRequest::allow_concurrent 를 켜세요",
+            active_count()
+        )
+    })?;
+
     let (tx, rx) = crossbeam_channel::bounded(EVENT_CAPACITY);
     let (handle, ctl) = TrainHandle::new(req.run_id, rx);
-    std::thread::Builder::new().name("nl-train".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("nl-train".into()).spawn(move || {
+        // 스레드가 끝나면(패닉 포함) 자리를 놓는다.
+        let _guard = guard;
         let mut run = RunRecord {
             id: req.run_id,
             model: req.model.id,
@@ -276,7 +332,9 @@ pub fn start(req: TrainRequest) -> anyhow::Result<TrainHandle> {
             }
         }
         ctl.mark_done();
-    })?;
+    });
+    // 스레드를 못 띄웠으면 자리도 도로 놓아야 한다 — `guard` 는 클로저와 함께 사라진다.
+    spawned?;
     Ok(handle)
 }
 

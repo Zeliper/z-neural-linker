@@ -193,6 +193,14 @@ UI 구현 방식·문서 상태(op 기반 undo)·GUI 테스트·패키징은 `..
   (기본값 `grad_clip: 0.0` 이라 평소에는 이 읽기조차 없다).
 
 ### 학습 (`train.rs`)
+- **한 프로세스에 학습은 하나다.** `start` 는 이미 도는 학습이 있으면 거부한다
+  (`TrainRequest::allow_concurrent: true` 로 명시하면 허용). 검사와 자리 잡기를 하나의 CAS 로 묶어
+  두 스레드가 동시에 통과하지 못하게 하고, 자리는 RAII 가드가 들고 있어 **스레드가 패닉해도 돌아온다** —
+  한 번 패닉한 뒤 영영 학습을 못 하게 되면 사용자는 앱을 다시 켜는 수밖에 없다.
+  `train::active_count()` 가 지금 도는 수를 준다(버튼 비활성화용 표시값이지 판단 근거가 아니다 —
+  판단은 `start` 가 원자적으로 한다).
+  **추론은 막지 않는다.** `Session::load`/`run` 은 학습 중에도 열린다. CPU 에서는 안전하고 GPU 에서는
+  같은 장치일 때 느려질 뿐이다.
 - `Trainer::spawn(model, dataset, config, device) -> (JoinHandle, Receiver<TrainEvent>, Control)`.
   `TrainEvent::{Started{device}, Step{epoch, step, loss}, Epoch{epoch, train_loss, val_loss, val_metric}, Checkpoint(path),
   Finished, Failed(String)}`, `Control::{pause, resume, stop}`.

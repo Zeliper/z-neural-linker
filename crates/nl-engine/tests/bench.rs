@@ -92,6 +92,8 @@ fn train_briefly(mut def: ModelDef, kind: SyntheticKind, dir: &Path) -> (ModelDe
         base_dir: dir.to_path_buf(),
         run_dir: dir.join("run"),
         resume_from: None,
+        // 시험은 병렬로 도니 동시 학습을 명시적으로 허용한다.
+        allow_concurrent: true,
     };
     let handle = nl_engine::start(req).expect("학습 시작");
     let mut record = None;
