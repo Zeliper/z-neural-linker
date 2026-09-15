@@ -39,9 +39,9 @@ cd neural-linker
 ./install.sh --uninstall     # 제거
 ```
 
-`~/.local/bin/nl-app` 과 데스크톱 항목, `.nlproj` 파일 연결이 들어갑니다. 아카이브에 `nl-runtime` 이 같이 있으면
-그것도 `~/.local/bin` 에 놓습니다 — 빌드할 때 빌더가 바로 찾습니다. `$PATH` 에 `~/.local/bin` 이 있어야 터미널에서
-바로 실행됩니다.
+`~/.local/bin/nl-app` 과 데스크톱 항목, `.nlproj` 파일 연결이 들어갑니다. 아카이브에 `nl-runtime` 과 명령줄 도구 `nl` 이
+같이 있으면 그것도 `~/.local/bin` 에 놓습니다 — `nl-runtime` 은 빌드할 때 빌더가 바로 찾고, `nl` 은 [명령줄 `nl`](#명령줄-nl)
+에서 씁니다. `$PATH` 에 `~/.local/bin` 이 있어야 터미널에서 바로 실행됩니다.
 
 풀어서 바로 써도 됩니다. 설치 없이 `./nl-app` 을 실행하면 그대로 뜹니다.
 

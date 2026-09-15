@@ -18,6 +18,30 @@ import hashlib
 import json
 import os
 import sys
+import urllib.parse
+
+
+def base_url_ok(base: str) -> bool:
+    """자산 기본 URL 이 받는 쪽(`nl_update::url::require_https`)의 규칙에 맞는가.
+
+    https 는 언제나 통과. 평문 http 는 **두 조건을 모두** 만족할 때만 — `NL_ALLOW_HTTP=1` 이고
+    호스트가 루프백일 때만 — 통과한다. 루프백 서버로 업데이트 경로를 실제로 돌려 보는
+    연습(docs/RELEASE.md ⑨)에 필요하다. 바깥 주소에는 어떤 경우에도 열리지 않는다.
+    """
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http":
+        print(f"자산 기본 URL 은 https 여야 합니다: {base}", file=sys.stderr)
+        return False
+    if os.environ.get("NL_ALLOW_HTTP") != "1":
+        print(f"자산 기본 URL 은 https 여야 합니다: {base}", file=sys.stderr)
+        return False
+    host = (parsed.hostname or "").lower()
+    if host == "localhost" or host == "::1" or host.startswith("127."):
+        return True
+    print(f"NL_ALLOW_HTTP 는 루프백 주소에만 먹습니다 (받은 주소: {base})", file=sys.stderr)
+    return False
 
 
 def main(argv: list) -> int:
@@ -26,8 +50,7 @@ def main(argv: list) -> int:
         return 2
     version, base, out_path = argv[1], argv[2].rstrip("/"), argv[3]
     # 자산 주소는 https 여야 한다 — 받는 쪽(nl-update)이 평문 http 를 거절한다.
-    if not base.startswith("https://"):
-        print(f"자산 기본 URL 은 https 여야 합니다: {base}", file=sys.stderr)
+    if not base_url_ok(base):
         return 2
 
     assets = {}

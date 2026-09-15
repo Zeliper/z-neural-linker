@@ -134,7 +134,10 @@ log "로그   $OUT"
 run_step fmt      "포맷 검사"   cargo fmt --all -- --check
 run_step clippy   "클리피"      cargo clippy --workspace --all-targets -- -D warnings
 run_step test     "테스트"      env NL_SNAPSHOT_REQUIRED=1 cargo test --workspace
-run_step build    "릴리스 빌드" cargo build --release -p nl-runtime -p nl-cli
+# `nl-app` 도 함께 만든다. `--gui` 시나리오는 `target/release/nl-app` 을 쓰는데, 하네스는
+# **그 파일이 없을 때만** 빌드한다 — 낡은 바이너리가 남아 있으면 방금 고친 코드가 아니라
+# 옛것을 시험하고도 통과로 보고한다(실측).
+run_step build    "릴리스 빌드" cargo build --release -p nl-app -p nl-runtime -p nl-cli
 # 종단 시험은 샘플 프로젝트를 복사해 **빈 포트로 옮겨** 띄운다(`rebind_http_server`). 8799 를
 # 다른 세션이 쥐고 있어도 통과해야 하며, 통과하지 않으면 그것이 버그다.
 run_step e2e      "종단 시험"   env NL_E2E=1 cargo test -p nl-cli --test e2e

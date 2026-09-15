@@ -2,8 +2,8 @@
 # Forgejo Actions 는 GitHub 문법을 그대로 읽으므로 `.forgejo/workflows/release.yml` 에 같은 파일이 있다.
 #
 # 산출물
-#   neural-linker-<ver>-linux-x86_64.tar.gz   빌더 + 런타임 + install.sh + .desktop
-#   neural-linker-<ver>-windows-x86_64.zip    빌더 + 런타임
+#   neural-linker-<ver>-linux-x86_64.tar.gz   빌더 + 런타임 + CLI + install.sh + .desktop
+#   neural-linker-<ver>-windows-x86_64.zip    빌더 + 런타임 + CLI
 #   nl-app, nl-app.exe                        자동 업데이트가 그대로 내려받는 알맹이
 #   nl-runtime, nl-runtime.exe                빌더가 배포판을 만들 때 쓰는 런타임
 #   latest.json                               빌더 자체 업데이트 매니페스트
@@ -64,10 +64,10 @@ jobs:
           echo "버전: $VERSION"
 
       - name: Linux 빌드
-        run: cargo build --release -p nl-app -p nl-runtime
+        run: cargo build --release -p nl-app -p nl-runtime -p nl-cli
 
       - name: Windows 크로스 빌드
-        run: cargo xwin build --release -p nl-app -p nl-runtime --target "$WINDOWS_TARGET"
+        run: cargo xwin build --release -p nl-app -p nl-runtime -p nl-cli --target "$WINDOWS_TARGET"
 
       - name: 아카이브 만들기
         id: package
@@ -82,8 +82,11 @@ jobs:
           mkdir -p "$OUT"
 
           # 포장 규칙은 packaging/lib.sh 에 있다 — 로컬 스크립트도 같은 함수를 쓴다.
-          nl_pack_linux   "$OUT/neural-linker-$VERSION-linux-x86_64.tar.gz"   "$OUT" "$LIN/nl-app" "$LIN/nl-runtime"
-          nl_pack_windows "$OUT/neural-linker-$VERSION-windows-x86_64.zip" "$OUT" "$WIN/nl-app.exe" "$WIN/nl-runtime.exe"
+          # CLI(`nl`)도 넣는다. 사용자 가이드가 `nl` 을 배포본에서 바로 쓰는 명령으로 안내하고,
+          # install.sh 도 아카이브에 `nl` 이 있으면 ~/.local/bin 에 놓는다 — 빠지면 문서대로 되지 않는다.
+          # 실행 파일 이름은 크레이트 이름(nl-cli)이 아니라 `nl` 이다.
+          nl_pack_linux   "$OUT/neural-linker-$VERSION-linux-x86_64.tar.gz"   "$OUT" "$LIN/nl-app" "$LIN/nl-runtime" "$LIN/nl"
+          nl_pack_windows "$OUT/neural-linker-$VERSION-windows-x86_64.zip" "$OUT" "$WIN/nl-app.exe" "$WIN/nl-runtime.exe" "$WIN/nl.exe"
 
           # ── 자동 업데이트가 그대로 내려받는 알맹이 ──
           cp "$LIN/nl-app" "$LIN/nl-runtime" "$WIN/nl-app.exe" "$WIN/nl-runtime.exe" "$OUT/"

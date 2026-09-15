@@ -11,10 +11,34 @@ NOTES="${NOTES:-}"
 PUBLISHED_AT="${PUBLISHED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
 # 자산 주소는 https 여야 한다 — 배포 앱이 평문 http 매니페스트·자산을 받지 않는다.
-case "$BASE" in
-  https://*) ;;
-  *) echo "기본 URL 은 https 여야 합니다: $BASE" >&2; exit 1 ;;
-esac
+#
+# 시험용 탈출구는 클라이언트(`nl_update::url::require_https`)와 **같은 두 조건**일 때만 열린다:
+# `NL_ALLOW_HTTP=1` 이고 호스트가 루프백일 것. 루프백 서버로 업데이트 경로를 실제로 돌려 보는
+# 연습(docs/RELEASE.md ⑨)에 필요하다 — 여기서만 막으면 클라이언트가 받아 주는 매니페스트를
+# 정작 이 도구로는 만들 수 없다. 바깥 주소에는 어떤 경우에도 열리지 않는다.
+nl_base_url_ok() {
+  local base="$1" rest host
+  case "$base" in
+    https://*) return 0 ;;
+    http://*)  rest="${base#http://}" ;;
+    *) echo "기본 URL 에 스킴이 없습니다 (https:// 로 시작해야 합니다): $base" >&2; return 1 ;;
+  esac
+  if [[ "${NL_ALLOW_HTTP:-}" != "1" ]]; then
+    echo "기본 URL 은 https 여야 합니다: $base" >&2; return 1
+  fi
+  # 사용자 정보·경로·질의를 걷어내고 호스트만 남긴다. IPv6 리터럴은 대괄호 안이 호스트다.
+  host="${rest%%[/?#]*}"
+  host="${host##*@}"
+  case "$host" in
+    \[*\]*) host="${host#\[}"; host="${host%%\]*}" ;;
+    *)        host="${host%%:*}" ;;
+  esac
+  case "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" in
+    localhost|127.*|::1) return 0 ;;
+    *) echo "NL_ALLOW_HTTP 는 루프백 주소에만 먹습니다 (받은 주소: $base)" >&2; return 1 ;;
+  esac
+}
+nl_base_url_ok "$BASE" || exit 1
 entries=()
 for f in "$@"; do
   name="$(basename "$f")"

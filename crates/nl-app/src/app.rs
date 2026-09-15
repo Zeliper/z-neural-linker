@@ -2834,12 +2834,16 @@ impl NlApp {
         let events = u.poll();
         let busy = u.is_busy();
         let mut lines = Vec::new();
+        let mut applied = false;
         for ev in events {
             match ev {
                 nl_update::Event::UpToDate => lines.push("업데이트: 최신입니다".to_string()),
                 nl_update::Event::Available(a) => lines.push(format!("업데이트: 새 버전 v{}", a.version)),
                 nl_update::Event::Downloaded(p) => lines.push(format!("업데이트: 내려받음 {}", p.display())),
-                nl_update::Event::Applied(a) => lines.push(format!("업데이트: {}", a.message())),
+                nl_update::Event::Applied(a) => {
+                    lines.push(format!("업데이트: {}", a.message()));
+                    applied = true;
+                }
                 nl_update::Event::Failed(e) => lines.push(format!("업데이트 실패: {e}")),
                 // 공개키가 없거나 주소가 https 가 아니면 확인 자체를 하지 않는다.
                 nl_update::Event::Disabled(why) => lines.push(format!("업데이트 사용 불가: {why}")),
@@ -2848,6 +2852,16 @@ impl NlApp {
         }
         for l in lines {
             self.log(l);
+        }
+        // `nl_update::apply` 의 계약: 적용했으면 **어느 결과든 호출자가 앱을 끝내야 한다.**
+        //   · 실행 파일을 바꾼 경우 — 새 프로세스는 이미 떠 있다. 여기서 끝내지 않으면 새 빌더와
+        //     옛 빌더가 함께 남아 창이 둘이 된다(드라이런에서 실측).
+        //   · 다시 띄우지 못한 경우 — 디스크의 실행 파일은 이미 새 것이라 이 프로세스는 옛 코드다.
+        //   · 설치 프로그램을 띄운 경우 — 앱이 잡고 있는 파일을 설치 프로그램이 바꿔야 한다.
+        // 적용은 저장하지 않은 변경이 없을 때만 시작하므로(`UpdateAction::Apply`) 종료 확인을 건너뛴다.
+        if applied {
+            self.close_confirmed = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if busy {
             ctx.request_repaint_after(REPOLL);
