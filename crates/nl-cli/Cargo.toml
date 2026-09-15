@@ -32,6 +32,12 @@ image.workspace = true
 # `nl tls-cert` 가 자체 서명 인증서를 만든다 (시험 전용이 아니라 일반 의존성).
 rcgen.workspace = true
 
+[features]
+default = []
+# ONNX 가져오기를 켠다 (`--features onnx-import`). 자세한 것은 `nl-io` 의 같은 이름 기능과
+# docs/research/onnx-2026-09-14.md.
+onnx-import = ["nl-io/onnx-import"]
+
 [dev-dependencies]
 # 종단 테스트가 배포판에 HTTP 요청을 보낸다 (nl-io 는 이미 일반 의존성이라 새로 추가되는 것은 없다).
 

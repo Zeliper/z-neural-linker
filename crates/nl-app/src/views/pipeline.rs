@@ -257,6 +257,7 @@ pub fn inspect_node(
             }
         }
         PNodeKind::Model { model, payload } => changed |= model_editor(ui, model, payload, ctx),
+        PNodeKind::OnnxModel { path, payload } => changed |= onnx_editor(ui, path, payload, ctx),
         PNodeKind::Logic { logic } => changed |= logic_editor(ui, logic, state),
         PNodeKind::Sink { sink } => changed |= sink_editor(ui, sink, ctx, &mut actions, pid, state),
     }
@@ -969,6 +970,67 @@ fn model_editor(ui: &mut egui::Ui, model: &mut ModelId, payload: &mut Option<Pay
         .selected_text(plabel)
         .show_ui(ui, |ui| {
             if ui.selectable_label(payload.is_none(), "(모델 기본값)").clicked() && payload.is_some() {
+                *payload = None;
+                changed = true;
+            }
+            for (id, p) in &ctx.project.payloads {
+                if ui.selectable_label(*payload == Some(*id), &p.name).clicked() && *payload != Some(*id) {
+                    *payload = Some(*id);
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// 가져온 ONNX 노드 편집기.
+///
+/// 우리 모델과 달리 고를 목록이 없다 — 프로젝트 폴더 안의 파일 경로 하나가 전부다.
+/// 경로는 실행할 때 프로젝트 폴더 안으로 묶이므로(`resolve_inside`) 바깥 파일은 읽히지 않는다.
+/// 페이로드에 `(모델 기본값)` 이 없는 것도 차이다 — `ModelDef` 가 없어 물려받을 것이 없다.
+fn onnx_editor(ui: &mut egui::Ui, path: &mut String, payload: &mut Option<PayloadId>, ctx: &ViewCtx) -> bool {
+    let mut changed = false;
+    ui.label(RichText::new("ONNX 파일").color(COL_WEAK).size(11.0));
+    changed |= ui
+        .add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY))
+        .on_hover_text("프로젝트 파일이 있는 폴더 기준 상대 경로")
+        .changed();
+
+    if path.trim().is_empty() {
+        ui.label(RichText::new("✖ 경로가 비어 있습니다").color(COL_ERROR).size(11.0));
+    } else {
+        match ctx.base_dir.as_ref().map(|d| d.join(path.trim())) {
+            // 프로젝트를 아직 저장하지 않았으면 기준 폴더가 없어 존재를 확인할 수 없다.
+            None => ui.label(
+                RichText::new("프로젝트를 저장하면 파일이 있는지 확인합니다")
+                    .color(COL_WEAK)
+                    .size(11.0),
+            ),
+            Some(p) if p.is_file() => ui.label(RichText::new("✔ 파일 있음").color(COL_OK).size(11.0)),
+            Some(_) => ui.label(
+                RichText::new("⚠ 파일을 찾지 못했습니다 — 실행할 때 오류가 납니다")
+                    .color(COL_WARN)
+                    .size(11.0),
+            ),
+        };
+    }
+
+    ui.label(
+        RichText::new("추론 전용입니다. 학습·가중치 편집 대상이 아니고 캔버스에도 그려지지 않습니다.")
+            .color(COL_WEAK)
+            .size(10.5),
+    );
+
+    ui.add_space(4.0);
+    ui.label(RichText::new("페이로드").color(COL_WEAK).size(11.0));
+    let plabel = payload
+        .and_then(|p| ctx.project.payloads.get(&p))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "(없음 — 텐서 그대로)".into());
+    egui::ComboBox::from_id_salt("pnode-onnx-payload")
+        .selected_text(plabel)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(payload.is_none(), "(없음 — 텐서 그대로)").clicked() && payload.is_some() {
                 *payload = None;
                 changed = true;
             }

@@ -135,8 +135,13 @@
       `nl_engine::onnx_import::OnnxSession::{load, run}`. 켜면 배포 바이너리가 **+34 MiB(+46%)** 라
       기본 배포판에는 들어가지 않고 **CI 잡도 두지 않는다**(빌드 14분). 끈 상태에서는 의존성 트리에
       tract 가 나타나지 않는 것을 확인했다. 실측 근거는 `docs/research/onnx-2026-09-14.md`
-- [ ] 가져온 ONNX 를 파이프라인에 꽂기 — `PNodeKind::OnnxModel { path, payload }`. **미착수**
-      (`PNodeKind` 를 전수 match 하는 앱 코드와 함께 가야 해서 미뤘다)
+- [x] 가져온 ONNX 를 파이프라인에 꽂기 — `PNodeKind::OnnxModel { path, payload }`.
+      **변형 자체는 기능 플래그와 무관하게 언제나 있다** — 데이터 모델을 기능으로 가르면 켠 빌드가
+      만든 프로젝트를 끈 빌드가 열지 못한다. 꺼진 빌드에서는 그 노드만 "이 빌드는 ONNX 가 꺼져
+      있다" 로 실패하고 나머지 파이프라인은 돈다.
+      경로는 `nl_core::paths::resolve_inside` 로 프로젝트 폴더 안에 묶인다(가중치와 같은 규칙).
+      빌드하면 `nl_bundle::collect_onnx` 가 `.onnx` 를 `assets/` 로 옮기고 노드 경로를 다시 쓴다.
+      빌더에는 팔레트 "모델 → ONNX 파일에서…" 와 인스펙터 편집기가 붙는다
 - [ ] 학습 상황 프리셋: 분류·회귀·화면 상태 분류·행동 복제 템플릿. **미착수**
 
 ## M4 — 협업·서버형 배포 · **절반**

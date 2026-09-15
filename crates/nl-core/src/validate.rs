@@ -196,6 +196,19 @@ pub fn validate(p: &Project) -> Vec<Issue> {
                     }
                 }
             }
+            // 가져온 ONNX. 파일이 실제로 열리는지는 여기서 보지 않는다 — 경로는 실행 시
+            // `resolve_inside` 로 프로젝트 폴더 안에 묶이고, 파일이 없으면 그때 오류가 난다.
+            // 여기서는 문서만 보고 알 수 있는 것을 본다.
+            if let PNodeKind::OnnxModel { path, payload } = &n.kind {
+                if path.trim().is_empty() {
+                    v.push(err(Where::PNode(*pid, n.id), "ONNX 파일 경로가 비어 있음"));
+                }
+                if let Some(pay) = payload {
+                    if !p.payloads.contains_key(pay) {
+                        v.push(err(Where::PNode(*pid, n.id), "참조하는 페이로드가 없음"));
+                    }
+                }
+            }
             // HTTP 응답 싱크는 같은 파이프라인의 HTTP 서버 소스를 가리켜야 한다.
             if let PNodeKind::Sink {
                 sink: Sink::HttpReply { server },

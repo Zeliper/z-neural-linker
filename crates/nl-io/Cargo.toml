@@ -28,6 +28,13 @@ sysinfo.workspace = true
 # 녹화 meta.json 의 시작 시각(RFC 3339)
 chrono.workspace = true
 
+[features]
+default = []
+# ONNX 가져오기 (`PNodeKind::OnnxModel` 실행). 끄면 그 노드가 "이 빌드는 ONNX 가 꺼져 있다" 로
+# 실패한다 — 프로젝트를 읽고 쓰는 것은 기능과 무관하게 언제나 된다.
+# 켜면 배포 바이너리가 커진다. 근거는 docs/research/onnx-2026-09-14.md.
+onnx-import = ["nl-engine/onnx-import"]
+
 [dev-dependencies]
 # `http.rs` 의 왕복 시험이 띄우는 로컬 서버. 인바운드 서버(`Source::HttpServer`)는
 # `src/httpd.rs` 가 std 만으로 직접 구현하므로 일반 의존성에는 없다.

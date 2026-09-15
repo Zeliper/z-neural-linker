@@ -268,8 +268,12 @@ fn make_bundle(
         }
     }
 
+    // 가져온 ONNX 는 자산으로 담고 노드의 경로를 번들 기준으로 바꾼다 (가중치와 같은 일).
+    let onnx = nl_bundle::collect_onnx(&mut packed, base_dir)?;
+
     let mut bundle = Bundle::new(manifest, packed);
     bundle.weights = weights;
+    bundle.assets = onnx;
     Ok((bundle, missing))
 }
 

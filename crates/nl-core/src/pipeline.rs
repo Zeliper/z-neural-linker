@@ -195,6 +195,21 @@ pub enum PNodeKind {
         #[serde(default)]
         payload: Option<PayloadId>,
     },
+    /// 바깥에서 받은 ONNX 모델으로 추론. **추론 전용**이다.
+    ///
+    /// 우리 [`Model`](PNodeKind::Model) 과 달리 `ModelDef` 가 없다 — 캔버스에 그려지지 않고,
+    /// 학습·가중치 편집 대상도 아니다. 그래프를 우리 `LayerKind` 로 역변환하지 않기 때문이다.
+    ///
+    /// 실행에는 `nl-engine` 의 `onnx-import` 기능이 필요하다. 꺼진 빌드에서도 **이 변형은 읽고
+    /// 쓸 수 있다** — 데이터 모델을 기능 플래그로 가르면 켠 빌드가 만든 프로젝트를 끈 빌드가
+    /// 열지 못한다. 실행하려 할 때만 "이 빌드는 ONNX 가 꺼져 있다" 고 알린다.
+    OnnxModel {
+        /// 프로젝트 폴더 아래 상대 경로. 파일 소스·가중치와 같은 규칙이라 바깥 파일은 못 읽는다.
+        path: String,
+        /// 인코더/디코더. 없으면 텐서를 그대로 주고받는다.
+        #[serde(default)]
+        payload: Option<PayloadId>,
+    },
     Logic {
         logic: Logic,
     },
@@ -218,6 +233,7 @@ impl PNodeKind {
                 Source::HttpServer { .. } => "HTTP 서버",
             },
             PNodeKind::Model { .. } => "모델",
+            PNodeKind::OnnxModel { .. } => "ONNX 모델",
             PNodeKind::Logic { logic } => match logic {
                 Logic::Threshold { .. } => "임계값",
                 Logic::Debounce { .. } => "디바운스",

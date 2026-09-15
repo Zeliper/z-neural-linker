@@ -43,6 +43,8 @@ pub fn kind_color(kind: &PNodeKind) -> Color32 {
     match kind {
         PNodeKind::Source { .. } => Color32::from_rgb(0x4c, 0xaf, 0x50),
         PNodeKind::Model { .. } => Color32::from_rgb(0x42, 0x85, 0xf4),
+        // 가져온 ONNX 도 모델 자리지만 우리 것이 아니라는 표시로 청록을 쓴다.
+        PNodeKind::OnnxModel { .. } => Color32::from_rgb(0x00, 0x96, 0x88),
         PNodeKind::Logic { .. } => Color32::from_rgb(0xff, 0x98, 0x00),
         PNodeKind::Sink { .. } => Color32::from_rgb(0x9c, 0x27, 0xb0),
     }
@@ -80,6 +82,13 @@ pub fn kind_summary(kind: &PNodeKind, project: &nl_core::Project) -> String {
             match payload.and_then(|p| project.payloads.get(&p)) {
                 Some(p) => format!("{name} · {}", p.name),
                 None => name,
+            }
+        }
+        PNodeKind::OnnxModel { path, payload } => {
+            let file = crate::views::short_path(path);
+            match payload.and_then(|p| project.payloads.get(&p)) {
+                Some(p) => format!("{file} · {}", p.name),
+                None => file,
             }
         }
         PNodeKind::Logic { logic } => match logic {
@@ -1079,6 +1088,19 @@ fn palette_menu(ui: &mut egui::Ui, world: Pos2, project: &nl_core::Project, acti
                 });
                 ui.close();
             }
+        }
+        ui.separator();
+        // 가져온 ONNX 는 프로젝트 모델 목록에 없다 — 파일 경로를 인스펙터에서 적는다.
+        // 그래서 목록이 비어 있어도 이 항목은 언제나 있다.
+        if ui.button("ONNX 파일에서…").clicked() {
+            actions.push(PipelineAction::AddNode {
+                kind: PNodeKind::OnnxModel {
+                    path: String::new(),
+                    payload: None,
+                },
+                pos,
+            });
+            ui.close();
         }
     });
     ui.menu_button("로직", |ui| {

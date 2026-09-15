@@ -20,6 +20,7 @@ scripts/verify-all.sh --gui      # + 헤드리스 sway 시나리오(smoke/startu
 NL_E2E=1 cargo test -p nl-cli --test e2e     # 종단 6개(학습→빌드→배포판 HTTP)
 tools/uitest/uitest.sh run tools/uitest/scenarios/pipeline.uit   # 단일 GUI 시나리오
 scripts/bench.sh                 # 성능 기준값(JSON, 직전 비교)
+cargo test -p nl-io --features onnx-import onnx   # ONNX 가져오기 (CI 에 없다 — tract 빌드 9분)
 ```
 규칙: `scripts/README.md` — 고정 포트 금지, pid 접미사, 자기가 띄운 pid만 종료(`pgrep -f` 금지).
 
@@ -34,8 +35,9 @@ scripts/bench.sh                 # 성능 기준값(JSON, 직전 비교)
 1. ~~릴리스 드라이런 기록 완성~~ **완료(2026-09-15).** ①~⑩ 을 끝까지 돌았고 문제 9건을 고쳤다. 로컬로 할 수 없어 비워 둔 칸(⑤ 태그, ⑥ CI 산출물, ⑧ 실제 업로드, ⑨ 적용 뒤 `--version`, ⑩ Windows 실기 설치)은 문서 끝 "남은 것" 에 있다.
 2. **Windows 실기 검증**: 이 저장소는 Linux 에서만 검증됐다. Windows PC 에서 할 일은 [`docs/WINDOWS-CHECK.md`](WINDOWS-CHECK.md) 에 항목·명령·보고 형식까지 적어 두었다.
 3. **첫 릴리스 전 사람이 할 일**: minisign 키 발급(`cargo run -p nl-update --example nl-keygen -- keygen`), 공개키를 `crates/nl-app/src/update_key.rs`에 삽입, 실제 배포 서버 URL(현재 `updates.trustanc.dev/neural-linker`는 503), Forgejo/GitHub 러너·시크릿, Windows 실기 검증(`packaging/windows/install-service.ps1`, `nl-io` 소켓 동작).
-4. **미착수**: pipewire ScreenCast(optional feature), ONNX 가져오기 파이프라인 연결(`PNodeKind::OnnxModel`), 협업 서버(M4), Authenticode 서명, `Graph`/`Edge`/`EpochMetrics`의 미지 필드 보존.
-5. **알려진 한계**: 순환 레이어는 시퀀스 길이에 선형(길이 512에서 스텝 2~3초), iGPU는 짧은 시퀀스에서 CPU보다 느림, `ModelOutput.field`는 다출력에서 미사용, Windows 개인키 권한 비트 없음.
+4. **ONNX 가져오기 남은 결정**: 배선은 끝났고(`PNodeKind::OnnxModel`) 실제 사전학습 모델(ONNX model zoo `mnist-12`)이 파이프라인에서 도는 것을 확인했다. 남은 것은 **배포 전략** — `onnx-import` 를 켠 `nl-runtime` 은 77.7 → 108.1 MiB(실측)다. 선택지와 근거는 `docs/research/onnx-2026-09-14.md` §2.4 와 `CHANGELOG.md`.
+5. **미착수**: pipewire ScreenCast(optional feature), 협업 서버(M4), Authenticode 서명, `Graph`/`Edge`/`EpochMetrics`의 미지 필드 보존.
+6. **알려진 한계**: 순환 레이어는 시퀀스 길이에 선형(길이 512에서 스텝 2~3초), iGPU는 짧은 시퀀스에서 CPU보다 느림, `ModelOutput.field`는 다출력에서 미사용, Windows 개인키 권한 비트 없음.
 
 ## 작업 방식 메모
 - 이 저장소는 여러 에이전트가 크레이트별 워크트리에서 병렬로 만들었다. 공개 API는 각 `lib.rs` re-export가 계약이고, `nl-core` 변경은 추가 전용(`#[serde(default)]`)이 원칙.

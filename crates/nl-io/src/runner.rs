@@ -84,6 +84,7 @@ use crate::http::{self, HttpResponse};
 use crate::input::{self, InputSim};
 use crate::screen::Capturer;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use nl_core::paths::resolve_inside;
 use nl_core::payload::PayloadSpec;
 use nl_core::{DevicePref, InputAction, Logic, PNodeId, PNodeKind, Pipeline, Project, Region, Sink, Source, WidgetId};
 use nl_engine::{HostTensor, Session, Value};
@@ -1546,7 +1547,7 @@ fn run_loop(
     let mut states: HashMap<PNodeId, NodeState> = order.iter().map(|id| (*id, NodeState::default())).collect();
     // 라벨은 바뀌지 않으니 한 번만 만든다 (틱마다 String 을 새로 찍지 않게).
     let labels: HashMap<PNodeId, String> = order.iter().map(|id| (*id, node_label(&pipeline, *id))).collect();
-    let mut sessions: HashMap<PNodeId, Result<Session, String>> = HashMap::new();
+    let mut sessions: HashMap<PNodeId, Result<ModelSession, String>> = HashMap::new();
 
     // ── 준비: stdin 읽기 스레드 (StdinJson 소스가 있을 때만).
     // stdin 이 버린 줄 수를 받는 길 (소스가 있을 때만 생긴다).
@@ -1773,50 +1774,65 @@ fn run_loop(
     let model_load_started = Instant::now();
     for id in &order {
         let node = &pipeline.nodes[id];
-        let PNodeKind::Model { model, .. } = &node.kind else {
-            continue;
-        };
-        let Some(def) = project.models.get(model) else {
+        // 실패는 이벤트로 알리고 `sessions` 에 이유를 남긴다. 그 노드를 지날 때마다 같은 이유가
+        // 보고되고, 나머지 파이프라인은 계속 돈다.
+        let fail = |message: String, sessions: &mut HashMap<PNodeId, Result<ModelSession, String>>| {
             let _ = etx.send(RunnerEvent::Error {
                 node: Some(*id),
-                message: format!("프로젝트에 없는 모델 {}", model.short()),
+                message: message.clone(),
             });
-            sessions.insert(*id, Err(format!("프로젝트에 없는 모델 {}", model.short())));
-            continue;
+            sessions.insert(*id, Err(message));
         };
-        // 가중치 경로도 프로젝트 폴더 안이어야 한다 (번들이 `../../` 로 남의 파일을 읽게 두지 않는다).
-        let weights = match def.weights.as_deref() {
-            Some(w) => match resolve_inside(&base_dir, w) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    let message = format!("모델 '{}' 의 가중치 경로를 쓸 수 없다: {e}", def.name);
-                    let _ = etx.send(RunnerEvent::Error {
-                        node: Some(*id),
-                        message: message.clone(),
-                    });
-                    sessions.insert(*id, Err(message));
+        match &node.kind {
+            PNodeKind::Model { model, .. } => {
+                let Some(def) = project.models.get(model) else {
+                    fail(format!("프로젝트에 없는 모델 {}", model.short()), &mut sessions);
                     continue;
+                };
+                // 가중치 경로도 프로젝트 폴더 안이어야 한다 (번들이 `../../` 로 남의 파일을 읽게 두지 않는다).
+                let weights = match def.weights.as_deref() {
+                    Some(w) => match resolve_inside(&base_dir, w) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            fail(
+                                format!("모델 '{}' 의 가중치 경로를 쓸 수 없다: {e}", def.name),
+                                &mut sessions,
+                            );
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+                match Session::load(def, weights.as_deref(), device) {
+                    Ok(s) => {
+                        let _ = etx.send(RunnerEvent::Log(format!(
+                            "모델 '{}' 준비 완료 ({})",
+                            def.name,
+                            s.device_name()
+                        )));
+                        sessions.insert(*id, Ok(ModelSession::Native(s)));
+                    }
+                    Err(e) => fail(format!("모델 '{}' 을 올리지 못했다: {e:#}", def.name), &mut sessions),
                 }
-            },
-            None => None,
-        };
-        match Session::load(def, weights.as_deref(), device) {
-            Ok(s) => {
-                let _ = etx.send(RunnerEvent::Log(format!(
-                    "모델 '{}' 준비 완료 ({})",
-                    def.name,
-                    s.device_name()
-                )));
-                sessions.insert(*id, Ok(s));
             }
-            Err(e) => {
-                let message = format!("모델 '{}' 을 올리지 못했다: {e:#}", def.name);
-                let _ = etx.send(RunnerEvent::Error {
-                    node: Some(*id),
-                    message: message.clone(),
-                });
-                sessions.insert(*id, Err(message));
+            // 가져온 ONNX. 경로 규칙은 가중치와 같다 — 프로젝트 폴더 바깥은 읽지 않는다.
+            PNodeKind::OnnxModel { path, .. } => {
+                let file = match resolve_inside(&base_dir, path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        fail(format!("ONNX 경로를 쓸 수 없다 ({path}): {e}"), &mut sessions);
+                        continue;
+                    }
+                };
+                match load_onnx_session(&file) {
+                    Ok(s) => {
+                        let _ = etx.send(RunnerEvent::Log(format!("ONNX 모델 준비 완료 ({path})")));
+                        sessions.insert(*id, Ok(s));
+                    }
+                    Err(message) => fail(message, &mut sessions),
+                }
             }
+            _ => continue,
         }
     }
     // 이제부터 요청을 받는다.
@@ -1995,13 +2011,22 @@ fn run_loop(
                         Err(msg) => report(etx, st, Some(id), format!("{name}: {msg}")),
                     }
                 }
-                PNodeKind::Model { model, payload } => {
+                // 우리 모델과 가져온 ONNX 는 세션 종류만 다르고 나머지가 같다 — 페이로드로
+                // 인코딩해 넣고, 돌리고, 디코딩해 내보낸다.
+                PNodeKind::Model { .. } | PNodeKind::OnnxModel { .. } => {
                     let Some(v) = upstream_value(&pipeline, &values, id) else {
                         continue;
                     };
-                    let spec = payload
-                        .or_else(|| project.models.get(model).and_then(|m| m.payload))
-                        .and_then(|pid| project.payloads.get(&pid));
+                    let spec = match &node.kind {
+                        // 노드가 페이로드를 고르지 않으면 모델에 적힌 것을 쓴다.
+                        PNodeKind::Model { model, payload } => {
+                            payload.or_else(|| project.models.get(model).and_then(|m| m.payload))
+                        }
+                        // 가져온 ONNX 에는 `ModelDef` 가 없으니 물려받을 기본값도 없다.
+                        PNodeKind::OnnxModel { payload, .. } => *payload,
+                        _ => unreachable!("바로 위 패턴이 둘뿐이다"),
+                    }
+                    .and_then(|pid| project.payloads.get(&pid));
                     let st = states.get_mut(&id).expect("상태 미리 생성");
                     match sessions.get_mut(&id) {
                         Some(Ok(sess)) => match run_model(sess, spec, &v) {
@@ -2392,64 +2417,6 @@ fn eval_source(
     }
 }
 
-/// 파이프라인이 만지는 파일은 **모두 `base_dir` 안**이어야 한다.
-///
-/// 신뢰할 수 없는 `.nlapp` 이 `Sink::File { path: "~/.ssh/authorized_keys" }` 같은 것을 들고 올 수 있다.
-/// 그래서 다음을 모두 거부한다.
-///
-/// - 절대 경로 (`/etc/passwd`, `C:\Windows\...`)
-/// - `..` 로 올라가는 경로, 루트·드라이브 접두사
-/// - 심볼릭 링크 (경로 중간이든 마지막이든) — 밖으로 빠져나가는 가장 흔한 길이다
-///
-/// 마지막 요소는 아직 없을 수 있으므로(쓰기 대상) **부모까지** 실제 경로로 풀어 확인하고,
-/// 파일 이름만 그 위에 붙인다.
-fn resolve_inside(base_dir: &Path, path: &str) -> Result<PathBuf, String> {
-    use std::path::Component;
-    let p = Path::new(path);
-    if p.is_absolute() {
-        return Err(format!(
-            "절대 경로는 쓸 수 없다: {path} (프로젝트 폴더 기준 상대 경로만)"
-        ));
-    }
-    let mut rel = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::Normal(seg) => rel.push(seg),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(format!(
-                    "경로가 프로젝트 폴더 밖을 가리킨다: {path} ('..' 는 쓸 수 없다)"
-                ))
-            }
-            Component::RootDir | Component::Prefix(_) => return Err(format!("절대 경로는 쓸 수 없다: {path}")),
-        }
-    }
-    if rel.as_os_str().is_empty() {
-        return Err(format!("파일 이름이 비어 있다: {path:?}"));
-    }
-    let joined = base_dir.join(&rel);
-
-    // 부모까지 실제 경로로 풀어 기준 폴더 안인지 본다. 아직 없는 폴더는 통과시킨다
-    // (만들 때 그 위 단계가 검사를 이미 통과했다).
-    let base_real = base_dir.canonicalize().unwrap_or_else(|_| base_dir.to_path_buf());
-    if let Some(parent) = joined.parent() {
-        if let Ok(real) = parent.canonicalize() {
-            if !real.starts_with(&base_real) {
-                return Err(format!(
-                    "경로가 프로젝트 폴더 밖을 가리킨다: {path} (심볼릭 링크로 빠져나간다)"
-                ));
-            }
-        }
-    }
-    // 마지막 요소가 이미 심볼릭 링크면 그 너머로 쓰게 된다.
-    if let Ok(meta) = std::fs::symlink_metadata(&joined) {
-        if meta.file_type().is_symlink() {
-            return Err(format!("심볼릭 링크는 쓸 수 없다: {path}"));
-        }
-    }
-    Ok(joined)
-}
-
 /// 확장자가 이미지면 RGBA 로, 아니면 JSON → 텍스트 순으로 읽는다.
 fn read_file_value(path: &Path) -> Result<Value, String> {
     let ext = path
@@ -2547,7 +2514,45 @@ fn first_line(s: &str) -> String {
 /// 여기서 따로 풀면 HTTP 추론 API 와 파이프라인이 서로 다른 모양을 보게 된다.
 ///
 /// **필드가 하나면 예전과 바이트 단위로 같다.** 엔진이 그 경우 값을 감싸지 않고 그대로 내보낸다.
-fn run_model(sess: &mut Session, spec: Option<&PayloadSpec>, v: &Value) -> Result<Value, String> {
+/// 모델 노드 하나의 추론 세션. 우리 모델과 가져온 ONNX 가 같은 자리에 놓인다.
+///
+/// 파이프라인 입장에서 둘은 "텐서를 넣으면 텐서가 나오는 것" 으로 같다. 다른 것은 어디서
+/// 왔는가뿐이라, 페이로드 인코딩·디코딩과 오류 보고는 [`run_model`] 이 한 번만 쓴다.
+enum ModelSession {
+    /// 프로젝트가 정의하고 학습한 모델.
+    Native(Session),
+    /// 바깥에서 받은 `.onnx`. 추론 전용이다.
+    #[cfg(feature = "onnx-import")]
+    Onnx(nl_engine::onnx_import::OnnxSession),
+}
+
+impl ModelSession {
+    fn run(&mut self, inputs: &[HostTensor]) -> anyhow::Result<Vec<HostTensor>> {
+        match self {
+            ModelSession::Native(s) => s.run(inputs),
+            #[cfg(feature = "onnx-import")]
+            ModelSession::Onnx(s) => s.run(inputs),
+        }
+    }
+}
+
+/// 가져온 ONNX 파일 하나를 연다.
+///
+/// `onnx-import` 기능이 **꺼진 빌드에서도 프로젝트는 열린다** — 그 노드만 이유를 달고 실패한다.
+/// 데이터 모델을 기능으로 가르면 켠 빌드가 만든 프로젝트를 끈 빌드가 못 열게 되기 때문이다.
+#[cfg(feature = "onnx-import")]
+fn load_onnx_session(file: &Path) -> Result<ModelSession, String> {
+    nl_engine::onnx_import::OnnxSession::load(file)
+        .map(ModelSession::Onnx)
+        .map_err(|e| format!("ONNX 모델을 올리지 못했다: {e:#}"))
+}
+
+#[cfg(not(feature = "onnx-import"))]
+fn load_onnx_session(_file: &Path) -> Result<ModelSession, String> {
+    Err("이 빌드는 ONNX 가져오기가 꺼져 있다 — `onnx-import` 기능을 켜고 빌드한 실행 파일이 필요하다".to_string())
+}
+
+fn run_model(sess: &mut ModelSession, spec: Option<&PayloadSpec>, v: &Value) -> Result<Value, String> {
     let inputs = encode_inputs(spec, v)?;
     let outs = sess.run(&inputs).map_err(|e| format!("추론 실패: {e:#}"))?;
     if outs.is_empty() {
@@ -3534,6 +3539,164 @@ mod tests {
         h.stop();
         assert!(h.wait_done(Duration::from_millis(500)));
         assert!(wait_for(&h, Duration::from_secs(1), |e| matches!(e, RunnerEvent::Stopped)).is_some());
+    }
+
+    // ── 가져온 ONNX ────────────────────────────────────────────────────
+
+    /// `Input[2] → Linear(2, bias) → Output` 하나를 **고정 가중치**로 만들어 ONNX 로 내보낸다.
+    ///
+    /// 학습하지 않으므로 기대값을 손으로 계산할 수 있다. 가중치는 항등 행렬이라
+    /// `y = x + bias` 다.
+    #[cfg(feature = "onnx-import")]
+    fn export_identity_onnx(dir: &Path) -> PathBuf {
+        use nl_core::model::{Node, Port};
+        use nl_core::{LayerKind, ModelDef};
+
+        let mut def = ModelDef::new("항등");
+        let input = def
+            .graph
+            .add_node(Node::new(LayerKind::Input { shape: vec![2] }, [0.0, 0.0]));
+        let lin = def.graph.add_node(Node::new(
+            LayerKind::Linear {
+                out_features: 2,
+                bias: true,
+            },
+            [1.0, 0.0],
+        ));
+        let out = def.graph.add_node(Node::new(LayerKind::Output, [2.0, 0.0]));
+        for (a, b) in [(input, lin), (lin, out)] {
+            def.graph.add_edge(a, Port::new(b, 0)).expect("연결");
+        }
+
+        // `weight` 는 `[in, out]` 이다 (burn 의 `x @ w` 규약). 항등 행렬 + 편향.
+        let mut params = std::collections::BTreeMap::new();
+        params.insert(
+            nl_engine::param_name(lin, nl_engine::exec::P_WEIGHT),
+            HostTensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        params.insert(
+            nl_engine::param_name(lin, nl_engine::exec::P_BIAS),
+            HostTensor::new(vec![2], vec![0.5, -0.5]),
+        );
+        let w = dir.join("w.safetensors");
+        nl_engine::weights::save(&w, def.id, &params).expect("가중치 저장");
+
+        let onnx = dir.join("m.onnx");
+        nl_engine::export_onnx(&def, &w, &onnx, Default::default()).expect("ONNX 내보내기");
+        onnx
+    }
+
+    /// 내보낸 ONNX 를 **파이프라인 노드로** 다시 읽어 값이 나오는지 본다.
+    ///
+    /// tract 가 숫자를 맞게 내는지는 `nl-engine` 의 왕복 시험 열일곱 개가 본다. 여기서 보는 것은
+    /// **배선**이다 — 노드 → 경로 해석 → 세션 → 값. 기댓값은 `x + [0.5, -0.5]` 다.
+    #[cfg(feature = "onnx-import")]
+    #[test]
+    fn an_imported_onnx_node_runs_in_a_pipeline() {
+        let dir = tmp_dir("onnxnode");
+        export_identity_onnx(&dir);
+
+        let mut p = Pipeline::new("onnx");
+        p.tick_hz = 60.0;
+        let src = p.add_node(PNode::new(PNodeKind::Source { source: Source::Manual }, [0.0, 0.0]));
+        let m = p.add_node(PNode::new(
+            PNodeKind::OnnxModel {
+                path: "m.onnx".into(),
+                payload: None,
+            },
+            [1.0, 0.0],
+        ));
+        let log = p.add_node(PNode::new(PNodeKind::Sink { sink: Sink::Log }, [2.0, 0.0]));
+        p.add_link(src, m).unwrap();
+        p.add_link(m, log).unwrap();
+
+        let h = Runner::new(Project::new("p"), p, dir, DevicePref::Cpu).start().unwrap();
+        h.inputs
+            .send(RunnerInput::Manual {
+                node: src,
+                value: Value::Numbers(vec![0.5, -0.5]),
+            })
+            .unwrap();
+
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(20),
+            |e| matches!(e, RunnerEvent::Value { node, .. } if *node == m),
+        )
+        .expect("ONNX 노드가 값을 내지 않았다");
+        let RunnerEvent::Value { value, .. } = ev else {
+            panic!("값이 아니다")
+        };
+        let Value::Tensor(t) = &value else {
+            panic!("텐서가 아니다: {value:?}")
+        };
+        assert_eq!(t.shape, vec![1, 2], "배치 1 · 출력 2");
+        assert!(
+            (t.data[0] - 1.0).abs() < 1e-4 && (t.data[1] - (-1.0)).abs() < 1e-4,
+            "항등 + 편향이면 [1.0, -1.0] 이어야 한다: {:?}",
+            t.data
+        );
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(5)));
+    }
+
+    /// 기능이 꺼진 빌드는 **그 노드만** 이유를 달고 실패한다. 파이프라인은 뜬다.
+    #[cfg(not(feature = "onnx-import"))]
+    #[test]
+    fn an_imported_onnx_node_says_the_feature_is_off() {
+        let dir = tmp_dir("onnxoff");
+        std::fs::write(dir.join("m.onnx"), b"not really onnx").unwrap();
+
+        let mut p = Pipeline::new("onnx");
+        p.tick_hz = 60.0;
+        let m = p.add_node(PNode::new(
+            PNodeKind::OnnxModel {
+                path: "m.onnx".into(),
+                payload: None,
+            },
+            [0.0, 0.0],
+        ));
+        let _ = m;
+
+        let h = Runner::new(Project::new("p"), p, dir, DevicePref::Cpu).start().unwrap();
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Error { message, .. } if message.contains("onnx-import")),
+        );
+        assert!(ev.is_some(), "기능이 꺼졌다는 안내가 없다");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(5)));
+    }
+
+    /// 경로는 프로젝트 폴더 안이어야 한다. **기능과 무관하게** 먼저 막힌다 —
+    /// 남에게 받은 `.nlproj` 가 `../` 로 아무 파일이나 읽게 두지 않는다.
+    #[test]
+    fn an_onnx_node_cannot_escape_the_project_folder() {
+        let dir = tmp_dir("onnxescape");
+
+        let mut p = Pipeline::new("onnx");
+        p.tick_hz = 60.0;
+        p.add_node(PNode::new(
+            PNodeKind::OnnxModel {
+                path: "../secret.onnx".into(),
+                payload: None,
+            },
+            [0.0, 0.0],
+        ));
+
+        let h = Runner::new(Project::new("p"), p, dir, DevicePref::Cpu).start().unwrap();
+        let ev = wait_for(
+            &h,
+            Duration::from_secs(5),
+            |e| matches!(e, RunnerEvent::Error { message, .. } if message.contains("ONNX 경로를 쓸 수 없다")),
+        );
+        assert!(ev.is_some(), "폴더 밖 경로가 막히지 않았다");
+
+        h.stop();
+        assert!(h.wait_done(Duration::from_secs(5)));
     }
 
     // ── 다입출력 모델 ──────────────────────────────────────────────────

@@ -7,6 +7,7 @@ pub mod gui;
 pub mod ids;
 pub mod model;
 pub mod ops;
+pub mod paths;
 pub mod payload;
 pub mod pipeline;
 pub mod sample;

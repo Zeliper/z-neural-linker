@@ -102,7 +102,17 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
     send(BuildEvent::Progress(0.1));
 
     // 2. 번들에 넣을 가중치를 읽고 프로젝트 사본의 경로를 번들 기준으로 다시 쓴다.
-    let (bundle_project, models, weights) = collect_models(&project, &spec, &base_dir, send)?;
+    let (mut bundle_project, models, weights) = collect_models(&project, &spec, &base_dir, send)?;
+    // 가져온 ONNX 는 자산으로 담고 노드의 경로를 번들 기준으로 바꾼다 (가중치와 같은 일).
+    let onnx = nl_bundle::collect_onnx(&mut bundle_project, &base_dir)
+        .map_err(|e| format!("ONNX 를 번들에 담지 못했습니다: {e:#}"))?;
+    if !onnx.is_empty() {
+        send(BuildEvent::Log(format!(
+            "ONNX {}개 → assets/ ({})",
+            onnx.len(),
+            fmt_bytes(onnx.values().map(|b| b.len() as u64).sum())
+        )));
+    }
     send(BuildEvent::Progress(0.3));
 
     let manifest = BundleManifest {
@@ -122,6 +132,7 @@ fn build_inner(req: BuildRequest, send: &dyn Fn(BuildEvent)) -> Result<(), Strin
     };
     let mut bundle = Bundle::new(manifest, bundle_project);
     bundle.weights = weights;
+    bundle.assets = onnx;
     let zip = bundle
         .to_zip()
         .map_err(|e| format!("번들을 만들지 못했습니다: {e:#}"))?;

@@ -46,6 +46,12 @@ rfd.workspace = true
 
 tempfile.workspace = true
 
+[features]
+default = []
+# ONNX 가져오기를 켠다 (`--features onnx-import`). 자세한 것은 `nl-io` 의 같은 이름 기능과
+# docs/research/onnx-2026-09-14.md.
+onnx-import = ["nl-io/onnx-import"]
+
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }
 

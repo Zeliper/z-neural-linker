@@ -639,6 +639,62 @@ pub(crate) fn fill_tokens(template: &str, open: &str, pairs: &[(&str, &str)]) ->
 }
 
 /// 파일·디렉터리 이름으로 안전한 소문자 ASCII 슬러그. 한글 등 비 ASCII 는 `-` 로 접힌다.
+/// 파이프라인이 가리키는 `.onnx` 를 번들 자산으로 옮기고, `project` 안의 경로를 번들 기준으로 바꾼다.
+///
+/// 모델 가중치가 `weights/<파일>` 로 옮겨지는 것과 같은 일을 자산 쪽에서 한다. 배포 앱은 작업
+/// 폴더에 `assets/` 를 풀어 두므로 바뀐 경로가 그대로 맞는다.
+///
+/// 경로는 [`nl_core::paths::resolve_inside`] 를 지난다 — 남에게 받은 `.nlproj` 의 `../../` 로
+/// 빌더가 엉뚱한 파일을 번들에 담지 않게 한다. 러너가 실행할 때 쓰는 것과 같은 검사다.
+///
+/// 같은 파일을 여러 노드가 가리키면 **한 번만** 담는다. 돌려주는 맵은 `Bundle::assets` 에 그대로
+/// 넣으면 된다.
+pub fn collect_onnx(project: &mut Project, base_dir: &Path) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+    use nl_core::PNodeKind;
+
+    let mut assets: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    // 원래 상대 경로 → 번들 안 이름. 같은 파일을 두 번 읽지 않기 위한 것이기도 하다.
+    let mut assigned: BTreeMap<String, String> = BTreeMap::new();
+
+    for pl in project.pipelines.values_mut() {
+        for node in pl.nodes.values_mut() {
+            let PNodeKind::OnnxModel { path, .. } = &mut node.kind else {
+                continue;
+            };
+            let rel = path.trim().to_string();
+            if rel.is_empty() {
+                anyhow::bail!("ONNX 노드의 파일 경로가 비어 있습니다");
+            }
+            if let Some(name) = assigned.get(&rel) {
+                *path = format!("{ASSETS_DIR}/{name}");
+                continue;
+            }
+            let src = nl_core::paths::resolve_inside(base_dir, &rel)
+                .map_err(|e| anyhow::anyhow!("ONNX 경로를 쓸 수 없습니다 ({rel}): {e}"))?;
+            let bytes =
+                std::fs::read(&src).map_err(|e| anyhow::anyhow!("ONNX 를 읽지 못했습니다 ({}): {e}", src.display()))?;
+            let name = unique_asset_name(&rel, &assets);
+            assets.insert(name.clone(), bytes);
+            *path = format!("{ASSETS_DIR}/{name}");
+            assigned.insert(rel, name);
+        }
+    }
+    Ok(assets)
+}
+
+/// 번들 안에서 쓸 자산 이름. 원래 파일 이름을 알아볼 수 있게 두되 충돌하면 번호를 붙인다.
+fn unique_asset_name(rel: &str, taken: &BTreeMap<String, Vec<u8>>) -> String {
+    let stem = Path::new(rel).file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let base = slugify(stem);
+    let mut name = format!("{base}.onnx");
+    let mut n = 2;
+    while taken.contains_key(&name) {
+        name = format!("{base}-{n}.onnx");
+        n += 1;
+    }
+    name
+}
+
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();
     for ch in name.chars() {
