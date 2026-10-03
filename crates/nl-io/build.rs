@@ -14,20 +14,24 @@
 //!
 //! 개발 패키지가 이미 깔린 환경에서는 아무것도 하지 않는다.
 
-use std::path::{Path, PathBuf};
-
-const LIB_STEM: &str = "libxkbcommon";
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
-        return;
-    }
-    if let Err(msg) = ensure_link_target() {
-        // 링크가 진짜로 실패할지는 링커가 정한다. 여기서는 원인을 알려 주기만 한다.
-        println!("cargo:warning={msg}");
-    }
+    linux_link::ensure();
 }
+
+// Windows/macOS 에서는 이 모듈이 비어 있다. 아래 로직은 전부 Linux 전용이다.
+#[cfg(target_os = "linux")]
+mod linux_link {
+    use std::path::{Path, PathBuf};
+
+    const LIB_STEM: &str = "libxkbcommon";
+
+    pub fn ensure() {
+        if let Err(msg) = ensure_link_target() {
+            // 링크가 진짜로 실패할지는 링커가 정한다. 여기서는 원인을 알려 주기만 한다.
+            println!("cargo:warning={msg}");
+        }
+    }
 
 fn ensure_link_target() -> Result<(), String> {
     let dirs = search_dirs();
@@ -138,7 +142,13 @@ fn newest_versioned(dirs: &[PathBuf]) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// 심볼릭 링크를 따라가 실제 파일인지 본다.
-fn is_readable_file(p: &Path) -> bool {
-    std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
+    /// 심볼릭 링크를 따라가 실제 파일인지 본다.
+    fn is_readable_file(p: &Path) -> bool {
+        std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod linux_link {
+    pub fn ensure() {}
 }
