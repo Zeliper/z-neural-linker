@@ -52,8 +52,9 @@
 
 ### 환경에서 확인된 사실
 
-- 이 개발 PC 의 RTX 2060 은 오픈소스 NVK(nouveau) 드라이버라 wgpu 컴퓨트가 죽는다
-  (`Parent device is lost`). `Auto` 는 `probe` 로 걸러 Intel UHD 630 을 고른다. 공식 드라이버를 깔면 RTX 로 잡힌다.
+- 이 개발 PC 의 RTX 2060 은 오픈소스 NVK(nouveau) 드라이버라 wgpu 컴퓨트가 죽었다
+  (`Parent device is lost`). `Auto` 는 `probe` 로 걸러 Intel UHD 630 을 골랐다.
+  **2026-10-27 에 NVIDIA 공식 드라이버 615.71.09 가 깔려 RTX 로 잡힌다** — `probe` 가 통과시킨다.
 - 이 PC 의 실제 세션은 KDE Plasma 6 Wayland 다. wlr-screencopy·X11 `GetImage` 둘 다 쓸 수 없어
   xdg-desktop-portal Screenshot 경로를 붙였다 — **실측 2.8 fps**. 고 fps 는 pipewire ScreenCast 가 필요하다.
 - Windows 크로스 빌드는 관리자 권한 없이 된다. `lld-link` 가 없으면 rustup 의 `rust-lld` 를 부르는

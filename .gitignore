@@ -15,3 +15,4 @@ packaging/keys/*.key
 # `.diff.png`·`.new.png` 는 실패를 들여다보라고 그 자리에 떨어뜨리는 것이라 커밋 대상이 아니다.
 **/tests/snapshots/*.diff.png
 **/tests/snapshots/*.new.png
+**/tests/snapshots/*.old.png

@@ -6,6 +6,17 @@
 //!
 //! 갱신: `UPDATE_SNAPSHOTS=1 cargo test -p nl-app --test snapshot`
 //!
+//! **골든은 소프트웨어 래스터라이저(lavapipe) 로 뜬다.** 기계의 GPU 드라이버로 뜨면 그 기계
+//! 전용이 되어 CI 에서 어긋난다 — 실제로 그래서 CI 가 한 달 넘게 빨간불이었다. CI 러너에는
+//! GPU 가 없어 lavapipe 가 유일한 어댑터이므로, 로컬도 거기에 맞춘다.
+//!
+//! ```text
+//! VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+//!   UPDATE_SNAPSHOTS=1 cargo test -p nl-app --test snapshot
+//! ```
+//!
+//! `scripts/verify-all.sh` 는 그 변수를 알아서 넣는다.
+//!
 //! **글꼴은 얹지 않는다.** 앱은 평소 `nl_app::fonts::font_definitions()` 로 시스템 CJK 글꼴을 찾는데,
 //! 그 글꼴은 기계마다 달라 골든이 그 기계 전용이 된다. 여기서는 egui 기본 글꼴만 써서 어디서 돌려도
 //! 같은 픽셀이 나오게 한다 — 대신 한글은 네모로 보인다. 글자 내용은 uitest 골든과 렌더 테스트가 본다.

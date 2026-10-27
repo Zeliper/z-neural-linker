@@ -133,7 +133,19 @@ log "로그   $OUT"
 
 run_step fmt      "포맷 검사"   cargo fmt --all -- --check
 run_step clippy   "클리피"      cargo clippy --workspace --all-targets -- -D warnings
-run_step test     "테스트"      env NL_SNAPSHOT_REQUIRED=1 cargo test --workspace
+# 스냅샷 골든은 **소프트웨어 래스터라이저(lavapipe) 기준**이다. 기계마다 다른 GPU 드라이버로 뜨면
+# 골든이 그 기계 전용이 되고, 실제로 그래서 CI 가 한 달 넘게 빨간불이었다(로컬은 통과, CI 는 실패).
+# 드라이버 쪽 사고도 함께 피한다 — NVIDIA 615.71.09 는 `vkDestroyDevice` 에서 heap 을 망가뜨려
+# 테스트가 전부 통과한 뒤 `free(): invalid pointer` 로 죽는다.
+# 실제 GPU 경로는 종단 시험과 uitest 시나리오가 본다.
+LAVAPIPE_ICD="${LAVAPIPE_ICD:-/usr/share/vulkan/icd.d/lvp_icd.x86_64.json}"
+test_env=(env NL_SNAPSHOT_REQUIRED=1)
+if [[ -f "$LAVAPIPE_ICD" ]]; then
+  test_env+=("VK_ICD_FILENAMES=$LAVAPIPE_ICD")
+else
+  warn "lavapipe 를 찾지 못했습니다 ($LAVAPIPE_ICD) — 스냅샷이 이 기계의 GPU 로 떠집니다"
+fi
+run_step test     "테스트"      "${test_env[@]}" cargo test --workspace
 # `nl-app` 도 함께 만든다. `--gui` 시나리오는 `target/release/nl-app` 을 쓰는데, 하네스는
 # **그 파일이 없을 때만** 빌드한다 — 낡은 바이너리가 남아 있으면 방금 고친 코드가 아니라
 # 옛것을 시험하고도 통과로 보고한다(실측).

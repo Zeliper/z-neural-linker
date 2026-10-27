@@ -25,7 +25,8 @@ cargo test -p nl-io --features onnx-import onnx   # ONNX 가져오기 (CI 에 �
 규칙: `scripts/README.md` — 고정 포트 금지, pid 접미사, 자기가 띄운 pid만 종료(`pgrep -f` 금지).
 
 ## 이 개발 PC의 환경 사실
-- RTX 2060은 NVK 드라이버라 wgpu 컴퓨트 실패 → 엔진 `probe`가 걸러 Intel UHD 630 사용. NVIDIA 드라이버 설치 시 RTX 사용 가능.
+- **RTX 2060이 이제 실제로 쓰인다 (2026-10-27).** NVIDIA 공식 드라이버 615.71.09 가 깔리면서 `probe` 를 통과한다 — `nl devices --probe` 가 CPU·Intel UHD 630·RTX 2060·llvmpipe 넷을 모두 "정상" 으로 보고하고 `auto` 는 RTX 를 고른다. 예전의 NVK(nouveau) 서술은 더 이상 맞지 않는다.
+- 다만 **그 드라이버는 `egui_kittest` 테스트 경로에서 터진다.** `cubecl_wgpu` 가 device 를 만들고 파괴하는 중 `vkDestroyDevice` → `pthread_cond_destroy` 에서 heap 이 깨져, 테스트가 전부 통과한 뒤 `free(): invalid pointer` 로 abort 한다(코어덤프 스택으로 확인). **제품 경로는 멀쩡하다** — `nl devices --probe` 는 종료 코드 0 이다. `scripts/verify-all.sh` 는 테스트 단계에 lavapipe 를 넣어 이것을 피한다.
 - 세션은 KDE Plasma 6 Wayland → 화면 캡처는 xdg-desktop-portal 경로(약 2.8fps). 고 fps는 `pipewire-devel` 필요.
 - `libxkbcommon.so` 개발 링크가 없어 `crates/nl-io/build.rs`가 OUT_DIR에 심볼릭 링크를 만들어 링크.
 - Windows 크로스 빌드: `cargo-xwin` 설치됨. 링커는 `~/.local/bin/lld-link` — rust-lld 를 `-flavor link` 로 부르는 셸 심이다(`clang-cl`·`llvm-lib` 는 `/usr/bin`). `nl_bundle::tools::cross_build_plan` 참고.
