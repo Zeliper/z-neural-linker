@@ -65,6 +65,41 @@ jobs:
       - name: 릴리스 빌드 (배포 런타임)
         run: cargo build --release -p nl-runtime
 
+  # ONNX 가져오기(`onnx-import`)는 기본 꺼짐이라 위 `check` 잡이 그 코드를 한 줄도 컴파일하지 않는다.
+  # 기능이 제품 코드(`PNodeKind::OnnxModel` 배선)에 붙어 있으므로 검사가 없으면 조용히 깨진다.
+  #
+  # 따로 두는 이유는 빌드 시간이다. `tract-onnx` 가 크레이트 112개를 끌고 와 캐시가 없으면
+  # 10분 넘게 걸린다. `check` 에 합치면 ONNX 와 무관한 변경의 피드백까지 그만큼 느려진다.
+  # 여기서 깨져도 `check` 결과는 그대로 보인다.
+  onnx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 시스템 의존 설치
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon0 libvulkan1
+        # `check` 잡과 같은 이유다. 글꼴은 GUI 스냅샷용이라 여기서는 필요 없다.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # 의존성 트리가 `check` 와 달라(tract 포함) 캐시를 따로 쓴다.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: onnx
+
+      # 배선은 전부 `nl-io` 에 있고 기능은 거기서 `nl-engine` 으로 전달된다. 워크스페이스 전체로
+      # 넓히면 tract 와 무관한 크레이트까지 다시 빌드해 시간만 는다.
+      - name: 클리피 (onnx-import)
+        run: cargo clippy -p nl-io --all-targets --features onnx-import -- -D warnings
+
+      - name: 테스트 (onnx-import)
+        run: cargo test -p nl-io --features onnx-import
+
   # Windows 는 배포 대상이라 실기에서 한 번은 돌려 봐야 한다.
   # 개발 기계에서는 `cargo xwin` 으로 컴파일만 확인할 수 있고, 소켓 타임아웃·경로·권한처럼
   # 실제로 돌려 봐야 아는 것들이 남는다. 그 공백을 이 잡이 메운다.

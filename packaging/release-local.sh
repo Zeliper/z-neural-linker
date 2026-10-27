@@ -73,14 +73,17 @@ pkg_args=()
 for c in "${CRATE_LIST[@]}"; do pkg_args+=(-p "$c"); done
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
+  # 릴리스 워크플로와 같은 기능 조합으로 만든다. 다르면 드라이런이 보는 것과 CI 가 내놓는 것이
+  # 어긋나고, 그 어긋남은 태그를 민 뒤에야 드러난다.
+  feat_args=(--features nl-io/onnx-import)
   if has_target linux; then
-    nl_log "Linux 빌드: cargo build --release ${pkg_args[*]}"
-    ( cd "$NL_ROOT" && cargo build --release "${pkg_args[@]}" )
+    nl_log "Linux 빌드: cargo build --release ${pkg_args[*]} ${feat_args[*]}"
+    ( cd "$NL_ROOT" && cargo build --release "${pkg_args[@]}" "${feat_args[@]}" )
   fi
   if has_target windows; then
     command -v cargo-xwin >/dev/null || nl_die "cargo-xwin 이 없습니다 — cargo install cargo-xwin --locked"
-    nl_log "Windows 크로스 빌드: cargo xwin build --release ${pkg_args[*]} --target $WINDOWS_TARGET"
-    ( cd "$NL_ROOT" && cargo xwin build --release "${pkg_args[@]}" --target "$WINDOWS_TARGET" )
+    nl_log "Windows 크로스 빌드: cargo xwin build --release ${pkg_args[*]} ${feat_args[*]} --target $WINDOWS_TARGET"
+    ( cd "$NL_ROOT" && cargo xwin build --release "${pkg_args[@]}" "${feat_args[@]}" --target "$WINDOWS_TARGET" )
   fi
 else
   nl_warn "--skip-build: 이미 있는 산출물을 씁니다"

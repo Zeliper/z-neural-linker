@@ -10,3 +10,8 @@
 # 매니페스트 서명 비밀키. 비밀번호가 없는 키라 파일 자체가 곧 비밀이다 — CI 시크릿으로만 다룬다.
 # 공개키(*.pub)는 커밋해도 된다.
 packaging/keys/*.key
+
+# egui_kittest 가 스냅샷이 어긋날 때 남기는 부산물. 골든은 `<이름>.png` 하나뿐이고
+# `.diff.png`·`.new.png` 는 실패를 들여다보라고 그 자리에 떨어뜨리는 것이라 커밋 대상이 아니다.
+**/tests/snapshots/*.diff.png
+**/tests/snapshots/*.new.png

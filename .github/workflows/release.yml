@@ -64,10 +64,13 @@ jobs:
           echo "버전: $VERSION"
 
       - name: Linux 빌드
-        run: cargo build --release -p nl-app -p nl-runtime -p nl-cli
+        run: cargo build --release -p nl-app -p nl-runtime -p nl-cli --features nl-io/onnx-import
+        # 배포되는 바이너리는 ONNX 가져오기를 **품고 나간다.** 기본은 꺼져 있어(개발 빌드와
+        # CI `check` 잡이 tract 를 컴파일하지 않게) 여기서만 켠다. 릴리스 프로필의 `strip` 이
+        # 그만큼을 돌려받으므로 배포 크기는 거의 그대로다 — 실측 77.7 → 79.2 MiB.
 
       - name: Windows 크로스 빌드
-        run: cargo xwin build --release -p nl-app -p nl-runtime -p nl-cli --target "$WINDOWS_TARGET"
+        run: cargo xwin build --release -p nl-app -p nl-runtime -p nl-cli --features nl-io/onnx-import --target "$WINDOWS_TARGET"
 
       - name: 아카이브 만들기
         id: package

@@ -29,7 +29,12 @@
   **같은 검사**를 쓴다. 복제하면 한쪽만 고쳐질 수 있고, 이건 한쪽만 고쳐지면 조용히 뚫린다
 - 빌드하면 `nl_bundle::collect_onnx` 가 `.onnx` 를 번들 `assets/` 로 옮기고 노드 경로를 다시 쓴다
   (모델 가중치가 `weights/` 로 옮겨지는 것과 같은 일). 같은 파일을 여러 노드가 가리키면 한 번만 담는다
-- 실행하려면 `onnx-import` 기능을 켜고 빌드해야 한다: `cargo run --release -p nl-app --features onnx-import`
+- **배포되는 바이너리는 ONNX 를 품고 나간다** — 릴리스 워크플로와 `packaging/release-local.sh` 가
+  `--features nl-io/onnx-import` 로 빌드한다. 기본은 꺼진 채로 두어 개발 빌드와 CI `check` 잡이
+  tract(크레이트 112개)를 컴파일하지 않는다. 로컬에서 켜려면
+  `cargo run --release -p nl-app --features onnx-import`
+- CI 에 `onnx` 잡을 더했다 — 기능을 켠 조합의 clippy·테스트. `check` 는 꺼진 조합을 그대로 본다.
+  따로 둔 이유는 빌드 시간이고, 여기서 깨져도 `check` 결과는 보인다
 
 **엔진 (`nl-engine`)**
 - 순환·어텐션 레이어 `Lstm`·`Gru`·`MultiHeadAttention` (`f085770`).
@@ -128,6 +133,18 @@
 
 ### 변경
 
+- **릴리스 바이너리에 `strip = "symbols"`** — `nl-runtime` 이 77.7 → 57.1 MiB(실측 -20.6).
+  잃는 것은 패닉 백트레이스의 함수 이름인데, 이 저장소에는 그것을 쓰는 경로가 없다. 패닉이
+  실제로 나는 자리(깨진 GPU 드라이버·학습 루프·바깥에서 받은 ONNX)는 전부 `catch_unwind` 로
+  잡아 메시지를 로그에 남기고, 배포 런타임의 장치 검사는 `panic::set_hook` 으로 출력을 지운다.
+  릴리스에는 debug 정보가 애초에 없어 `strip = "debuginfo"` 로는 1.3 MiB 밖에 못 줄인다.
+
+  **함정 하나.** `[profile.release]` 에만 적으면 **먹지 않는다.** 이 저장소는 보안 리뷰 권고로
+  크레이트마다 `[profile.release.package.<이름>] overflow-checks = true` 를 두는데, 그 override 가
+  있으면 root 의 `strip` 이 그 패키지의 바이너리에 적용되지 않는다. 그래서 실행 파일을 내놓는
+  셋(`nl-app`·`nl-runtime`·`nl-cli`)의 override 안에 `strip` 을 다시 적었다.
+  cargo 1.98 에서 최소 예제로 확인했다 — override 를 넣고 빼면 `.symtab` 유무가 뒤집힌다
+
 - 인바운드 HTTP 서버를 tiny_http 에서 **표준 라이브러리만 쓴 자체 서버**(`nl_io::httpd`)로 교체.
   연결 수·헤더 상한과 소켓 타임아웃을 직접 통제하기 위해서다
 - 샘플 프로젝트를 `nl-cli` 에서 `nl-core` 로 옮겨 빌더와 CLI 가 같은 것을 만들게 했다
@@ -153,8 +170,16 @@
   낸 손글씨 CNN, 26 KB)를 `파일 → ONNX 모델 → 로그` 파이프라인에 그대로 꽂아 `nl run` 으로 돌렸다.
   28×28 흑백 그림 두 장(`7`·`3`)을 각각 7 과 3 으로 맞혔다. 코드는 한 줄도 고치지 않았다 —
   페이로드의 `Image { 28, 28, 1 }` 이 `[1, 1, 28, 28]` 을 만들어 그대로 맞는다
-- 크기 실측: `onnx-import` 를 켠 `nl-runtime` 릴리스가 **77.7 → 108.1 MiB**(+30.4).
-  `strip` 을 켜면 지금 바이너리가 57.1 MiB 로 내려가므로(실측) 둘을 함께 하면 오늘 크기와 비슷해진다
+- 크기 실측. `nl-runtime` 릴리스 네 조합은 오늘 **77.7** · `strip` 만 **57.1** · ONNX 만 **108.1** ·
+  **`strip` + ONNX 79.2** 다. 실제로 릴리스 조합(`--features nl-io/onnx-import`)으로 빌드한 결과:
+
+  | 바이너리 | 오늘 | ONNX + `strip` | 차이 |
+  | --- | ---: | ---: | ---: |
+  | `nl-app` | 87.0 | **85.9** | −1.1 |
+  | `nl-runtime` | 77.7 | **79.2** | +1.5 |
+  | `nl` | 71.0 | **70.9** | −0.1 |
+
+  ONNX 를 품고도 크기가 사실상 그대로다
 - **빌더 자동 업데이트 한 바퀴** — 루프백 서버가 광고한 새 버전을 배지로 알리고, 내려받고,
   적용해 실행 파일이 매니페스트의 sha256 으로 바뀌고 앱이 다시 뜨는 것까지. 지금까지
   `nl-update` 통합 시험 22건으로만 확인돼 있던 경로다
